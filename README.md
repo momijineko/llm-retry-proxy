@@ -2,6 +2,8 @@
 
 一个面向 LLM API 的本地反向代理转发工具。上游服务（如 Coding Plan）过载返回 503 时，自动按固定间隔重试，直到拿到数据。完整透传请求/响应（含 SSE 流式），对客户端透明。
 
+**本项目仅推荐使用串行轮询请求，请慎用竞速模式，不当使用会为模型供应商的服务端点带来极大压力，严重可能会导致您被封号或造成其他经济损失！竞速模式未经过人工测试，开发者不对该项功能的完整做任何保证！**
+
 ## 特性
 
 - 通用反向代理：透传所有路径、Header、Body、Query
@@ -233,7 +235,18 @@ http://127.0.0.1:8080/stats
 
 数据接口（可自行集成）：`GET /stats/api`，返回聚合后的 JSON。
 
-## 🙏 致谢
+## 推荐
+
+💡 [OpenCode](https://opencode.ai) — 本项目辅助开发工具，[使用邀请链接注册](https://opencode.ai/go?ref=RZ04W6NJYV) 双方各获 $5 额度
+
+🚀 [方舟 Coding Plan](https://volcengine.com/L/3H9VZa1bq1s/) — 支持 GLM-5.2、Kimi-K2.7、MiniMax-M3、DeepSeek-V4、Doubao-Seed-2.0 等模型，订阅叠加 9.5 折低至 9.4 元，邀请码：`EMXDHE8B`
+
+🧩 [智谱 Coding Plan](https://www.bigmodel.cn/glm-coding?ic=DPYG6NTSNI) — 国内顶流编程大模型，20+ 主流工具全适配，性价比拉满（笑死，根本抢不到）
+
+🌐 [Nube.sh](https://nube.sh/invite/660603280ZQ7QF) — 高性价比且强劲的弹性云服务器，基于 Zen 3 EPYC，1 vCPU + 1 GB DDR4 每月仅 $1.09 起
+
+
+## 致谢
 
 - [FastAPI](https://fastapi.tiangolo.com/) — 后端 Web 框架
 - [uvicorn](https://www.uvicorn.org/) — ASGI 服务器
@@ -241,7 +254,7 @@ http://127.0.0.1:8080/stats
 - [ECharts](https://echarts.apache.org/) — 统计面板图表库
 - 讯飞星辰 MaaS — 上游 LLM 服务
 
-## ⚠️ 免责声明
+## 免责声明
 
 本项目仅供个人学习与技术研究使用。
 
