@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+
+# Logs & runtime data
+logs/
+*.log
+*.jsonl
+*.jsonl.bak
+retry_log.jsonl.bak
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp

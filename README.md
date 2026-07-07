@@ -1,0 +1,235 @@
+# llm-retry-proxy
+
+一个面向 LLM API 的本地反向代理转发工具。上游服务（如 Coding Plan）过载返回 503 时，自动按固定间隔重试，直到拿到数据。完整透传请求/响应（含 SSE 流式），对客户端透明。
+
+## 特性
+
+- 通用反向代理：透传所有路径、Header、Body、Query
+- 支持 SSE 流式响应（`text/event-stream`），重试只发生在首字节之前，开始流式后不再重试
+- 503/502/504/529 自动重试，固定间隔
+- 默认有最大重试次数保护，可一键关闭（无限重试直到成功）
+- 响应头附带 `X-Forward-Attempts`，告知客户端本次请求重试了几次
+
+## 快速开始
+
+### 一键脚本
+
+三端各有一个脚本，功能一致：自动创建虚拟环境 `.venv`、安装依赖、首次交互式生成 `.env` 并启动服务。首次运行会引导配置：
+
+```
+上游地址 [https://maas-coding-api.cn-huabei-1.xf-yun.com/v2]:
+供应商标签，如 xfyun [xfyun]:
+监听端口 [8080]:
+重试间隔秒数 [1.0]:
+最大重试次数 (0=无限重试直到成功) [60]:
+```
+
+| 平台 | 脚本 | 运行方式 |
+|---|---|---|
+| Windows (CMD) | `setup.bat` | 双击，或命令行执行 |
+| Windows (PowerShell) | `setup.ps1` | `powershell -ExecutionPolicy Bypass -File setup.ps1` |
+| Linux / macOS | `setup.sh` | `bash setup.sh`（或 `chmod +x setup.sh && ./setup.sh`） |
+
+> PowerShell 若被执行策略拦截，加 `-ExecutionPolicy Bypass` 参数运行即可，仅对本次生效，不改动系统策略。
+
+回车即采用方括号内默认值。后续再次运行会跳过配置直接启动。
+
+### 手动
+
+```bash
+pip install -r requirements.txt
+
+# 配置上游（默认指向讯飞星火 MaaS）
+cp .env.example .env
+# 编辑 .env 修改 UPSTREAM_URL、LISTEN_PORT 等
+
+python main.py
+```
+
+假设上游是 `https://maas-coding-api.cn-huabei-1.xf-yun.com/v2`，本代理监听 `8080`：
+
+```bash
+# 原本调用
+curl https://maas-coding-api.cn-huabei-1.xf-yun.com/v2/chat/completions \
+  -H "Authorization: Bearer YOUR_KEY" -d @req.json
+
+# 改为调用本地代理（只换 host，路径/鉴权不变）
+curl http://127.0.0.1:8080/chat/completions \
+  -H "Authorization: Bearer YOUR_KEY" -d @req.json
+```
+
+## 配置项
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `UPSTREAM_URL` | `https://maas-coding-api.cn-huabei-1.xf-yun.com/v2` | 上游地址，不要带尾斜杠 |
+| `LISTEN_HOST` | `0.0.0.0` | 监听地址 |
+| `LISTEN_PORT` | `8080` | 监听端口 |
+| `RETRY_INTERVAL` | `1.0` | 重试间隔（秒），适用于 503/502/504/529 等 |
+| `RETRY_INTERVAL_429` | `5.0` | **429 专用**重试间隔（秒）。若上游 429 响应带 `Retry-After` 头，则优先使用该头指定的等待时间 |
+| `MAX_RETRIES` | `60` | 最大重试次数。**设为 `0` 表示无限重试**（关闭限制） |
+| `RETRY_STATUS_CODES` | `503,502,504,529,429` | 触发重试的上游状态码，逗号分隔 |
+| `HEDGE_MODE` | `off` | 竞速模式。`off`=串行重试（默认）；`race`=请求竞速，每轮一次性发 `MAX_CONCURRENT` 个，第一个 200 胜出取消其余；`stagger`=滚动竞速，按间隔交错发，非429错误立即补发 |
+| `MAX_CONCURRENT` | `10` | 竞速模式下同时在飞/每轮并发的最大请求数 |
+| `TIMEOUT` | `300` | 读写超时（秒），流式下指两次数据间最大间隔 |
+| `CONNECT_TIMEOUT` | `10` | 连接上游超时（秒） |
+| `PROVIDER` | `xfyun` | 供应商标签，写入每条重试记录，用于区分不同上游/账号 |
+| `EXTRA_UPSTREAMS` | （空） | 额外上游路由，按路径前缀分流。格式 `prefix\|url\|provider`，多组逗号分隔。匹配前缀的请求去掉前缀后转发到对应 `url`，未匹配的走默认 `UPSTREAM_URL`。详见下方[多上游路由](#多上游路由) |
+| `LOG_DIR` | `logs` | 日志目录。明细按天拆分为 `retry_YYYY-MM-DD.jsonl`，累计汇总存 `_summary.json` |
+| `LOG_RETENTION_DAYS` | `30` | 明细日志保留天数，超期自动删除（`0` = 不清理）。**累计汇总不受影响**，历史总量永久保留 |
+| `LOG_LEVEL` | `INFO` | 日志级别 |
+
+## 多上游路由
+
+通过 `EXTRA_UPSTREAMS` 可在同一个代理实例内同时转发多个上游端点，按**请求路径前缀**分流。匹配前缀的请求会**去掉前缀**后转发到对应上游；未匹配任何前缀的请求走默认 `UPSTREAM_URL`。
+
+### 配置格式
+
+```
+EXTRA_UPSTREAMS=prefix|url|provider,prefix|url|provider,...
+```
+
+- `prefix`：请求路径前缀（如 `/anthropic`），不带前导斜杠也行
+- `url`：对应上游地址（不要带尾斜杠）
+- `provider`：写入日志的供应商标签，用于统计面板区分；留空则取 `prefix` 去掉斜杠
+
+多组用逗号分隔，**长前缀优先匹配**（避免短前缀误吞）。
+
+### 示例
+
+默认上游是讯飞星火 MaaS（OpenAI 兼容），同时需要转发一个 Anthropic 端点：
+
+```env
+UPSTREAM_URL=https://maas-coding-api.cn-huabei-1.xf-yun.com/v2
+PROVIDER=xfyun
+EXTRA_UPSTREAMS=/anthropic|https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic|anthropic
+```
+
+| 客户端请求 | 匹配路由 | 实际转发到 |
+|---|---|---|
+| `POST /chat/completions` | 默认 | `https://.../v2/chat/completions` |
+| `POST /anthropic/v1/messages` | `/anthropic` | `https://.../anthropic/v1/messages` |
+
+> 前缀 `/anthropic` 被去掉，剩余路径 `v1/messages` 拼接到上游 `.../anthropic` 之后。鉴权头（如 `x-api-key`、`anthropic-version`）原样透传，对客户端完全透明。
+
+### 多组路由
+
+```env
+EXTRA_UPSTREAMS=/anthropic|https://api.anthropic.com|anthropic,/gemini|https://generativelanguage.googleapis.com|gemini
+```
+
+统计面板的「按供应商」表格会按 `provider` 标签分别统计各上游的可用率/重试次数。「按路径」表格则按原始请求路径（含前缀）聚合。
+
+## 重试行为说明
+
+- 仅当上游返回 `RETRY_STATUS_CODES` 中的状态码时重试；其它状态码（含 200、400、401 等）原样透传。
+- **429 特殊处理**：429 使用 `RETRY_INTERVAL_429`（默认 5s）而非 `RETRY_INTERVAL`；若上游 429 响应携带 `Retry-After` 头（秒数或 HTTP 日期），则优先按该头等待，更精准地配合上游限流策略。
+- 对于流式请求：先读取上游响应头与状态码，若为 503 则丢弃 body 并重试；一旦上游开始返回 200 并流式输出，中途断流**不**重试（已向客户端发送部分数据，重试会导致内容错乱）。
+- 请求异常（连接超时、网络断开等）同样会重试。
+- 达到 `MAX_RETRIES` 后返回一个 503 JSON 错误给客户端；`MAX_RETRIES=0` 时永不放弃。
+
+### 竞速模式（`HEDGE_MODE`）
+
+串行模式（`off`）下，每次只发一个请求，拿到 503 后等待间隔再发下一个。竞速模式则**同时发多个请求，谁先 200 谁赢**：
+
+**`HEDGE_MODE=race`（请求竞速）**：每轮一次性发 `MAX_CONCURRENT` 个请求，第一个返回 200 的胜出，其余立即取消。全部失败则等待间隔后下一轮。简单粗暴，最快命中，但对上游压力最大。
+
+**`HEDGE_MODE=stagger`（滚动竞速）**：按 `RETRY_INTERVAL` 间隔交错发请求，不一次性全打满。任意一个返回 200 → 立即取消所有在飞请求。某个返回 503（非429）→ 立即补发一个新请求。429 → 按 `RETRY_INTERVAL_429` 或 `Retry-After` 退避。`MAX_CONCURRENT` 限制同时在飞的上限。
+
+| 特性 | `off` | `race` | `stagger` |
+|---|---|---|---|
+| 并发 | 串行，1 个 | 每轮 N 个齐发 | 交错，逐步增长 |
+| 命中速度 | 最慢 | 最快 | 中等 |
+| 上游压力 | 最低 | 最高 | 中等 |
+| 适用场景 | 稳定上游 | 间歇 503，求快 | 间歇 503，求稳 |
+
+> **可用率口径**：统计面板区分两个口径——**上游可用率**（首次尝试即成功的请求占比，`retries==0 && final_status<400`，反映上游本身健康度）与**下游可用率**（经重试后最终返回客户端成功的占比，`final_status<400`，反映代理后的最终效果）。两者差值即为重试挽救的请求数，直观体现重试代理的价值。
+
+## 重试记录
+
+每个请求处理完成（成功或放弃）后，向 `LOG_DIR`（默认 `logs/`）追加一行 JSON 明细，便于后续做数据分析。
+
+**存储结构**：
+
+```
+logs/
+  retry_2026-07-07.jsonl   # 按天拆分的明细（每请求一行 JSON）
+  retry_2026-07-06.jsonl
+  ...
+  _summary.json            # 累计汇总（全局总量，原子写，不随明细清理而丢失）
+```
+
+- **明细按天拆分**：单文件不会无限增长，天然按时间分片。
+- **累计汇总**：`_summary.json` 保存全局累计指标（总请求/总重试/各模型各供应商累计计数），每次请求增量更新。即使明细被自动清理，累计总量永久保留。
+- **自动清理**：启动时删除超过 `LOG_RETENTION_DAYS` 天的明细文件（`0` = 不清理），`_summary.json` 不受影响。
+- **旧格式迁移**：首次启动若检测到旧的单文件 `retry_log.jsonl`，自动按日期拆分到 `logs/` 并重建累计汇总，旧文件重命名为 `.bak`。
+
+字段说明：
+
+| 字段 | 说明 |
+|---|---|
+| `ts` | 请求结束时间戳（ISO，毫秒精度） |
+| `method` | HTTP 方法 |
+| `path` | 请求路径 |
+| `provider` | 供应商，取自 `PROVIDER` 环境变量 |
+| `model` | 模型名，从请求 body 的 `model` 字段解析；无则为空字符串 |
+| `upstream_status` | 最后一次上游响应的状态码（请求异常时为 0） |
+| `final_status` | 返回给客户端的状态码（放弃重试时为 503） |
+| `attempts` | 总尝试次数（含首次） |
+| `retries` | 重试次数 = `attempts - 1` |
+| `duration_s` | 总耗时（秒） |
+| `succeeded` | 是否最终拿到 2xx/3xx 响应（`final_status < 400`，4xx/5xx 视为失败） |
+| `retry_codes` | 重试过程中上游返回的错误码列表，如 `[503, 503, 429]`。无重试时为空数组 `[]`。用于统计面板的错误码分析 |
+
+示例：
+
+```json
+{"ts":"2026-07-07T11:52:35.123","method":"POST","path":"/chat/completions","provider":"xfyun","model":"spark-v4","upstream_status":200,"final_status":200,"attempts":3,"retries":2,"duration_s":0.852,"succeeded":true,"retry_codes":[503,503]}
+```
+
+快速分析示例：
+
+```bash
+# 各模型重试次数统计（当天）
+jq -s 'group_by(.model) | map({model:.[0].model, n:length, avg_retries:(map(.retries)|add/length)})' logs/retry_$(date +%Y-%m-%d).jsonl
+
+# 用 pandas
+python -c "import pandas as pd; df=pd.read_json('logs/retry_$(date +%Y-%m-%d).jsonl',lines=True); print(df.groupby('model')['retries'].agg(['count','mean','max']))"
+```
+
+## 健康检查
+
+```bash
+curl http://127.0.0.1:8080/health
+# {"status":"ok","upstream":"https://maas-coding-api.cn-huabei-1.xf-yun.com/v2","routes":[{"prefix":"/","upstream":"https://.../v2","provider":"xfyun"},{"prefix":"/anthropic","upstream":"https://.../anthropic","provider":"anthropic"}]}
+```
+
+`routes` 列出所有已配置路由（`/` 为默认上游）。
+
+## 可视化分析面板
+
+服务内置一个重试数据分析页面，基于日志实时统计，浏览器直接访问：
+
+```
+http://127.0.0.1:8080/stats
+```
+
+支持按时间范围切换：**今天 / 7天 / 30天 / 全部**。面板分两大区域：
+
+- **累计总览**：从 `_summary.json` 读取的全量历史指标（含已归档/清理的明细），O(1) 不扫文件
+- **明细分析**：对所选时间范围内的明细文件做完整聚合
+
+面板内容：
+
+- **总览**：总请求数、总重试次数、上游可用率、下游可用率、失败请求数、P95 耗时
+- **可用性分析**：当前连续（成功/失败）、最长连续失败、失败总数；各模型可用率柱状图（上游/下游对比，灰柱为上游、彩柱为下游）；失败原因（上游错误码，含触发重试的请求）；可用率时间趋势（上游/下游双线，含 95% 基准线）
+- **状态码分布**：上游状态码分布饼图（按实际状态码，如 200/401/503）；上游状态码柱状图（含重试过程中的错误码）；各模型状态码构成（堆叠柱状图，按实际状态码）
+- **重试分析**：重试次数分布直方图；重试负担分桶（0/1-5/6-20/21-50/>50 次）；上游错误码分布（含重试过程中的所有错误码）
+- **耗时分析**：平均/P50/P95/P99/最大耗时卡片；最慢/最快请求 Top 8 并排明细表（最快仅统计成功且耗时>0 的请求）
+- **时间模式**：按时段（0-23 点）请求数+上游/下游可用率；时间趋势（请求/重试/失败数）
+- **明细表**：按供应商、按模型（含上游/下游可用率、P95、主要失败码）、按路径 Top 10
+
+支持手动刷新与 15 秒自动刷新。页面通过 CDN 加载 ECharts，需能访问外网。
+
+数据接口（可自行集成）：`GET /stats/api`，返回聚合后的 JSON。
+

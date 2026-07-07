@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>重试分析面板 · llm-retry-proxy</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" onerror="window.__echartsFailed=true"></script>
+<style>
+  :root{
+    --bg:#f6f7fb; --bg-grad:linear-gradient(180deg,#eef1f8 0%,#f6f7fb 240px);
+    --card:#fff; --card-2:#fafbfd; --border:#e6e8ef; --border-strong:#d1d5e0;
+    --text:#0f172a; --text-2:#334155; --muted:#6b7280; --muted-2:#9ca3af;
+    --primary:#6366f1; --primary-d:#4f46e5; --primary-l:#eef2ff;
+    --ok:#10b981; --ok-l:#ecfdf5; --ok-d:#047857;
+    --warn:#f59e0b; --warn-l:#fffbeb; --warn-d:#b45309;
+    --danger:#ef4444; --danger-l:#fef2f2; --danger-d:#b91c1c;
+    --blue:#3b82f6; --blue-l:#eff6ff; --blue-d:#1d4ed8;
+    --gray:#94a3b8; --purple:#8b5cf6; --cyan:#06b6d4; --pink:#ec4899;
+    --radius:14px; --radius-sm:10px; --radius-xs:8px;
+    --shadow-xs:0 1px 2px rgba(15,23,42,.04);
+    --shadow:0 1px 3px rgba(15,23,42,.05),0 1px 2px rgba(15,23,42,.03);
+    --shadow-md:0 4px 12px -2px rgba(15,23,42,.08),0 2px 6px -2px rgba(15,23,42,.04);
+    --shadow-lg:0 12px 32px -8px rgba(15,23,42,.12),0 4px 12px -4px rgba(15,23,42,.06);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,sans-serif;background:var(--bg);background-image:var(--bg-grad);background-repeat:no-repeat;color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+
+  header{background:rgba(255,255,255,.85);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:12px 28px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:50}
+  header .brand{display:flex;align-items:center;gap:10px}
+  header .logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--primary),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;font-weight:700;box-shadow:0 2px 8px rgba(99,102,241,.35)}
+  header h1{font-size:16px;margin:0;font-weight:700;letter-spacing:-.01em}
+  header .sub{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px}
+  header .sub .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.15);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+  header .spacer{flex:1}
+  .btn{border:1px solid var(--border);background:var(--card);color:var(--text-2);padding:7px 14px;border-radius:var(--radius-xs);cursor:pointer;font-size:13px;font-weight:500;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
+  .btn:hover{border-color:var(--primary);color:var(--primary);background:var(--primary-l);box-shadow:var(--shadow-xs)}
+  .btn:active{transform:translateY(1px)}
+  .btn-primary{background:var(--primary);border-color:var(--primary);color:#fff}
+  .btn-primary:hover{background:var(--primary-d);border-color:var(--primary-d);color:#fff;box-shadow:0 2px 8px rgba(99,102,241,.3)}
+  .switch{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--muted);cursor:pointer;user-select:none}
+  .switch input{accent-color:var(--primary);cursor:pointer}
+  .switch input:checked+span{color:var(--primary);font-weight:500}
+
+  main{max-width:1520px;margin:0 auto;padding:22px 28px 56px}
+  .sec-title{font-size:14px;font-weight:700;margin:32px 0 16px;display:flex;align-items:center;gap:10px;color:var(--text);letter-spacing:-.005em}
+  .sec-title:first-of-type{margin-top:10px}
+  .sec-title::before{content:"";width:4px;height:16px;border-radius:2px;background:linear-gradient(180deg,var(--primary),var(--purple));flex-shrink:0}
+  .sec-title .count{font-size:12px;font-weight:500;color:var(--muted);background:var(--card);border:1px solid var(--border);padding:2px 8px;border-radius:99px}
+
+  .overview{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
+  .stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;box-shadow:var(--shadow);transition:all .2s;position:relative;overflow:hidden}
+  .stat-card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--primary),var(--purple));opacity:0;transition:opacity .2s}
+  .stat-card:hover{box-shadow:var(--shadow-md);transform:translateY(-1px);border-color:var(--border-strong)}
+  .stat-card:hover::before{opacity:1}
+  .stat-card .label{font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:500;display:flex;align-items:center;gap:6px}
+  .stat-card .label .ico{width:14px;height:14px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:9px}
+  .stat-card .value{font-size:28px;font-weight:800;line-height:1.1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .stat-card .hint{font-size:11px;color:var(--muted-2);margin-top:5px;font-weight:500}
+
+  .mini-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);transition:box-shadow .2s}
+  .card:hover{box-shadow:var(--shadow-md)}
+  .card h2{font-size:13px;margin:0 0 16px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:8px;letter-spacing:-.005em}
+  .card h2::before{content:"";width:3px;height:14px;border-radius:2px;background:var(--primary);flex-shrink:0}
+  .chart{width:100%;height:300px}
+  .chart.sm{height:264px}
+
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em;background:var(--card-2);position:sticky;top:0}
+  tbody tr{transition:background .12s}
+  tbody tr:hover{background:var(--primary-l)}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tbody tr:last-child td{border-bottom:none}
+
+  .pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600;letter-spacing:.01em}
+  .pill.ok{background:var(--ok-l);color:var(--ok-d)}
+  .pill.warn{background:var(--warn-l);color:var(--warn-d)}
+  .pill.danger{background:var(--danger-l);color:var(--danger-d)}
+  .pill::before{content:"";width:5px;height:5px;border-radius:50%;margin-right:5px}
+  .pill.ok::before{background:var(--ok)}
+  .pill.warn::before{background:var(--warn)}
+  .pill.danger::before{background:var(--danger)}
+  .badge{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;background:var(--warn-l);color:var(--warn-d);border:1px solid rgba(245,158,11,.2)}
+  .tag{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:600}
+  .empty{text-align:center;padding:56px 16px;color:var(--muted);font-size:14px}
+  .empty .icon{font-size:36px;display:block;margin-bottom:10px;opacity:.3}
+  .err-tip{display:none;background:var(--danger-l);border:1px solid rgba(239,68,68,.25);color:var(--danger-d);padding:11px 16px;border-radius:var(--radius-sm);font-size:13px;margin-bottom:16px;display:none;align-items:center;gap:8px}
+  .mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
+  .range-switch{display:flex;gap:2px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xs);padding:3px}
+  .range-switch .rs{border:none;background:transparent;color:var(--muted);padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;transition:all .15s}
+  .range-switch .rs:hover{color:var(--text);background:var(--bg)}
+  .range-switch .rs.active{background:var(--primary);color:#fff;box-shadow:0 1px 4px rgba(99,102,241,.3)}
+
+  .cfg-bar{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 20px;margin-bottom:16px;box-shadow:var(--shadow-xs);display:none}
+  .cfg-bar .cfg-item{display:flex;align-items:center;gap:6px;font-size:13px}
+  .cfg-bar .cfg-item .k{color:var(--muted);font-size:12px}
+  .cfg-bar .cfg-item .v{color:var(--text);font-weight:600}
+  .cfg-bar .sep{width:1px;height:16px;background:var(--border)}
+
+  .section-wrap{animation:fadeIn .3s ease}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+
+  .scroll-table{max-height:400px;overflow-y:auto;border-radius:var(--radius-xs)}
+  .scroll-table::-webkit-scrollbar{width:6px;height:6px}
+  .scroll-table::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:3px}
+  .scroll-table::-webkit-scrollbar-track{background:transparent}
+
+  @media(max-width:1100px){.overview{grid-template-columns:repeat(3,1fr)}.mini-cards{grid-template-columns:1fr}.grid2,.grid3{grid-template-columns:1fr}}
+  @media(max-width:640px){header{flex-wrap:wrap;gap:8px;padding:10px 16px}main{padding:16px}.overview{grid-template-columns:repeat(2,1fr)}.stat-card{padding:14px}.stat-card .value{font-size:22px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">R</div>
+    <div>
+      <h1>重试分析面板</h1>
+      <span class="sub"><span class="dot"></span><span id="lastUpdate">尚未加载</span></span>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <div class="range-switch">
+    <button class="rs active" data-range="today">今天</button>
+    <button class="rs" data-range="7d">7天</button>
+    <button class="rs" data-range="30d">30天</button>
+    <button class="rs" data-range="all">全部</button>
+  </div>
+  <label class="switch"><input type="checkbox" id="autoRefresh"><span>自动刷新 (15s)</span></label>
+  <button class="btn btn-primary" id="refreshBtn">刷新</button>
+</header>
+<main>
+  <div class="err-tip" id="errTip">ECharts 加载失败，请检查网络连接（需访问 CDN）。</div>
+
+  <div id="cfgBar" class="cfg-bar">
+    <div style="display:flex;flex-wrap:wrap;gap:20px;align-items:center">
+      <div class="cfg-item"><span class="k">重试状态码</span><span class="v" id="cfg_codes"></span></div>
+      <div class="sep"></div>
+      <div class="cfg-item"><span class="k">间隔</span><span class="v mono" id="cfg_interval"></span></div>
+      <div class="sep"></div>
+      <div class="cfg-item"><span class="k">429间隔</span><span class="v mono" id="cfg_interval_429"></span></div>
+      <div class="sep"></div>
+      <div class="cfg-item"><span class="k">最大重试</span><span class="v mono" id="cfg_max"></span></div>
+      <div class="sep"></div>
+      <div class="cfg-item"><span class="k">超时</span><span class="v mono" id="cfg_timeout"></span></div>
+    </div>
+  </div>
+
+  <div id="emptyState" class="empty" style="display:none">
+    <span class="icon">○</span>
+    暂无重试日志数据。产生一些请求后刷新即可看到分析。
+  </div>
+
+  <div id="cumSection" class="section-wrap" style="display:none">
+    <div class="sec-title">累计总览 <span class="count">全量历史 · 含已归档明细</span></div>
+    <div class="overview">
+      <div class="stat-card"><div class="label">累计请求数</div><div class="value" id="c_total">-</div></div>
+      <div class="stat-card"><div class="label">累计重试</div><div class="value" id="c_retries">-</div><div class="hint" id="c_retries_hint"></div></div>
+      <div class="stat-card"><div class="label">累计上游可用率</div><div class="value" id="c_upstream">-</div></div>
+      <div class="stat-card"><div class="label">累计下游可用率</div><div class="value" id="c_avail">-</div></div>
+      <div class="stat-card"><div class="label">累计失败</div><div class="value" id="c_fail">-</div></div>
+      <div class="stat-card"><div class="label">统计区间</div><div class="value" id="c_first" style="font-size:13px;line-height:1.4">-</div><div class="hint" id="c_last"></div></div>
+    </div>
+    <div class="grid2" style="margin-bottom:14px;margin-top:14px">
+      <div class="card"><h2>累计状态码分布</h2><div id="cumStatusChart" class="chart sm"></div></div>
+      <div class="card"><h2>累计各模型</h2>
+        <div class="scroll-table"><table><thead><tr><th>模型</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">最大</th></tr></thead><tbody id="cumModelTbody"></tbody></table></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="noDetail" class="empty" style="display:none">本时段范围内无明细记录（累计数据见上方）。</div>
+
+  <div id="content" class="section-wrap" style="display:none">
+    <div class="sec-title">明细分析 <span class="count" id="rangeLabel">今天</span></div>
+    <div class="overview">
+      <div class="stat-card"><div class="label">总请求数</div><div class="value" id="s_total">-</div></div>
+      <div class="stat-card"><div class="label">总重试次数</div><div class="value" id="s_retries">-</div><div class="hint" id="s_retries_hint"></div></div>
+      <div class="stat-card"><div class="label">上游可用率</div><div class="value" id="s_upstream">-</div><div class="hint">首次即成功</div></div>
+      <div class="stat-card"><div class="label">下游可用率</div><div class="value" id="s_avail">-</div><div class="hint" id="s_avail_hint"></div></div>
+      <div class="stat-card"><div class="label">失败请求</div><div class="value" id="s_fail">-</div></div>
+      <div class="stat-card"><div class="label">P95 耗时</div><div class="value" id="s_p95">-</div><div class="hint">秒</div></div>
+    </div>
+
+    <div class="sec-title">可用性分析</div>
+    <div class="mini-cards">
+      <div class="stat-card"><div class="label">当前连续</div><div class="value" id="a_cur">-</div><div class="hint" id="a_cur_hint"></div></div>
+      <div class="stat-card"><div class="label">最长连续失败</div><div class="value" id="a_worst">-</div><div class="hint">次</div></div>
+      <div class="stat-card"><div class="label">失败请求总数</div><div class="value" id="a_failed">-</div><div class="hint" id="a_failed_hint"></div></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h2>各模型可用率</h2><div id="availModelChart" class="chart sm"></div></div>
+      <div class="card"><h2>失败原因（上游状态码）</h2><div id="failCauseChart" class="chart sm"></div></div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>可用率时间趋势</h2><div id="availTimelineChart" class="chart sm"></div></div>
+
+    <div class="sec-title">状态码分布</div>
+    <div class="grid2">
+      <div class="card"><h2>上游状态码分布</h2><div id="statusCatChart" class="chart sm"></div></div>
+      <div class="card"><h2>上游状态码</h2><div id="upstreamStatusChart" class="chart sm"></div></div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>各模型状态码构成</h2><div id="statusByModelChart" class="chart"></div></div>
+
+    <div class="sec-title">重试分析</div>
+    <div class="grid2">
+      <div class="card"><h2>重试次数分布</h2><div id="distChart" class="chart sm"></div></div>
+      <div class="card"><h2>重试负担分桶</h2><div id="burdenChart" class="chart sm"></div></div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>上游错误码分布（含重试）</h2><div id="errorCodesChart" class="chart sm"></div></div>
+
+    <div class="sec-title">耗时分析</div>
+    <div class="overview" style="grid-template-columns:repeat(5,1fr)">
+      <div class="stat-card"><div class="label">平均</div><div class="value" id="d_avg">-</div><div class="hint">秒</div></div>
+      <div class="stat-card"><div class="label">P50</div><div class="value" id="d_p50">-</div><div class="hint">秒</div></div>
+      <div class="stat-card"><div class="label">P95</div><div class="value" id="d_p95">-</div><div class="hint">秒</div></div>
+      <div class="stat-card"><div class="label">P99</div><div class="value" id="d_p99">-</div><div class="hint">秒</div></div>
+      <div class="stat-card"><div class="label">最大</div><div class="value" id="d_max">-</div><div class="hint">秒</div></div>
+    </div>
+    <div class="grid2" style="margin-top:14px">
+      <div class="card"><h2>最慢请求 Top 8</h2>
+        <div class="scroll-table"><table><thead><tr><th>时间</th><th>模型</th><th>路径</th><th class="num">耗时(s)</th><th class="num">重试</th><th class="num">上游码</th><th>结果</th></tr></thead><tbody id="slowTbody"></tbody></table></div>
+      </div>
+      <div class="card"><h2>最快请求 Top 8</h2>
+        <div class="scroll-table"><table><thead><tr><th>时间</th><th>模型</th><th>路径</th><th class="num">耗时(s)</th><th class="num">重试</th><th class="num">上游码</th><th>结果</th></tr></thead><tbody id="fastTbody"></tbody></table></div>
+      </div>
+    </div>
+
+    <div class="sec-title">时间模式</div>
+    <div class="grid2">
+      <div class="card"><h2>按时段（0-23点）</h2><div id="byHourChart" class="chart"></div></div>
+      <div class="card"><h2>时间趋势（请求数 / 重试数）</h2><div id="timelineChart" class="chart"></div></div>
+    </div>
+
+    <div class="sec-title">明细</div>
+    <div class="grid2">
+      <div class="card"><h2>按供应商</h2>
+        <div class="scroll-table"><table><thead><tr><th>供应商</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">最大</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">P95(s)</th><th>主失败码</th></tr></thead><tbody id="providerTbody"></tbody></table></div>
+      </div>
+      <div class="card"><h2>按模型</h2>
+        <div class="scroll-table"><table><thead><tr><th>模型</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">最大</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">P95(s)</th><th>主失败码</th></tr></thead><tbody id="modelTbody"></tbody></table></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>按路径 Top 10（按重试数）</h2>
+      <div class="scroll-table"><table><thead><tr><th>路径</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">最大</th><th class="num">上游可用率</th><th class="num">下游可用率</th></tr></thead><tbody id="pathTbody"></tbody></table></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const charts={};
+function C(id){if(window.__echartsFailed)return null;if(!charts[id])charts[id]=echarts.init(document.getElementById(id));return charts[id]}
+window.addEventListener('resize',()=>Object.values(charts).forEach(c=>c&&c.resize()));
+const COL={primary:'#6366f1',ok:'#10b981',warn:'#f59e0b',danger:'#ef4444',blue:'#3b82f6',gray:'#94a3b8',purple:'#8b5cf6',cyan:'#06b6d4',pink:'#ec4899'};
+const CATCOL={'2xx':'#10b981','3xx':'#3b82f6','4xx':'#f59e0b','5xx':'#ef4444','exception':'#94a3b8'};
+const PALETTE=['#6366f1','#10b981','#f59e0b','#ef4444','#3b82f6','#8b5cf6','#06b6d4','#ec4899','#94a3b8','#f97316'];
+
+function availColor(p){return p>=95?COL.ok:p>=80?COL.warn:COL.danger}
+function ratePill(r){const c=r>=0.95?'ok':r>=0.8?'warn':'danger';return `<span class="pill ${c}">${(r*100).toFixed(1)}%</span>`}
+function pctPill(p){const c=p>=95?'ok':p>=80?'warn':'danger';return `<span class="pill ${c}">${p.toFixed(1)}%</span>`}
+function statusTag(s,cat){return `<span class="tag" style="background:${CATCOL[cat]||COL.gray}1a;color:${CATCOL[cat]||COL.gray}">${s===0?'异常':s}</span>`}
+function esc(s){return String(s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}
+function fmtTs(ts){
+  if(currentRange==='today')return ts.slice(11,16);
+  if(currentRange==='7d'||currentRange==='30d')return ts.slice(5,13).replace('T',' ');
+  return ts.slice(5,10);
+}
+
+function renderOverview(s,d){
+  document.getElementById('s_total').textContent=s.total_requests;
+  document.getElementById('s_retries').textContent=s.total_retries;
+  document.getElementById('s_retries_hint').textContent=s.total_requests?`每请求 ${(s.total_retries/s.total_requests).toFixed(2)} 次`:'';
+  const ua=s.upstream_availability_pct,ue=document.getElementById('s_upstream');
+  ue.textContent=ua.toFixed(1)+'%';ue.style.color=availColor(ua);
+  const a=s.availability_pct,ae=document.getElementById('s_avail');
+  ae.textContent=a.toFixed(1)+'%';ae.style.color=availColor(a);
+  document.getElementById('s_avail_hint').textContent=`上游 ${ua.toFixed(1)}% · ${s.failed_requests} 次失败`;
+  document.getElementById('s_fail').textContent=s.failed_requests;
+  document.getElementById('s_p95').textContent=d.p95;
+}
+
+function renderAvailability(a){
+  document.getElementById('a_cur').textContent=a.current_streak;
+  document.getElementById('a_cur_hint').textContent=a.current_streak_type==='success'?'连续成功':a.current_streak_type==='failure'?'连续失败':'';
+  const ce=document.getElementById('a_cur');
+  ce.style.color=a.current_streak_type==='success'?COL.ok:a.current_streak_type==='failure'?COL.danger:COL.text;
+  document.getElementById('a_worst').textContent=a.worst_failure_streak;
+  document.getElementById('a_failed').textContent=a.failed_count;
+}
+
+function renderAvailModelChart(data){
+  const c=C('availModelChart');if(!c)return;
+  const names=data.map(d=>esc(d.model||'(unknown)'));
+  c.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},formatter:p=>p.map(x=>`${x.marker}${x.seriesName}: ${x.value}%`).join('<br>')},legend:{data:['上游可用率','下游可用率'],top:0,textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:16},grid:{left:50,right:20,top:36,bottom:40},xAxis:{type:'category',data:names,axisLabel:{rotate:names.length>4?25:0,color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:{type:'value',max:100,name:'%',nameTextStyle:{color:'#9ca3af',fontSize:11},axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},series:[
+    {name:'上游可用率',type:'bar',barGap:'10%',data:data.map(d=>({value:d.upstream_availability_pct,itemStyle:{color:COL.gray,borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',formatter:'{c}%',fontSize:10,color:'#6b7280'}},
+    {name:'下游可用率',type:'bar',data:data.map(d=>({value:d.availability_pct,itemStyle:{color:availColor(d.availability_pct),borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',formatter:'{c}%',fontSize:10,color:'#6b7280'}},
+  ]});
+}
+function renderFailCauseChart(data){
+  const c=C('failCauseChart');if(!c)return;
+  if(!data.length){c.setOption({title:{text:'无上游错误',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});return}
+  c.setOption({tooltip:{trigger:'axis'},grid:{left:60,right:24,top:16,bottom:20},xAxis:{type:'value',axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},yAxis:{type:'category',data:data.map(d=>d.status===0?'异常(0)':String(d.status)),axisLabel:{color:'#6b7280',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},series:[{type:'bar',data:data.map(d=>({value:d.count,itemStyle:{color:CATCOL[d.category]||COL.gray,borderRadius:[0,4,4,0]}})),label:{show:true,position:'right',fontSize:10,color:'#6b7280'},barWidth:'60%'}]});
+}
+function renderAvailTimelineChart(data){
+  const c=C('availTimelineChart');if(!c)return;
+  c.setOption({tooltip:{trigger:'axis'},legend:{data:['上游可用率','下游可用率'],top:0,textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:16},grid:{left:50,right:20,top:36,bottom:40},xAxis:{type:'category',data:data.map(d=>fmtTs(d.ts)),axisLabel:{rotate:data.length>8?30:0,color:'#9ca3af',fontSize:10},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:{type:'value',max:100,name:'可用率%',nameTextStyle:{color:'#9ca3af',fontSize:11},axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},series:[
+    {name:'上游可用率',type:'line',smooth:true,data:data.map(d=>d.upstream_availability_pct),itemStyle:{color:COL.gray},lineStyle:{width:2},symbol:'none',markLine:{data:[{yAxis:95,lineStyle:{color:COL.warn,type:'dashed',width:1.5},label:{formatter:'95%',color:COL.warn,fontSize:10}}],symbol:'none'}},
+    {name:'下游可用率',type:'line',smooth:true,data:data.map(d=>d.availability_pct),itemStyle:{color:COL.ok},lineStyle:{width:2.5},symbol:'none',areaStyle:{opacity:.08,color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(16,185,129,.25)'},{offset:1,color:'rgba(16,185,129,0)'}]}}},
+  ]});
+}
+
+function renderStatusCatChart(data){
+  const c=C('statusCatChart');if(!c)return;
+  function codeColor(code){const s=parseInt(code);if(isNaN(s)||s===0)return COL.gray;if(s<300)return COL.ok;if(s<400)return COL.blue;if(s<500)return COL.warn;return COL.danger}
+  c.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{bottom:0,type:'scroll',textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:12},series:[{type:'pie',radius:['38%','62%'],center:['50%','44%'],data:data.map(d=>{const label=d.status===0?'异常':String(d.status);return{name:label,value:d.count,itemStyle:{color:codeColor(d.status),borderColor:'#fff',borderWidth:2}}}),label:{formatter:'{b}\n{d}%',fontSize:11,color:'#334155'},itemStyle:{borderColor:'#fff',borderWidth:2},emphasis:{scaleSize:6}}]});
+}
+function renderStatusBar(id,data,title){
+  const c=C(id);if(!c)return;
+  if(!data.length){c.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});return}
+  c.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},grid:{left:40,right:20,top:16,bottom:30},xAxis:{type:'category',data:data.map(d=>d.status===0?'异常':String(d.status)),axisLabel:{rotate:data.length>6?30:0,color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:{type:'value',axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},series:[{type:'bar',data:data.map(d=>({value:d.count,itemStyle:{color:CATCOL[d.category]||COL.gray,borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',fontSize:10,color:'#6b7280'},barWidth:'55%'}]});
+}
+function renderStatusByModelChart(data){
+  const c=C('statusByModelChart');if(!c)return;
+  if(!data.length){c.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});return}
+  const names=data.map(d=>esc(d.model||'(unknown)'));
+  const codes=Object.keys(data[0]).filter(k=>k!=='model'&&k!=='total').sort((a,b)=>parseInt(a)-parseInt(b));
+  const labels=codes.map(k=>k==='0'?'异常':k);
+  function codeColor(code){const s=parseInt(code);if(s===0)return COL.gray;if(s<300)return COL.ok;if(s<400)return COL.blue;if(s<500)return COL.warn;return COL.danger}
+  c.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{data:labels,top:0,textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:16},grid:{left:50,right:20,top:36,bottom:40},xAxis:{type:'category',data:names,axisLabel:{rotate:names.length>4?25:0,color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:{type:'value',axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},series:codes.map((k,i)=>({name:labels[i],type:'bar',stack:'total',data:data.map(d=>d[k]||0),itemStyle:{color:codeColor(k)},emphasis:{focus:'series'},barWidth:'55%'}))});
+}
+
+function renderDistChart(data){
+  const c=C('distChart');if(!c)return;
+  c.setOption({tooltip:{trigger:'axis',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},grid:{left:46,right:20,top:16,bottom:40},xAxis:{type:'category',data:data.map(d=>d.retries),name:'重试次数',nameTextStyle:{color:'#9ca3af',fontSize:11},axisLabel:{color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:{type:'value',axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},series:[{type:'bar',data:data.map(d=>({value:d.count,itemStyle:{color:COL.blue,borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',fontSize:10,color:'#6b7280'},barWidth:'55%'}]});
+}
+function renderBurdenChart(data){
+  const c=C('burdenChart');if(!c)return;
+  const colors=[COL.ok,COL.blue,COL.warn,COL.danger,COL.purple];
+  c.setOption({tooltip:{trigger:'axis',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},grid:{left:46,right:20,top:16,bottom:30},xAxis:{type:'category',data:data.map(d=>d.bucket),axisLabel:{color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:{type:'value',axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},series:[{type:'bar',data:data.map((d,i)=>({value:d.count,itemStyle:{color:colors[i%colors.length],borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',fontSize:10,color:'#6b7280'},barWidth:'55%'}]});
+}
+
+function renderDetailTable(tbodyId, rows){
+  document.getElementById(tbodyId).innerHTML=rows.map(r=>`<tr>
+    <td class="mono">${esc(r.ts).slice(0,19)}</td><td>${esc(r.model)}</td><td class="mono">${esc(r.path)}</td>
+    <td class="num">${r.duration_s}</td><td class="num">${r.retries}</td>
+    <td class="num">${r.upstream_status===0?'异常':r.upstream_status}</td>
+    <td>${r.succeeded?'<span class="pill ok">成功</span>':'<span class="pill danger">失败</span>'}</td></tr>`).join('');
+}
+
+function renderByHourChart(data){
+  const c=C('byHourChart');if(!c)return;
+  c.setOption({tooltip:{trigger:'axis',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{data:['请求数','重试数','上游可用率%','下游可用率%'],top:0,textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:16},grid:{left:50,right:50,top:36,bottom:30},xAxis:{type:'category',data:data.map(d=>d.hour+'点'),axisLabel:{color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:[{type:'value',name:'数量',nameTextStyle:{color:'#9ca3af',fontSize:11},axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},{type:'value',name:'可用率%',max:100,axisLabel:{formatter:'{value}',color:'#9ca3af',fontSize:11},splitLine:{show:false},axisLine:{show:false},axisTick:{show:false}}],series:[
+    {name:'请求数',type:'bar',data:data.map(d=>d.requests),itemStyle:{color:COL.primary,borderRadius:[4,4,0,0]},barGap:'20%'},
+    {name:'重试数',type:'bar',data:data.map(d=>d.retries),itemStyle:{color:COL.warn,borderRadius:[4,4,0,0]}},
+    {name:'上游可用率%',type:'line',yAxisIndex:1,smooth:true,data:data.map(d=>d.upstream_availability_pct),itemStyle:{color:COL.gray},lineStyle:{width:2},symbol:'none'},
+    {name:'下游可用率%',type:'line',yAxisIndex:1,smooth:true,data:data.map(d=>d.availability_pct),itemStyle:{color:COL.ok},lineStyle:{width:2.5},symbol:'none'},
+  ]});
+}
+function renderTimelineChart(data){
+  const c=C('timelineChart');if(!c)return;
+  c.setOption({tooltip:{trigger:'axis',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{data:['请求数','重试数','失败数'],top:0,textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:16},grid:{left:50,right:20,top:36,bottom:40},xAxis:{type:'category',data:data.map(d=>fmtTs(d.ts)),axisLabel:{rotate:data.length>8?30:0,color:'#9ca3af',fontSize:10},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:{type:'value',axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},series:[
+    {name:'请求数',type:'line',smooth:true,data:data.map(d=>d.requests),itemStyle:{color:COL.primary},lineStyle:{width:2.5},symbol:'none',areaStyle:{opacity:.08,color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(99,102,241,.25)'},{offset:1,color:'rgba(99,102,241,0)'}]}}},
+    {name:'重试数',type:'line',smooth:true,data:data.map(d=>d.retries),itemStyle:{color:COL.warn},lineStyle:{width:2},symbol:'none',areaStyle:{opacity:.08,color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(245,158,11,.25)'},{offset:1,color:'rgba(245,158,11,0)'}]}}},
+    {name:'失败数',type:'line',smooth:true,data:data.map(d=>d.failed),itemStyle:{color:COL.danger},lineStyle:{width:2},symbol:'none'},
+  ]});
+}
+
+function renderAggTable(id,data,key){
+  document.getElementById(id).innerHTML=data.map(d=>`<tr>
+    <td class="mono">${esc(d[key])||'(unknown)'}</td>
+    <td class="num">${d.requests}</td><td class="num">${d.retries}</td>
+    <td class="num">${d.avg_retries}</td>
+    <td class="num"><span class="badge">${d.max_retries}</span></td>
+    <td class="num">${pctPill(d.upstream_availability_pct)}</td>
+    <td class="num">${pctPill(d.availability_pct)}</td>
+    <td class="num">${d.p95_duration}</td>
+    <td>${d.dominant_fail_status!==null?`<span class="tag" style="background:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}1a;color:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}">${d.dominant_fail_status===0?'异常':d.dominant_fail_status}×${d.fail_status_count}</span>`:'-'}</td>
+  </tr>`).join('');
+}
+function renderPathTable(data){
+  document.getElementById('pathTbody').innerHTML=data.map(d=>`<tr>
+    <td class="mono">${esc(d.path)}</td><td class="num">${d.requests}</td>
+    <td class="num">${d.retries}</td><td class="num">${d.avg_retries}</td>
+    <td class="num"><span class="badge">${d.max_retries}</span></td>
+    <td class="num">${pctPill(d.upstream_availability_pct)}</td>
+    <td class="num">${pctPill(d.availability_pct)}</td></tr>`).join('');
+}
+
+let currentRange='today';
+const RANGE_LABELS={today:'今天','7d':'近 7 天','30d':'近 30 天',all:'全部历史'};
+function statusColorStr(s){s=parseInt(s);return s===0?COL.gray:s<300?COL.ok:s<400?COL.blue:s<500?COL.warn:COL.danger}
+
+function renderCumulative(c){
+  document.getElementById('c_total').textContent=c.total_requests;
+  document.getElementById('c_retries').textContent=c.total_retries;
+  document.getElementById('c_retries_hint').textContent=c.total_requests?('每请求 '+c.avg_retries+' 次'):'';
+  const ue=document.getElementById('c_upstream');const ua=c.upstream_availability_pct||0;ue.textContent=ua.toFixed(1)+'%';ue.style.color=availColor(ua);
+  const ae=document.getElementById('c_avail');ae.textContent=c.availability_pct.toFixed(1)+'%';ae.style.color=availColor(c.availability_pct);
+  document.getElementById('c_fail').textContent=c.failed;
+  document.getElementById('c_first').textContent=c.first_ts?c.first_ts.slice(0,16).replace('T',' '):'-';
+  document.getElementById('c_last').textContent=c.last_ts?('至 '+c.last_ts.slice(0,16).replace('T',' ')):'';
+  const cc=C('cumStatusChart');
+  if(cc){if(c.by_status&&c.by_status.length){cc.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{bottom:0,type:'scroll',textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:12},series:[{type:'pie',radius:['38%','62%'],center:['50%','44%'],data:c.by_status.map(d=>({name:d.status==='0'?'异常':d.status,value:d.count,itemStyle:{color:statusColorStr(d.status),borderColor:'#fff',borderWidth:2}})),label:{formatter:'{b}\n{d}%',fontSize:11,color:'#334155'},emphasis:{scaleSize:6}}]});}else{cc.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}})}}
+  document.getElementById('cumModelTbody').innerHTML=(c.by_model||[]).map(m=>`<tr><td class="mono">${esc(m.name)}</td><td class="num">${m.requests}</td><td class="num">${m.retries}</td><td class="num">${m.avg_retries}</td><td class="num">${pctPill(m.upstream_availability_pct||0)}</td><td class="num">${pctPill(m.availability_pct)}</td><td class="num"><span class="badge">${m.max_retries}</span></td></tr>`).join('');
+}
+
+async function load(){
+  try{
+    const r=await fetch('/stats/api?range='+currentRange);const d=await r.json();
+    const detail=d.detail||{};const cum=d.cumulative||{};
+    document.getElementById('rangeLabel').textContent=RANGE_LABELS[d.range]||d.range;
+    const cumHas=cum.total_requests>0;
+    document.getElementById('cumSection').style.display=cumHas?'block':'none';
+    if(cumHas)renderCumulative(cum);
+    const empty=detail.summary.total_requests===0;
+    document.getElementById('content').style.display=empty?'none':'block';
+    document.getElementById('noDetail').style.display=(empty&&cumHas)?'block':'none';
+    document.getElementById('emptyState').style.display=(!cumHas&&empty)?'block':'none';
+    if(!empty){
+      renderOverview(detail.summary,detail.duration_stats);
+      renderAvailability(detail.availability);
+      renderAvailModelChart(detail.by_model);
+      renderFailCauseChart(detail.failure_causes);
+      renderAvailTimelineChart(detail.timeline);
+      renderStatusCatChart(detail.status_categories);
+      renderStatusBar('upstreamStatusChart',detail.upstream_status_codes,'上游状态码');
+      renderStatusByModelChart(detail.status_by_model);
+      renderDistChart(detail.retry_distribution);
+      renderBurdenChart(detail.retry_burden);
+      renderStatusBar('errorCodesChart',detail.upstream_error_codes,'上游错误码');
+      document.getElementById('d_avg').textContent=detail.duration_stats.avg;
+      document.getElementById('d_p50').textContent=detail.duration_stats.p50;
+      document.getElementById('d_p95').textContent=detail.duration_stats.p95;
+      document.getElementById('d_p99').textContent=detail.duration_stats.p99;
+      document.getElementById('d_max').textContent=detail.duration_stats.max;
+      renderDetailTable('slowTbody', detail.slowest_requests);
+      renderDetailTable('fastTbody', detail.fastest_requests);
+      renderByHourChart(detail.by_hour);
+      renderTimelineChart(detail.timeline);
+      renderAggTable('providerTbody',detail.by_provider,'provider');
+      renderAggTable('modelTbody',detail.by_model,'model');
+      renderPathTable(detail.by_path);
+    }
+    document.getElementById('lastUpdate').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN');
+    if(window.__echartsFailed)document.getElementById('errTip').style.display='flex';
+  }catch(e){document.getElementById('lastUpdate').textContent='加载失败: '+e.message}
+}
+document.getElementById('refreshBtn').addEventListener('click',load);
+document.querySelectorAll('.rs').forEach(b=>b.addEventListener('click',()=>{
+  currentRange=b.dataset.range;
+  document.querySelectorAll('.rs').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  load();
+}));
+let timer=null;
+document.getElementById('autoRefresh').addEventListener('change',e=>{if(e.target.checked){timer=setInterval(load,15000)}else if(timer){clearInterval(timer);timer=null}});
+load();
+</script>
+</body>
+</html>
