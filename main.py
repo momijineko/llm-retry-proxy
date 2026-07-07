@@ -80,6 +80,15 @@ SKIP_RESPONSE_HEADERS = {
     "keep-alive", "content-encoding",
 }
 
+EXCLUDE_PATHS = {
+    "favicon.ico", "robots.txt", "sitemap.xml",
+    "manifest.json", "site.webmanifest", "browserconfig.xml",
+}
+
+
+def _is_excluded_path(path: str) -> bool:
+    return path.lstrip("/").lower() in EXCLUDE_PATHS
+
 
 def _build_routes() -> list:
     routes = []
@@ -133,7 +142,7 @@ def _today_str() -> str:
 
 def _new_summary() -> dict:
     return {
-        "version": 4,
+        "version": 5,
         "total_requests": 0, "total_retries": 0,
         "total_succeeded": 0, "total_failed": 0, "total_first_ok": 0,
         "by_provider": {}, "by_model": {}, "by_status": {},
@@ -220,7 +229,10 @@ def _rebuild_summary_from_files() -> dict:
                     if not line:
                         continue
                     try:
-                        _update_summary_mem(summary, json.loads(line))
+                        rec = json.loads(line)
+                        if _is_excluded_path(rec.get("path", "")):
+                            continue
+                        _update_summary_mem(summary, rec)
                     except json.JSONDecodeError:
                         continue
         except Exception:
@@ -409,6 +421,8 @@ def load_log_records(days: int = 1) -> list:
                         continue
                     try:
                         rec = json.loads(line)
+                        if _is_excluded_path(rec.get("path", "")):
+                            continue
                         rec["provider"] = _normalize_provider(rec.get("provider", ""))
                         records.append(rec)
                     except json.JSONDecodeError:
@@ -1124,6 +1138,8 @@ async def _hedge_request(method, url, req_headers, body, path, t0):
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
 )
 async def proxy(path: str, request: Request):
+    if _is_excluded_path(path):
+        return Response(status_code=404)
     method = request.method
     upstream_url, provider, remaining = match_route(path)
     url = f"{upstream_url}/{remaining}" if remaining else upstream_url
