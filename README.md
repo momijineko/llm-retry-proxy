@@ -104,7 +104,7 @@ EXTRA_UPSTREAMS=prefix|url|provider,prefix|url|provider,...
 ```env
 UPSTREAM_URL=https://maas-coding-api.cn-huabei-1.xf-yun.com/v2
 PROVIDER=xfyun
-EXTRA_UPSTREAMS=/anthropic|https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic|anthropic
+EXTRA_UPSTREAMS=/anthropic|https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic|xfyun
 ```
 
 | 客户端请求 | 匹配路由 | 实际转发到 |
