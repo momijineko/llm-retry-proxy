@@ -233,3 +233,25 @@ http://127.0.0.1:8080/stats
 
 数据接口（可自行集成）：`GET /stats/api`，返回聚合后的 JSON。
 
+## 🙏 致谢
+
+- [FastAPI](https://fastapi.tiangolo.com/) — 后端 Web 框架
+- [uvicorn](https://www.uvicorn.org/) — ASGI 服务器
+- [httpx](https://www.python-httpx.org/) — 异步 HTTP 客户端
+- [ECharts](https://echarts.apache.org/) — 统计面板图表库
+- 讯飞星辰 MaaS — 上游 LLM 服务
+
+## ⚠️ 免责声明
+
+本项目仅供个人学习与技术研究使用。
+
+- 本项目为本地反向代理转发工具，不对任何上游服务的稳定性、可用性负责
+- 使用者应自行确保遵守上游服务（如 LLM API 提供方）的服务条款与使用限制
+- 不得用于绕过上游限流、计费或访问控制等用途
+- 本项目不向用户收取任何费用
+- 使用者应遵守相关平台规则与当地法律法规
+
+## 📄 License
+
+[MIT](LICENSE)
+
