@@ -43,10 +43,22 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, Response
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+if sys.platform == "win32":
+    os.system("")
+
+
+class _ColorFmt(logging.Formatter):
+    _LV = {"DEBUG": "36", "INFO": "32", "WARNING": "33", "ERROR": "31"}
+
+    def format(self, record):
+        t = time.strftime("%H:%M:%S", time.localtime(record.created))
+        c = self._LV.get(record.levelname, "")
+        return f"\033[90m{t}\033[0m \033[{c}m{record.levelname[0]}\033[0m {record.getMessage()}"
+
+
+_h = logging.StreamHandler()
+_h.setFormatter(_ColorFmt())
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), handlers=[_h])
 logger = logging.getLogger("forward")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
@@ -361,7 +373,19 @@ def filter_headers(headers, skip: set) -> dict:
 
 def _tag(method: str, path: str, provider: str, model: str) -> str:
     m = f"{provider}/{model}" if model else (provider or "?")
-    return f"[{method} /{path}] [{m}]"
+    return f"[{method} /{path}] [\033[36m{m}\033[0m]"
+
+
+def _sc(s) -> str:
+    if s == 0:
+        return "\033[91mERR\033[0m"
+    if s < 300:
+        return f"\033[32m{s}\033[0m"
+    if s < 400:
+        return f"\033[34m{s}\033[0m"
+    if s < 500:
+        return f"\033[33m{s}\033[0m"
+    return f"\033[31m{s}\033[0m"
 
 
 def parse_model(body: bytes) -> str:
@@ -898,8 +922,7 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
             tasks.add(asyncio.create_task(do_send(total_sent)))
 
         logger.info(
-            f"{_tag(method, path, provider, model)} 竞速第{round_num}轮，并发{to_fire}个(#{batch_start + 1}-#{total_sent})，"
-            f"累计{total_sent}，{time.time() - t0:.1f}s"
+            f"{_tag(method, path, provider, model)} R{round_num} {to_fire}发(#{batch_start + 1}-#{total_sent}) {time.time() - t0:.1f}s"
         )
 
         winner = None
@@ -919,7 +942,7 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
                 if kind == "error":
                     last_status = 0
                     retry_codes.append(0)
-                    logger.warning(f"{_tag(method, path, provider, model)} 竞速#{attempt_num}异常({time.time() - t0:.1f}s): {result!r}")
+                    logger.warning(f"{_tag(method, path, provider, model)} ERR #{attempt_num}({time.time() - t0:.1f}s): {result!r}")
                 elif result.status_code in RETRY_STATUS_CODES:
                     last_status = result.status_code
                     retry_codes.append(result.status_code)
@@ -929,9 +952,9 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
                         w = parse_retry_after(ra_header)
                         if w is not None:
                             saw_429_wait = max(saw_429_wait, w)
-                        logger.warning(f"{_tag(method, path, provider, model)} 竞速#{attempt_num} 429({time.time() - t0:.1f}s)")
+                        logger.warning(f"{_tag(method, path, provider, model)} {_sc(429)} #{attempt_num}({time.time() - t0:.1f}s)")
                     else:
-                        logger.warning(f"{_tag(method, path, provider, model)} 竞速#{attempt_num} {result.status_code}({time.time() - t0:.1f}s)")
+                        logger.warning(f"{_tag(method, path, provider, model)} {_sc(result.status_code)} #{attempt_num}({time.time() - t0:.1f}s)")
                     to_close.append(result)
                 else:
                     winner = result
@@ -965,8 +988,7 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
 
         if winner is not None:
             logger.info(
-                f"{_tag(method, path, provider, model)} -> {winner.status_code}#{winner_attempt}竞速胜出"
-                f"(第{round_num}轮，共发{total_sent}，{time.time() - t0:.2f}s)"
+                f"{_tag(method, path, provider, model)} -> {_sc(winner.status_code)} #{winner_attempt}胜出(R{round_num},{total_sent}发) {time.time() - t0:.2f}s"
             )
             return winner, winner_attempt, total_sent, last_status, retry_codes
 
@@ -978,8 +1000,7 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
         else:
             wait = RETRY_INTERVAL
         logger.info(
-            f"{_tag(method, path, provider, model)} 竞速第{round_num}轮全部失败，{wait:.1f}s后下一轮，"
-            f"累计{time.time() - t0:.1f}s"
+            f"{_tag(method, path, provider, model)} R{round_num}全败 {wait:.1f}s后 {time.time() - t0:.1f}s"
         )
         await asyncio.sleep(wait)
 
@@ -1037,7 +1058,7 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
             now = time.time()
             wait = max(next_fire_allowed - now, 0.0)
             if wait > 0:
-                logger.info(f"{_tag(method, path, provider, model)} 429退避，等待{wait:.1f}s后继续，累计{now - t0:.1f}s")
+                logger.info(f"{_tag(method, path, provider, model)} {_sc(429)}退避 {wait:.1f}s {now - t0:.1f}s")
                 await asyncio.sleep(wait)
             now = time.time()
             if can_fire(now):
@@ -1063,7 +1084,7 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
                 total_sent += 1
                 new_task = asyncio.create_task(do_send(total_sent))
                 in_flight[new_task] = now
-                logger.info(f"{_tag(method, path, provider, model)} 交错补发#{total_sent}（在飞{len(in_flight)}），累计{now - t0:.1f}s")
+                logger.info(f"{_tag(method, path, provider, model)} 补发#{total_sent}(在飞{len(in_flight)}) {now - t0:.1f}s")
             continue
 
         for task in done:
@@ -1075,7 +1096,7 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
             if kind == "error":
                 last_status = 0
                 retry_codes.append(0)
-                logger.warning(f"{_tag(method, path, provider, model)} 请求异常#{attempt_num}({now - t0:.1f}s): {result!r}，立即补发")
+                logger.warning(f"{_tag(method, path, provider, model)} ERR #{attempt_num}({now - t0:.1f}s) {result!r} 立即补发")
                 if can_fire(now):
                     total_sent += 1
                     new_task = asyncio.create_task(do_send(total_sent))
@@ -1094,13 +1115,13 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
                         wait_src = "Retry-After"
                     next_fire_allowed = max(next_fire_allowed, now + wait)
                     logger.warning(
-                        f"{_tag(method, path, provider, model)} 上游429#{attempt_num}，{wait:.1f}s后允许补发({wait_src})，"
-                        f"在飞{len(in_flight)}，累计{now - t0:.1f}s"
+                        f"{_tag(method, path, provider, model)} {_sc(429)} #{attempt_num} {wait:.1f}s({wait_src}) "
+                        f"在飞{len(in_flight)} {now - t0:.1f}s"
                     )
                 else:
                     logger.warning(
-                        f"{_tag(method, path, provider, model)} 上游{result.status_code}#{attempt_num}，立即补发，"
-                        f"在飞{len(in_flight)}，累计{now - t0:.1f}s"
+                        f"{_tag(method, path, provider, model)} {_sc(result.status_code)} #{attempt_num} 立即补发 "
+                        f"在飞{len(in_flight)} {now - t0:.1f}s"
                     )
                     if can_fire(now):
                         total_sent += 1
@@ -1117,8 +1138,7 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
                 winner_attempt = attempt_num
                 last_status = result.status_code
                 logger.info(
-                    f"{_tag(method, path, provider, model)} -> {result.status_code}#{attempt_num}竞速胜出"
-                    f"(共发{total_sent}，耗时{now - t0:.2f}s)"
+                    f"{_tag(method, path, provider, model)} -> {_sc(result.status_code)} #{attempt_num}胜出({total_sent}发) {now - t0:.2f}s"
                 )
                 break
 
@@ -1149,7 +1169,7 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
             total_sent += 1
             new_task = asyncio.create_task(do_send(total_sent))
             in_flight[new_task] = now
-            logger.info(f"{_tag(method, path, provider, model)} 交错补发#{total_sent}（在飞{len(in_flight)}），累计{now - t0:.1f}s")
+            logger.info(f"{_tag(method, path, provider, model)} 补发#{total_sent}(在飞{len(in_flight)}) {now - t0:.1f}s")
 
     return winner, winner_attempt, total_sent, last_status, retry_codes
 
@@ -1188,7 +1208,7 @@ async def proxy(path: str, request: Request):
             content_type = winner.headers.get("content-type")
             status = winner.status_code
 
-            logger.info(f"{_tag(method, path, provider, model)} -> {status} #{winner_attempt}竞速胜出 (共发{total_sent}，{time.time()-t0:.2f}s)")
+            logger.info(f"{_tag(method, path, provider, model)} -> {_sc(status)} #{winner_attempt}胜出({total_sent}发) {time.time()-t0:.2f}s")
 
             await write_log({
                 "ts": datetime.now().isoformat(timespec="milliseconds"),
@@ -1220,7 +1240,7 @@ async def proxy(path: str, request: Request):
             )
         else:
             logger.error(
-                f"{_tag(method, path, provider, model)} 竞速耗尽(共发{total_sent})，放弃 (耗时 {time.time()-t0:.1f}s)"
+                f"{_tag(method, path, provider, model)} 放弃({total_sent}发) {time.time()-t0:.1f}s"
             )
             await write_log({
                 "ts": datetime.now().isoformat(timespec="milliseconds"),
@@ -1256,7 +1276,7 @@ async def proxy(path: str, request: Request):
         if MAX_RETRIES > 0 and attempt > MAX_RETRIES:
             total = attempt - 1
             logger.error(
-                f"{_tag(method, path, provider, model)} 达到最大重试次数 {MAX_RETRIES}，放弃 (耗时 {time.time()-t0:.1f}s)"
+                f"{_tag(method, path, provider, model)} 放弃({MAX_RETRIES}次) {time.time()-t0:.1f}s"
             )
             await write_log({
                 "ts": datetime.now().isoformat(timespec="milliseconds"),
@@ -1297,7 +1317,7 @@ async def proxy(path: str, request: Request):
             retry_codes.append(0)
             elapsed = time.time() - cycle_start
             sleep_for = max(RETRY_INTERVAL - elapsed, 0.0)
-            logger.warning(f"{_tag(method, path, provider, model)} 请求异常 (attempt {attempt}, {elapsed:.2f}s): {e!r}，{sleep_for:.2f}s后重试")
+            logger.warning(f"{_tag(method, path, provider, model)} ERR #{attempt}({elapsed:.2f}s) {e!r} {sleep_for:.2f}s后重试")
             await asyncio.sleep(sleep_for)
             continue
 
@@ -1327,8 +1347,8 @@ async def proxy(path: str, request: Request):
             else:
                 sleep_for = max(wait - elapsed, 0.0)
             logger.warning(
-                f"{_tag(method, path, provider, model)} 上游返回 {response.status_code} (attempt {attempt})，"
-                f"本轮{elapsed:.2f}s，{sleep_for:.2f}s后重试({wait_src})，累计 {time.time()-t0:.1f}s"
+                f"{_tag(method, path, provider, model)} {_sc(response.status_code)} #{attempt} "
+                f"{sleep_for:.2f}s后重试({wait_src}) 总{time.time()-t0:.1f}s"
             )
             await asyncio.sleep(sleep_for)
             continue
@@ -1339,7 +1359,7 @@ async def proxy(path: str, request: Request):
         status = response.status_code
         last_status = status
 
-        logger.info(f"{_tag(method, path, provider, model)} -> {status} (attempt {attempt}, {time.time()-t0:.2f}s)")
+        logger.info(f"{_tag(method, path, provider, model)} -> {_sc(status)} #{attempt} {time.time()-t0:.2f}s")
 
         await write_log({
             "ts": datetime.now().isoformat(timespec="milliseconds"),
