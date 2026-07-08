@@ -51,7 +51,7 @@ class _ColorFmt(logging.Formatter):
     _LV = {"DEBUG": "36", "INFO": "32", "WARNING": "33", "ERROR": "31"}
 
     def format(self, record):
-        t = time.strftime("%H:%M:%S", time.localtime(record.created))
+        t = time.strftime("%m-%d %H:%M:%S", time.localtime(record.created))
         c = self._LV.get(record.levelname, "")
         return f"\033[90m{t}\033[0m \033[{c}m{record.levelname[0]}\033[0m {record.getMessage()}"
 
@@ -1110,12 +1110,12 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
                     wait = parse_retry_after(ra_header)
                     if wait is None:
                         wait = RETRY_INTERVAL_429
-                        wait_src = "429-default"
+                        wait_src = ""
                     else:
-                        wait_src = "Retry-After"
+                        wait_src = "RA"
                     next_fire_allowed = max(next_fire_allowed, now + wait)
                     logger.warning(
-                        f"{_tag(method, path, provider, model)} {_sc(429)} #{attempt_num} {wait:.1f}s({wait_src}) "
+                        f"{_tag(method, path, provider, model)} {_sc(429)} #{attempt_num} {wait:.1f}s{f'({wait_src})' if wait_src else ''} "
                         f"在飞{len(in_flight)} {now - t0:.1f}s"
                     )
                 else:
@@ -1330,25 +1330,25 @@ async def proxy(path: str, request: Request):
                 wait = parse_retry_after(ra_header)
                 if wait is None:
                     wait = RETRY_INTERVAL_429
-                    wait_src = "429-default"
+                    wait_src = ""
                 else:
-                    wait_src = "Retry-After"
+                    wait_src = "RA"
             else:
                 wait = RETRY_INTERVAL
-                wait_src = "default"
+                wait_src = ""
             try:
                 await response.aread()
             except Exception:
                 pass
             await response.aclose()
             elapsed = time.time() - cycle_start
-            if wait_src == "Retry-After":
+            if wait_src == "RA":
                 sleep_for = wait
             else:
                 sleep_for = max(wait - elapsed, 0.0)
             logger.warning(
                 f"{_tag(method, path, provider, model)} {_sc(response.status_code)} #{attempt} "
-                f"{sleep_for:.2f}s后重试({wait_src}) 总{time.time()-t0:.1f}s"
+                f"{sleep_for:.2f}s后重试{f'({wait_src})' if wait_src else ''} 总{time.time()-t0:.1f}s"
             )
             await asyncio.sleep(sleep_for)
             continue
