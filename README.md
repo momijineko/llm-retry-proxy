@@ -67,11 +67,15 @@ curl http://127.0.0.1:8080/chat/completions \
 | `UPSTREAM_URL` | `https://maas-coding-api.cn-huabei-1.xf-yun.com/v2` | 上游地址，不要带尾斜杠 |
 | `LISTEN_HOST` | `0.0.0.0` | 监听地址 |
 | `LISTEN_PORT` | `8080` | 监听端口 |
-| `RETRY_INTERVAL` | `1.0` | 重试间隔（秒），适用于 503/502/504/529 等 |
-| `RETRY_INTERVAL_429` | `5.0` | **429 专用**重试间隔（秒）。若上游 429 响应带 `Retry-After` 头，则优先使用该头指定的等待时间 |
+| `RETRY_INTERVAL` | `1.0` | 重试间隔（秒），适用于 503/502/504/529 等，作为非429指数退避的基数 |
+| `RETRY_BACKOFF` | `false` | 非429状态码（503/502/504/529）指数退避开关。**默认关闭**，保持固定间隔。开启后连续失败时等待时间按 `1→2→4→8→16→32→60s` 指数递增（含 ±20% 抖动），缓解上游持续过载 |
+| `RETRY_BACKOFF_MAX` | `60` | 非429指数退避等待上限（秒）。退避值不会超过此值 |
+| `RETRY_INTERVAL_429` | `5.0` | **429 专用**重试间隔（秒），作为指数退避的基数。若上游 429 响应带 `Retry-After` 头，则优先使用该头指定的等待时间 |
+| `RETRY_BACKOFF_429` | `true` | 429 指数退避开关。**默认开启**。开启后连续 429 时等待时间按 `5→10→20→40→60s` 指数递增（含 ±20% 抖动），避免多 Agent 同步重试触发 429 雪崩。关闭则回退到固定 `RETRY_INTERVAL_429` |
+| `RETRY_BACKOFF_MAX_429` | `60` | 429 指数退避等待上限（秒）。退避值不会超过此值 |
 | `MAX_RETRIES` | `60` | 最大重试次数。**设为 `0` 表示无限重试**（关闭限制） |
 | `RETRY_STATUS_CODES` | `503,502,504,529,429` | 触发重试的上游状态码，逗号分隔 |
-| `HEDGE_MODE` | `off` | 竞速模式。`off`=串行重试（默认）；`race`=请求竞速，每轮一次性发 `MAX_CONCURRENT` 个，第一个 200 胜出取消其余；`stagger`=滚动竞速，按间隔交错发，非429错误立即补发 |
+| `HEDGE_MODE` | `off` | 竞速模式。`off`=串行重试（默认）；`race`=请求竞速，每轮一次性发 `MAX_CONCURRENT` 个，第一个 200 胜出取消其余；`stagger`=滚动竞速，按间隔交错发，非429错误立即补发（或按退避延迟） |
 | `MAX_CONCURRENT` | `10` | 竞速模式下同时在飞/每轮并发的最大请求数 |
 | `TIMEOUT` | `300` | 读写超时（秒），流式下指两次数据间最大间隔 |
 | `CONNECT_TIMEOUT` | `10` | 连接上游超时（秒） |
@@ -126,6 +130,8 @@ EXTRA_UPSTREAMS=/anthropic|https://api.anthropic.com|anthropic,/gemini|https://g
 
 - 仅当上游返回 `RETRY_STATUS_CODES` 中的状态码时重试；其它状态码（含 200、400、401 等）原样透传。
 - **429 特殊处理**：429 使用 `RETRY_INTERVAL_429`（默认 5s）而非 `RETRY_INTERVAL`；若上游 429 响应携带 `Retry-After` 头（秒数或 HTTP 日期），则优先按该头等待，更精准地配合上游限流策略。
+- **429 指数退避**（默认开启，`RETRY_BACKOFF_429=true`）：连续收到 429 时，等待时间按 `5→10→20→40→60s` 指数递增（基数 = `RETRY_INTERVAL_429`，倍率 = 2，上限 = `RETRY_BACKOFF_MAX_429`），并叠加 ±20% 随机抖动（jitter）以避免多 Agent 同步重试导致 429 雪崩。`Retry-After` 头仍优先，退避值取 `max(Retry-After, 指数退避值)`。设为 `false` 可回退到固定间隔模式。收到非 429 的重试状态码会重置 429 退避计数器。
+- **非429 指数退避**（默认关闭，`RETRY_BACKOFF=false`）：开启后，连续收到 503/502/504/529 等非429重试状态码时，等待时间按 `1→2→4→8→16→32→60s` 指数递增（基数 = `RETRY_INTERVAL`，倍率 = 2，上限 = `RETRY_BACKOFF_MAX`），同样含 ±20% 抖动。适用于上游持续过载的场景，避免固定 1s 间隔不断冲击已过载的服务端。关闭时保持固定 `RETRY_INTERVAL` 行为。收到 429 会重置非429退避计数器。
 - 对于流式请求：先读取上游响应头与状态码，若为 503 则丢弃 body 并重试；一旦上游开始返回 200 并流式输出，中途断流**不**重试（已向客户端发送部分数据，重试会导致内容错乱）。
 - 请求异常（连接超时、网络断开等）同样会重试。
 - 达到 `MAX_RETRIES` 后返回一个 503 JSON 错误给客户端；`MAX_RETRIES=0` 时永不放弃。
@@ -136,7 +142,7 @@ EXTRA_UPSTREAMS=/anthropic|https://api.anthropic.com|anthropic,/gemini|https://g
 
 **`HEDGE_MODE=race`（请求竞速）**：每轮一次性发 `MAX_CONCURRENT` 个请求，第一个返回 200 的胜出，其余立即取消。全部失败则等待间隔后下一轮。简单粗暴，最快命中，但对上游压力最大。
 
-**`HEDGE_MODE=stagger`（滚动竞速）**：按 `RETRY_INTERVAL` 间隔交错发请求，不一次性全打满。任意一个返回 200 → 立即取消所有在飞请求。某个返回 503（非429）→ 立即补发一个新请求。429 → 按 `RETRY_INTERVAL_429` 或 `Retry-After` 退避。`MAX_CONCURRENT` 限制同时在飞的上限。
+**`HEDGE_MODE=stagger`（滚动竞速）**：按 `RETRY_INTERVAL` 间隔交错发请求，不一次性全打满。任意一个返回 200 → 立即取消所有在飞请求。某个返回 503（非429）→ 立即补发一个新请求（`RETRY_BACKOFF=true` 时改为按指数退避延迟补发）。429 → 按 `RETRY_INTERVAL_429` 或 `Retry-After` 退避。`MAX_CONCURRENT` 限制同时在飞的上限。
 
 | 特性 | `off` | `race` | `stagger` |
 |---|---|---|---|

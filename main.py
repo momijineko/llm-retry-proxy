@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 import json
+import random
 from collections import Counter, defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -68,6 +69,10 @@ LISTEN_HOST = os.getenv("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8080"))
 RETRY_INTERVAL = float(os.getenv("RETRY_INTERVAL", "1.0"))
 RETRY_INTERVAL_429 = float(os.getenv("RETRY_INTERVAL_429", "5.0"))
+RETRY_BACKOFF_429 = os.getenv("RETRY_BACKOFF_429", "true").lower() in ("1", "true", "yes", "on")
+RETRY_BACKOFF_MAX_429 = float(os.getenv("RETRY_BACKOFF_MAX_429", "60"))
+RETRY_BACKOFF = os.getenv("RETRY_BACKOFF", "false").lower() in ("1", "true", "yes", "on")
+RETRY_BACKOFF_MAX = float(os.getenv("RETRY_BACKOFF_MAX", "60"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "60"))
 RETRY_STATUS_CODES = set(
     int(x) for x in os.getenv("RETRY_STATUS_CODES", "503,502,504,529,429").split(",") if x.strip()
@@ -351,7 +356,9 @@ async def lifespan(app: FastAPI):
             logger.info(f"  路由: /* -> {upstream_url}  (provider={provider}, 默认)")
     retry_desc = f"无限" if MAX_RETRIES <= 0 else str(MAX_RETRIES)
     mode_desc = {"off": "串行重试", "race": "请求竞速(一次并发)", "stagger": "滚动竞速(交错补发)"}.get(HEDGE_MODE, HEDGE_MODE)
-    logger.info(f"重试: 间隔={RETRY_INTERVAL}s, 429间隔={RETRY_INTERVAL_429}s(优先Retry-After), 最大次数={retry_desc}, 状态码={sorted(RETRY_STATUS_CODES)}")
+    backoff_429_desc = f"指数退避(上限{RETRY_BACKOFF_MAX_429:.0f}s)" if RETRY_BACKOFF_429 else "固定间隔"
+    backoff_desc = f"指数退避(上限{RETRY_BACKOFF_MAX:.0f}s)" if RETRY_BACKOFF else "固定间隔"
+    logger.info(f"重试: 间隔={RETRY_INTERVAL}s+{backoff_desc}, 429={RETRY_INTERVAL_429}s+{backoff_429_desc}(优先Retry-After), 最大次数={retry_desc}, 状态码={sorted(RETRY_STATUS_CODES)}")
     logger.info(f"模式: {mode_desc}" + (f", 最大并发={MAX_CONCURRENT}" if HEDGE_MODE != "off" else ""))
     logger.info(f"记录: provider={PROVIDER}, 日志目录={LOG_DIR}, 保留{LOG_RETENTION_DAYS}天")
     logger.info(f"代理: trust_env={'是(跟随系统代理)' if TRUST_ENV else '否(直连)'}")
@@ -418,6 +425,35 @@ def parse_retry_after(header_value: Optional[str]) -> Optional[float]:
         return max((dt - now).total_seconds(), 0.0)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _calc_backoff_wait(
+    consecutive: int,
+    base: float,
+    max_cap: float,
+    enabled: bool,
+    ra_wait: Optional[float] = None,
+) -> tuple[float, str]:
+    """计算重试等待时间（指数退避）。返回 (wait_seconds, wait_source)。
+
+    指数退避开启时：base * 2^(n-1)，上限 max_cap，含 ±20% 抖动（jitter）。
+    抖动用于避免多 Agent 同步重试导致 429 雪崩。
+    ra_wait（Retry-After）存在时取 max(ra_wait, backoff)，确保不短于服务端要求。
+    退避关闭时：ra_wait 存在用 ra_wait，否则用 base（保持原固定间隔行为）。
+    """
+    if enabled and consecutive > 0:
+        raw = base * (2 ** (consecutive - 1))
+        capped = min(raw, max_cap)
+        jittered = min(capped * random.uniform(0.8, 1.2), max_cap)
+        if ra_wait is not None:
+            if jittered > ra_wait:
+                return jittered, "RA+EB"
+            return ra_wait, "RA"
+        return jittered, "EB"
+    # 退避关闭：保持原行为
+    if ra_wait is not None:
+        return ra_wait, "RA"
+    return base, ""
 
 
 async def write_log(record: dict):
@@ -861,6 +897,10 @@ def compute_stats(records: list, range_str: str = "today") -> dict:
             "retry_status_codes": sorted(RETRY_STATUS_CODES),
             "retry_interval": RETRY_INTERVAL,
             "retry_interval_429": RETRY_INTERVAL_429,
+            "retry_backoff": RETRY_BACKOFF,
+            "retry_backoff_max": RETRY_BACKOFF_MAX,
+            "retry_backoff_429": RETRY_BACKOFF_429,
+            "retry_backoff_max_429": RETRY_BACKOFF_MAX_429,
             "max_retries": MAX_RETRIES,
             "timeout": TIMEOUT,
         },
@@ -951,6 +991,8 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
     last_status = 0
     round_num = 0
     retry_codes = []
+    consecutive_429_rounds = 0
+    consecutive_non429_rounds = 0
 
     async def do_send(attempt_num):
         response: Optional[httpx.Response] = None
@@ -1055,11 +1097,16 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
             break
 
         if saw_429:
-            wait = saw_429_wait if saw_429_wait > 0 else RETRY_INTERVAL_429
+            consecutive_429_rounds += 1
+            consecutive_non429_rounds = 0
+            ra_wait = saw_429_wait if saw_429_wait > 0 else None
+            wait, wait_src = _calc_backoff_wait(consecutive_429_rounds, RETRY_INTERVAL_429, RETRY_BACKOFF_MAX_429, RETRY_BACKOFF_429, ra_wait)
         else:
-            wait = RETRY_INTERVAL
+            consecutive_429_rounds = 0
+            consecutive_non429_rounds += 1
+            wait, wait_src = _calc_backoff_wait(consecutive_non429_rounds, RETRY_INTERVAL, RETRY_BACKOFF_MAX, RETRY_BACKOFF)
         logger.info(
-            f"{_tag(method, path, provider, model)} R{round_num}全败 {wait:.1f}s后 {time.time() - t0:.1f}s"
+            f"{_tag(method, path, provider, model)} R{round_num}全败 {wait:.1f}s后{f'({wait_src})' if wait_src else ''} {time.time() - t0:.1f}s"
         )
         await asyncio.sleep(wait)
 
@@ -1067,7 +1114,7 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
 
 
 async def _hedge_request(method, url, req_headers, body, path, t0, provider, model):
-    """滚动竞速：按 RETRY_INTERVAL 交错发请求，非429错误立即补发，
+    """滚动竞速：按 RETRY_INTERVAL 交错发请求，非429错误立即补发（或按指数退避延迟），
     任意一个返回成功即取消其余。返回 (winner, winner_attempt, total_sent, last_status, retry_codes)。"""
     c = client
     assert c is not None
@@ -1078,6 +1125,8 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
     winner = None
     winner_attempt = 0
     next_fire_allowed = 0.0
+    consecutive_429 = 0
+    consecutive_non429 = 0
 
     async def do_send(attempt_num):
         response: Optional[httpx.Response] = None
@@ -1117,7 +1166,7 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
             now = time.time()
             wait = max(next_fire_allowed - now, 0.0)
             if wait > 0:
-                logger.info(f"{_tag(method, path, provider, model)} {_sc(429)}退避 {wait:.1f}s {now - t0:.1f}s")
+                logger.info(f"{_tag(method, path, provider, model)} 退避 {wait:.1f}s {now - t0:.1f}s")
                 await asyncio.sleep(wait)
             now = time.time()
             if can_fire(now):
@@ -1165,27 +1214,34 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
                 last_status = result.status_code
                 retry_codes.append(result.status_code)
                 if result.status_code == 429:
-                    ra_header = result.headers.get("retry-after")
-                    wait = parse_retry_after(ra_header)
-                    if wait is None:
-                        wait = RETRY_INTERVAL_429
-                        wait_src = ""
-                    else:
-                        wait_src = "RA"
+                    consecutive_429 += 1
+                    consecutive_non429 = 0
+                    ra_wait = parse_retry_after(result.headers.get("retry-after"))
+                    wait, wait_src = _calc_backoff_wait(consecutive_429, RETRY_INTERVAL_429, RETRY_BACKOFF_MAX_429, RETRY_BACKOFF_429, ra_wait)
                     next_fire_allowed = max(next_fire_allowed, now + wait)
                     logger.warning(
                         f"{_tag(method, path, provider, model)} {_sc(429)} #{attempt_num} {wait:.1f}s{f'({wait_src})' if wait_src else ''} "
                         f"在飞{len(in_flight)} {now - t0:.1f}s"
                     )
                 else:
-                    logger.warning(
-                        f"{_tag(method, path, provider, model)} {_sc(result.status_code)} #{attempt_num} 立即补发 "
-                        f"在飞{len(in_flight)} {now - t0:.1f}s"
-                    )
-                    if can_fire(now):
-                        total_sent += 1
-                        new_task = asyncio.create_task(do_send(total_sent))
-                        in_flight[new_task] = now
+                    consecutive_429 = 0
+                    consecutive_non429 += 1
+                    if RETRY_BACKOFF:
+                        wait, wait_src = _calc_backoff_wait(consecutive_non429, RETRY_INTERVAL, RETRY_BACKOFF_MAX, RETRY_BACKOFF)
+                        next_fire_allowed = max(next_fire_allowed, now + wait)
+                        logger.warning(
+                            f"{_tag(method, path, provider, model)} {_sc(result.status_code)} #{attempt_num} {wait:.1f}s{f'({wait_src})' if wait_src else ''} "
+                            f"在飞{len(in_flight)} {now - t0:.1f}s"
+                        )
+                    else:
+                        logger.warning(
+                            f"{_tag(method, path, provider, model)} {_sc(result.status_code)} #{attempt_num} 立即补发 "
+                            f"在飞{len(in_flight)} {now - t0:.1f}s"
+                        )
+                        if can_fire(now):
+                            total_sent += 1
+                            new_task = asyncio.create_task(do_send(total_sent))
+                            in_flight[new_task] = now
                 try:
                     await result.aread()
                 except Exception:
@@ -1328,6 +1384,8 @@ async def proxy(path: str, request: Request):
     attempt = 0
     last_status = 0
     retry_codes = []
+    consecutive_429 = 0
+    consecutive_non429 = 0
 
     while True:
         attempt += 1
@@ -1383,25 +1441,24 @@ async def proxy(path: str, request: Request):
         if response.status_code in RETRY_STATUS_CODES:
             last_status = response.status_code
             retry_codes.append(response.status_code)
-            # 429 优先使用 Retry-After 头，其次用 RETRY_INTERVAL_429；其它状态码用 RETRY_INTERVAL
+            # 429 使用指数退避（优先 Retry-After，取 max(RA, backoff)）；其它状态码可选指数退避（RETRY_BACKOFF）
             if response.status_code == 429:
-                ra_header = response.headers.get("retry-after")
-                wait = parse_retry_after(ra_header)
-                if wait is None:
-                    wait = RETRY_INTERVAL_429
-                    wait_src = ""
-                else:
-                    wait_src = "RA"
+                consecutive_429 += 1
+                consecutive_non429 = 0
+                ra_wait = parse_retry_after(response.headers.get("retry-after"))
+                wait, wait_src = _calc_backoff_wait(consecutive_429, RETRY_INTERVAL_429, RETRY_BACKOFF_MAX_429, RETRY_BACKOFF_429, ra_wait)
             else:
-                wait = RETRY_INTERVAL
-                wait_src = ""
+                consecutive_429 = 0
+                consecutive_non429 += 1
+                wait, wait_src = _calc_backoff_wait(consecutive_non429, RETRY_INTERVAL, RETRY_BACKOFF_MAX, RETRY_BACKOFF)
             try:
                 await response.aread()
             except Exception:
                 pass
             await response.aclose()
             elapsed = time.time() - cycle_start
-            if wait_src == "RA":
+            # Retry-After / 退避值是"从响应起等待"，不扣 elapsed；固定间隔是"最小周期"，扣 elapsed
+            if wait_src.startswith("RA"):
                 sleep_for = wait
             else:
                 sleep_for = max(wait - elapsed, 0.0)
