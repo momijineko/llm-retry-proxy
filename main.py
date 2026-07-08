@@ -67,6 +67,7 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LEGACY_LOG_FILE = os.getenv("LOG_FILE", "retry_log.jsonl")
 HEDGE_MODE = os.getenv("HEDGE_MODE", "off").lower()  # off / race / stagger
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "10"))
+TRUST_ENV = os.getenv("TRUST_ENV", "false").lower() in ("1", "true", "yes", "on")
 STATS_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats.html")
 SUMMARY_FILE = os.path.join(LOG_DIR, "_summary.json")
 
@@ -323,6 +324,7 @@ async def lifespan(app: FastAPI):
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(TIMEOUT, connect=CONNECT_TIMEOUT),
         limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
+        trust_env=TRUST_ENV,
     )
     logger.info("=" * 60)
     logger.info(f"转发服务启动: http://{LISTEN_HOST}:{LISTEN_PORT}")
@@ -336,6 +338,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"重试: 间隔={RETRY_INTERVAL}s, 429间隔={RETRY_INTERVAL_429}s(优先Retry-After), 最大次数={retry_desc}, 状态码={sorted(RETRY_STATUS_CODES)}")
     logger.info(f"模式: {mode_desc}" + (f", 最大并发={MAX_CONCURRENT}" if HEDGE_MODE != "off" else ""))
     logger.info(f"记录: provider={PROVIDER}, 日志目录={LOG_DIR}, 保留{LOG_RETENTION_DAYS}天")
+    logger.info(f"代理: trust_env={'是(跟随系统代理)' if TRUST_ENV else '否(直连)'}")
     logger.info(f"统计面板: http://127.0.0.1:{LISTEN_PORT}/stats")
     logger.info("=" * 60)
     yield
