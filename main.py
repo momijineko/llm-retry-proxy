@@ -572,6 +572,59 @@ def _agg_by(records: list, key: str, label: str, key_fn=None):
     return out
 
 
+def _window_label(mins: int) -> str:
+    if mins < 60:
+        return f"近{mins}分钟"
+    h = mins // 60
+    if mins % 60 == 0:
+        return f"近{h}小时"
+    return f"近{mins}分钟"
+
+
+def _upstream_window_stats(records: list) -> list:
+    """计算不同时间窗口的上游可用率（滑动窗口，从当前时间向前推）。
+    上游可用率 = 首次尝试即成功的请求占比（retries==0 && final_status<400）。
+    同时计算环比：与上一等长窗口（如近5分钟 vs 前5分钟）的百分点差值。
+    下游经重试后基本都 100%，无参考意义，不计算。"""
+    windows = [5, 15, 30, 60, 360, 1440]  # 5分钟/15分钟/30分钟/1小时/6小时/24小时
+    now = datetime.now()
+    parsed = []
+    for r in records:
+        ts = r.get("ts", "")
+        try:
+            parsed.append((datetime.fromisoformat(ts), r))
+        except (ValueError, TypeError):
+            continue
+    result = []
+    for mins in windows:
+        cutoff = now - timedelta(minutes=mins)
+        prev_cutoff = now - timedelta(minutes=mins * 2)
+        total = 0
+        first_ok = 0
+        prev_total = 0
+        prev_first_ok = 0
+        for t, r in parsed:
+            if t >= cutoff:
+                total += 1
+                if _req_succeeded(r) and r.get("retries", 0) == 0:
+                    first_ok += 1
+            elif t >= prev_cutoff:
+                prev_total += 1
+                if _req_succeeded(r) and r.get("retries", 0) == 0:
+                    prev_first_ok += 1
+        cur_ua = round(first_ok / total * 100, 2) if total else None
+        prev_ua = round(prev_first_ok / prev_total * 100, 2) if prev_total else None
+        result.append({
+            "window": mins,
+            "label": _window_label(mins),
+            "requests": total,
+            "upstream_availability_pct": cur_ua,
+            "prev_upstream_availability_pct": prev_ua,
+            "upstream_diff": round(cur_ua - prev_ua, 2) if (cur_ua is not None and prev_ua is not None) else None,
+        })
+    return result
+
+
 def compute_stats(records: list, range_str: str = "today") -> dict:
     total = len(records)
     total_retries = sum(r.get("retries", 0) for r in records)
@@ -871,15 +924,21 @@ async def stats_api(range: str = "today", model: str = ""):
     days = range_map.get(range, 1)
     records = load_log_records(days)
     available_models = sorted(set(r.get("model", "") for r in records if r.get("model", "")))
+    selected = set()
     if model:
         selected = {m.strip() for m in model.split(",") if m.strip()}
         records = [r for r in records if r.get("model", "") in selected]
+    # 滑动窗口上游可用率：始终从近2天记录计算，不受所选时间范围影响
+    window_records = load_log_records(2)
+    if selected:
+        window_records = [r for r in window_records if r.get("model", "") in selected]
     return {
         "detail": compute_stats(records, range),
         "cumulative": _cumulative_view(),
         "range": range,
         "record_count": len(records),
         "available_models": available_models,
+        "upstream_windows": _upstream_window_stats(window_records),
     }
 
 

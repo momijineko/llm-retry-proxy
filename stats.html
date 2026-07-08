@@ -176,6 +176,11 @@
     暂无重试日志数据。产生一些请求后刷新即可看到分析。
   </div>
 
+  <div id="windowSection" class="section-wrap" style="display:none">
+    <div class="sec-title">上游分时可用率 <span class="count">滑动窗口 · 实时</span></div>
+    <div class="overview" id="upstreamWindows"></div>
+  </div>
+
   <div id="cumSection" class="section-wrap" style="display:none">
     <div class="sec-title">累计总览 <span class="count">全量历史 · 含已归档明细</span></div>
     <div class="overview">
@@ -253,8 +258,9 @@
     <div class="sec-title">时间模式</div>
     <div class="grid2">
       <div class="card"><h2>按时段（0-23点）</h2><div id="byHourChart" class="chart"></div></div>
-      <div class="card"><h2>时间趋势（请求数 / 重试数）</h2><div id="timelineChart" class="chart"></div></div>
+      <div class="card"><h2>分时可用率（0-23点）</h2><div id="availByHourChart" class="chart"></div></div>
     </div>
+    <div class="card" style="margin-top:14px"><h2>时间趋势（请求数 / 重试数）</h2><div id="timelineChart" class="chart"></div></div>
 
     <div class="sec-title">明细</div>
     <div class="grid2">
@@ -333,6 +339,40 @@ function renderAvailTimelineChart(data){
   ]});
 }
 
+function renderAvailByHourChart(data){
+  const c=C('availByHourChart');if(!c)return;
+  c.setOption({
+    tooltip:{trigger:'axis',axisPointer:{type:'shadow'},formatter:p=>{
+      const h=data[p[0].dataIndex];
+      const failed=h.requests?Math.round(h.requests-h.availability_pct/100*h.requests):0;
+      return h.hour+'点<br/>请求数: '+h.requests+(h.requests?' · 失败 '+failed:'')+'<br/>'+p.map(x=>x.value!=null?x.marker+x.seriesName+': '+x.value+'%':'').join('<br/>');
+    }},
+    legend:{data:['上游可用率','下游可用率'],top:0,textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:16},
+    grid:{left:50,right:20,top:36,bottom:30},
+    xAxis:{type:'category',data:data.map(d=>d.hour+'点'),axisLabel:{color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},
+    yAxis:{type:'value',max:100,name:'可用率%',nameTextStyle:{color:'#9ca3af',fontSize:11},axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},
+    series:[
+      {name:'上游可用率',type:'bar',barGap:'10%',data:data.map(d=>({value:d.requests?d.upstream_availability_pct:null,itemStyle:{color:COL.gray,borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',formatter:p=>data[p.dataIndex].requests?p.value+'%':'',fontSize:9,color:'#6b7280'}},
+      {name:'下游可用率',type:'bar',data:data.map(d=>({value:d.requests?d.availability_pct:null,itemStyle:{color:availColor(d.availability_pct),borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',formatter:p=>data[p.dataIndex].requests?p.value+'%':'',fontSize:9,color:'#6b7280'},markLine:{data:[{yAxis:95,lineStyle:{color:COL.warn,type:'dashed',width:1.5},label:{formatter:'95%基准',color:COL.warn,fontSize:10}}],symbol:'none'}}
+    ]
+  });
+}
+function renderUpstreamWindows(data){
+  const container=document.getElementById('upstreamWindows');
+  container.innerHTML=data.map(w=>{
+    const ua=w.upstream_availability_pct;
+    const diff=w.upstream_diff;
+    const color=ua===null?'#9ca3af':availColor(ua);
+    const valStr=ua===null?'—':ua.toFixed(1)+'%';
+    let diffStr;
+    if(diff===null||diff===undefined)diffStr='<span style="color:#9ca3af">— 环比</span>';
+    else if(diff>0)diffStr='<span style="color:#10b981">↑'+diff.toFixed(1)+'pp</span>';
+    else if(diff<0)diffStr='<span style="color:#ef4444">↓'+(-diff).toFixed(1)+'pp</span>';
+    else diffStr='<span style="color:#9ca3af">→ 持平</span>';
+    const hint=w.requests===0?diffStr+' · 无请求':diffStr+' · '+w.requests+' 请求';
+    return '<div class="stat-card"><div class="label">'+w.label+'</div><div class="value" style="color:'+color+'">'+valStr+'</div><div class="hint">'+hint+'</div></div>';
+  }).join('');
+}
 function renderStatusCatChart(data){
   const c=C('statusCatChart');if(!c)return;
   function codeColor(code){const s=parseInt(code);if(isNaN(s)||s===0)return COL.gray;if(s<300)return COL.ok;if(s<400)return COL.blue;if(s<500)return COL.warn;return COL.danger}
@@ -446,6 +486,10 @@ async function load(){
     const cumHas=cum.total_requests>0;
     document.getElementById('cumSection').style.display=cumHas?'block':'none';
     if(cumHas)renderCumulative(cum);
+    const windows=d.upstream_windows||[];
+    const winHas=windows.some(w=>w.requests>0);
+    document.getElementById('windowSection').style.display=winHas?'block':'none';
+    if(winHas)renderUpstreamWindows(windows);
     const empty=detail.summary.total_requests===0;
     document.getElementById('content').style.display=empty?'none':'block';
     document.getElementById('noDetail').style.display=(empty&&cumHas)?'block':'none';
@@ -456,6 +500,7 @@ async function load(){
       renderAvailModelChart(detail.by_model);
       renderFailCauseChart(detail.failure_causes);
       renderAvailTimelineChart(detail.timeline);
+      renderAvailByHourChart(detail.by_hour);
       renderStatusCatChart(detail.status_categories);
       renderStatusBar('upstreamStatusChart',detail.upstream_status_codes,'上游状态码');
       renderStatusByModelChart(detail.status_by_model);
