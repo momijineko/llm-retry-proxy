@@ -842,15 +842,20 @@ def _cumulative_view() -> dict:
 
 
 @app.get("/stats/api")
-async def stats_api(range: str = "today"):
+async def stats_api(range: str = "today", model: str = ""):
     range_map = {"today": 1, "7d": 7, "30d": 30, "all": 0}
     days = range_map.get(range, 1)
     records = load_log_records(days)
+    available_models = sorted(set(r.get("model", "") for r in records if r.get("model", "")))
+    if model:
+        selected = {m.strip() for m in model.split(",") if m.strip()}
+        records = [r for r in records if r.get("model", "") in selected]
     return {
         "detail": compute_stats(records, range),
         "cumulative": _cumulative_view(),
         "range": range,
         "record_count": len(records),
+        "available_models": available_models,
     }
 
 

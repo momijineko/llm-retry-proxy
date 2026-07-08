@@ -96,6 +96,17 @@
   .range-switch .rs:hover{color:var(--text);background:var(--bg)}
   .range-switch .rs.active{background:var(--primary);color:#fff;box-shadow:0 1px 4px rgba(99,102,241,.3)}
 
+  .model-filter{position:relative}
+  .model-dropdown{position:absolute;top:100%;right:0;margin-top:6px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xs);box-shadow:var(--shadow-lg);padding:10px;min-width:220px;max-height:340px;overflow-y:auto;z-index:100;display:none}
+  .model-dropdown.open{display:block}
+  .model-dropdown .model-actions{display:flex;gap:6px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  .model-dropdown .model-actions .ma{border:none;background:var(--bg);color:var(--muted);padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:500;transition:all .15s}
+  .model-dropdown .model-actions .ma:hover{color:var(--primary);background:var(--primary-l)}
+  .model-dropdown .model-item{display:flex;align-items:center;gap:7px;padding:5px 8px;cursor:pointer;font-size:12px;border-radius:6px;transition:background .12s}
+  .model-dropdown .model-item:hover{background:var(--primary-l)}
+  .model-dropdown .model-item input{accent-color:var(--primary);cursor:pointer}
+  .model-dropdown .model-item .cnt{margin-left:auto;color:var(--muted-2);font-size:10px;font-variant-numeric:tabular-nums}
+
   .cfg-bar{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 20px;margin-bottom:16px;box-shadow:var(--shadow-xs);display:none}
   .cfg-bar .cfg-item{display:flex;align-items:center;gap:6px;font-size:13px}
   .cfg-bar .cfg-item .k{color:var(--muted);font-size:12px}
@@ -129,6 +140,16 @@
     <button class="rs" data-range="7d">7天</button>
     <button class="rs" data-range="30d">30天</button>
     <button class="rs" data-range="all">全部</button>
+  </div>
+  <div class="model-filter">
+    <button class="btn" id="modelFilterBtn">模型: 全部 ▾</button>
+    <div class="model-dropdown" id="modelDropdown">
+      <div class="model-actions">
+        <button class="ma" id="modelAll">全选</button>
+        <button class="ma" id="modelNone">反选</button>
+      </div>
+      <div id="modelList"></div>
+    </div>
   </div>
   <label class="switch"><input type="checkbox" id="autoRefresh"><span>自动刷新 (15s)</span></label>
   <button class="btn btn-primary" id="refreshBtn">刷新</button>
@@ -390,6 +411,8 @@ function renderPathTable(data){
 }
 
 let currentRange='today';
+let selectedModels=new Set();
+let availableModels=[];
 const RANGE_LABELS={today:'今天','7d':'近 7 天','30d':'近 30 天',all:'全部历史'};
 function statusColorStr(s){s=parseInt(s);return s===0?COL.gray:s<300?COL.ok:s<400?COL.blue:s<500?COL.warn:COL.danger}
 
@@ -409,8 +432,16 @@ function renderCumulative(c){
 
 async function load(){
   try{
-    const r=await fetch('/stats/api?range='+currentRange);const d=await r.json();
+    let url='/stats/api?range='+currentRange;
+    if(selectedModels.size>0)url+='&model='+encodeURIComponent([...selectedModels].join(','));
+    const r=await fetch(url);const d=await r.json();
     const detail=d.detail||{};const cum=d.cumulative||{};
+    if(d.available_models){
+      const changed=JSON.stringify(d.available_models)!==JSON.stringify(availableModels);
+      availableModels=d.available_models;
+      if(changed)populateModelDropdown();
+      updateModelBtn();
+    }
     document.getElementById('rangeLabel').textContent=RANGE_LABELS[d.range]||d.range;
     const cumHas=cum.total_requests>0;
     document.getElementById('cumSection').style.display=cumHas?'block':'none';
@@ -457,6 +488,36 @@ document.querySelectorAll('.rs').forEach(b=>b.addEventListener('click',()=>{
 }));
 let timer=null;
 document.getElementById('autoRefresh').addEventListener('change',e=>{if(e.target.checked){timer=setInterval(load,15000)}else if(timer){clearInterval(timer);timer=null}});
+
+function populateModelDropdown(){
+  const list=document.getElementById('modelList');
+  selectedModels=new Set([...selectedModels].filter(m=>availableModels.includes(m)));
+  list.innerHTML=availableModels.map(m=>{
+    const checked=(selectedModels.size===0||selectedModels.has(m))?'checked':'';
+    return `<label class="model-item"><input type="checkbox" value="${esc(m)}" ${checked}><span>${esc(m)}</span></label>`;
+  }).join('');
+  list.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    cb.addEventListener('change',()=>{
+      const checked=[...list.querySelectorAll('input:checked')].map(c=>c.value);
+      if(checked.length===0||checked.length===availableModels.length)selectedModels=new Set();
+      else selectedModels=new Set(checked);
+      updateModelBtn();
+      load();
+    });
+  });
+}
+function updateModelBtn(){
+  const btn=document.getElementById('modelFilterBtn');
+  if(selectedModels.size===0){btn.textContent='模型: 全部 ▾';return;}
+  const names=[...selectedModels];
+  btn.textContent='模型: '+(names.length<=2?names.join(', '):names[0]+' +'+(names.length-1))+' ▾';
+}
+document.getElementById('modelFilterBtn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('modelDropdown').classList.toggle('open')});
+document.addEventListener('click',()=>document.getElementById('modelDropdown').classList.remove('open'));
+document.getElementById('modelDropdown').addEventListener('click',e=>e.stopPropagation());
+document.getElementById('modelAll').addEventListener('click',()=>{selectedModels=new Set();populateModelDropdown();updateModelBtn();load()});
+document.getElementById('modelNone').addEventListener('click',()=>{const boxes=[...document.querySelectorAll('#modelList input')];boxes.forEach(cb=>cb.checked=!cb.checked);const checked=boxes.filter(c=>c.checked).map(c=>c.value);if(checked.length===0||checked.length===availableModels.length)selectedModels=new Set();else selectedModels=new Set(checked);updateModelBtn();load()});
+
 load();
 </script>
 </body>
