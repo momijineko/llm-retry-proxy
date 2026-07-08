@@ -49,6 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("forward")
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 UPSTREAM_URL = os.getenv("UPSTREAM_URL", "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2").rstrip("/")
 LISTEN_HOST = os.getenv("LISTEN_HOST", "0.0.0.0")
@@ -234,6 +235,8 @@ def _rebuild_summary_from_files() -> dict:
                         rec = json.loads(line)
                         if _is_excluded_path(rec.get("path", "")):
                             continue
+                        if not rec.get("model"):
+                            continue
                         _update_summary_mem(summary, rec)
                     except json.JSONDecodeError:
                         continue
@@ -394,6 +397,8 @@ def parse_retry_after(header_value: Optional[str]) -> Optional[float]:
 
 
 async def write_log(record: dict):
+    if not record.get("model"):
+        return
     line = json.dumps(record, ensure_ascii=False)
     ts = record.get("ts", "")
     date_str = ts[:10] if len(ts) >= 10 else _today_str()
@@ -431,6 +436,8 @@ def load_log_records(days: int = 1) -> list:
                     try:
                         rec = json.loads(line)
                         if _is_excluded_path(rec.get("path", "")):
+                            continue
+                        if not rec.get("model"):
                             continue
                         rec["provider"] = _normalize_provider(rec.get("provider", ""))
                         records.append(rec)
