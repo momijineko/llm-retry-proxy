@@ -59,6 +59,11 @@
   .stat-card .value{font-size:28px;font-weight:800;line-height:1.1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
   .stat-card .hint{font-size:11px;color:var(--muted-2);margin-top:5px;font-weight:500}
 
+  .hero-overview .stat-card::before{opacity:1}
+  .hero-overview .stat-card{border-color:var(--border-strong)}
+  .hero-overview .cum-sub{font-size:11px;color:var(--muted-2);margin-top:4px;font-weight:500;font-variant-numeric:tabular-nums;line-height:1.4}
+  .hero-overview .cum-sub .prefix{color:var(--muted-2);opacity:.6;font-weight:400;margin-right:3px}
+
   .mini-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
@@ -176,21 +181,25 @@
     暂无重试日志数据。产生一些请求后刷新即可看到分析。
   </div>
 
+  <div id="detailOverviewSection" class="section-wrap" style="display:none">
+    <div class="sec-title">区间概览 <span class="count" id="rangeLabel">今天</span></div>
+    <div class="overview hero-overview">
+      <div class="stat-card"><div class="label">总请求数</div><div class="value" id="s_total">-</div><div class="cum-sub"><span class="prefix">累计</span><span id="c_total_sub">-</span></div></div>
+      <div class="stat-card"><div class="label">总重试次数</div><div class="value" id="s_retries">-</div><div class="hint" id="s_retries_hint"></div><div class="cum-sub"><span class="prefix">累计</span><span id="c_retries_sub">-</span></div></div>
+      <div class="stat-card"><div class="label">上游可用率</div><div class="value" id="s_upstream">-</div><div class="hint">首次即成功</div><div class="cum-sub"><span class="prefix">累计</span><span id="c_upstream_sub">-</span></div></div>
+      <div class="stat-card"><div class="label">下游可用率</div><div class="value" id="s_avail">-</div><div class="hint" id="s_avail_hint"></div><div class="cum-sub"><span class="prefix">累计</span><span id="c_avail_sub">-</span></div></div>
+      <div class="stat-card"><div class="label">失败请求</div><div class="value" id="s_fail">-</div><div class="cum-sub"><span class="prefix">累计</span><span id="c_fail_sub">-</span></div></div>
+      <div class="stat-card"><div class="label">P95 耗时</div><div class="value" id="s_p95">-</div><div class="hint">秒</div><div class="cum-sub"><span class="prefix">区间</span><span id="c_span_sub">-</span></div></div>
+    </div>
+  </div>
+
   <div id="windowSection" class="section-wrap" style="display:none">
     <div class="sec-title">上游分时可用率 <span class="count">滑动窗口 · 实时</span></div>
     <div class="overview" id="upstreamWindows"></div>
   </div>
 
-  <div id="cumSection" class="section-wrap" style="display:none">
-    <div class="sec-title">累计总览 <span class="count">全量历史 · 含已归档明细</span></div>
-    <div class="overview">
-      <div class="stat-card"><div class="label">累计请求数</div><div class="value" id="c_total">-</div></div>
-      <div class="stat-card"><div class="label">累计重试</div><div class="value" id="c_retries">-</div><div class="hint" id="c_retries_hint"></div></div>
-      <div class="stat-card"><div class="label">累计上游可用率</div><div class="value" id="c_upstream">-</div></div>
-      <div class="stat-card"><div class="label">累计下游可用率</div><div class="value" id="c_avail">-</div></div>
-      <div class="stat-card"><div class="label">累计失败</div><div class="value" id="c_fail">-</div></div>
-      <div class="stat-card"><div class="label">统计区间</div><div class="value" id="c_first" style="font-size:13px;line-height:1.4">-</div><div class="hint" id="c_last"></div></div>
-    </div>
+  <div id="cumDistSection" class="section-wrap" style="display:none">
+    <div class="sec-title">累计分布 <span class="count">全量历史 · 含已归档明细</span></div>
     <div class="grid2" style="margin-bottom:14px;margin-top:14px">
       <div class="card"><h2>累计状态码分布</h2><div id="cumStatusChart" class="chart sm"></div></div>
       <div class="card"><h2>累计各模型</h2>
@@ -202,16 +211,6 @@
   <div id="noDetail" class="empty" style="display:none">本时段范围内无明细记录（累计数据见上方）。</div>
 
   <div id="content" class="section-wrap" style="display:none">
-    <div class="sec-title">明细分析 <span class="count" id="rangeLabel">今天</span></div>
-    <div class="overview">
-      <div class="stat-card"><div class="label">总请求数</div><div class="value" id="s_total">-</div></div>
-      <div class="stat-card"><div class="label">总重试次数</div><div class="value" id="s_retries">-</div><div class="hint" id="s_retries_hint"></div></div>
-      <div class="stat-card"><div class="label">上游可用率</div><div class="value" id="s_upstream">-</div><div class="hint">首次即成功</div></div>
-      <div class="stat-card"><div class="label">下游可用率</div><div class="value" id="s_avail">-</div><div class="hint" id="s_avail_hint"></div></div>
-      <div class="stat-card"><div class="label">失败请求</div><div class="value" id="s_fail">-</div></div>
-      <div class="stat-card"><div class="label">P95 耗时</div><div class="value" id="s_p95">-</div><div class="hint">秒</div></div>
-    </div>
-
     <div class="sec-title">可用性分析</div>
     <div class="mini-cards">
       <div class="stat-card"><div class="label">当前连续</div><div class="value" id="a_cur">-</div><div class="hint" id="a_cur_hint"></div></div>
@@ -296,7 +295,7 @@ function fmtTs(ts){
   return ts.slice(5,10);
 }
 
-function renderOverview(s,d){
+function renderOverview(s,d,c){
   document.getElementById('s_total').textContent=s.total_requests;
   document.getElementById('s_retries').textContent=s.total_retries;
   document.getElementById('s_retries_hint').textContent=s.total_requests?`每请求 ${(s.total_retries/s.total_requests).toFixed(2)} 次`:'';
@@ -307,6 +306,16 @@ function renderOverview(s,d){
   document.getElementById('s_avail_hint').textContent=`上游 ${ua.toFixed(1)}% · ${s.failed_requests} 次失败`;
   document.getElementById('s_fail').textContent=s.failed_requests;
   document.getElementById('s_p95').textContent=d.p95;
+  if(c){
+    document.getElementById('c_total_sub').textContent=c.total_requests;
+    document.getElementById('c_retries_sub').textContent=c.total_retries;
+    const cua=c.upstream_availability_pct||0;
+    document.getElementById('c_upstream_sub').textContent=cua.toFixed(1)+'%';
+    document.getElementById('c_avail_sub').textContent=c.availability_pct.toFixed(1)+'%';
+    document.getElementById('c_fail_sub').textContent=c.failed;
+    const span=c.first_ts&&c.last_ts?c.first_ts.slice(5,10)+' ~ '+c.last_ts.slice(5,10):'-';
+    document.getElementById('c_span_sub').textContent=span;
+  }
 }
 
 function renderAvailability(a){
@@ -457,14 +466,6 @@ const RANGE_LABELS={today:'今天','7d':'近 7 天','30d':'近 30 天',all:'全�
 function statusColorStr(s){s=parseInt(s);return s===0?COL.gray:s<300?COL.ok:s<400?COL.blue:s<500?COL.warn:COL.danger}
 
 function renderCumulative(c){
-  document.getElementById('c_total').textContent=c.total_requests;
-  document.getElementById('c_retries').textContent=c.total_retries;
-  document.getElementById('c_retries_hint').textContent=c.total_requests?('每请求 '+c.avg_retries+' 次'):'';
-  const ue=document.getElementById('c_upstream');const ua=c.upstream_availability_pct||0;ue.textContent=ua.toFixed(1)+'%';ue.style.color=availColor(ua);
-  const ae=document.getElementById('c_avail');ae.textContent=c.availability_pct.toFixed(1)+'%';ae.style.color=availColor(c.availability_pct);
-  document.getElementById('c_fail').textContent=c.failed;
-  document.getElementById('c_first').textContent=c.first_ts?c.first_ts.slice(0,16).replace('T',' '):'-';
-  document.getElementById('c_last').textContent=c.last_ts?('至 '+c.last_ts.slice(0,16).replace('T',' ')):'';
   const cc=C('cumStatusChart');
   if(cc){if(c.by_status&&c.by_status.length){cc.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{bottom:0,type:'scroll',textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:12},series:[{type:'pie',radius:['38%','62%'],center:['50%','44%'],data:c.by_status.map(d=>({name:d.status==='0'?'异常':d.status,value:d.count,itemStyle:{color:statusColorStr(d.status),borderColor:'#fff',borderWidth:2}})),label:{formatter:'{b}\n{d}%',fontSize:11,color:'#334155'},emphasis:{scaleSize:6}}]});}else{cc.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}})}}
   document.getElementById('cumModelTbody').innerHTML=(c.by_model||[]).map(m=>`<tr><td class="mono">${esc(m.name)}</td><td class="num">${m.requests}</td><td class="num">${m.retries}</td><td class="num">${m.avg_retries}</td><td class="num">${pctPill(m.upstream_availability_pct||0)}</td><td class="num">${pctPill(m.availability_pct)}</td><td class="num"><span class="badge">${m.max_retries}</span></td></tr>`).join('');
@@ -484,18 +485,19 @@ async function load(){
     }
     document.getElementById('rangeLabel').textContent=RANGE_LABELS[d.range]||d.range;
     const cumHas=cum.total_requests>0;
-    document.getElementById('cumSection').style.display=cumHas?'block':'none';
+    document.getElementById('cumDistSection').style.display=cumHas?'block':'none';
     if(cumHas)renderCumulative(cum);
     const windows=d.upstream_windows||[];
     const winHas=windows.some(w=>w.requests>0);
     document.getElementById('windowSection').style.display=winHas?'block':'none';
     if(winHas)renderUpstreamWindows(windows);
     const empty=detail.summary.total_requests===0;
+    document.getElementById('detailOverviewSection').style.display=empty?'none':'block';
     document.getElementById('content').style.display=empty?'none':'block';
     document.getElementById('noDetail').style.display=(empty&&cumHas)?'block':'none';
     document.getElementById('emptyState').style.display=(!cumHas&&empty)?'block':'none';
     if(!empty){
-      renderOverview(detail.summary,detail.duration_stats);
+      renderOverview(detail.summary,detail.duration_stats,cum);
       renderAvailability(detail.availability);
       renderAvailModelChart(detail.by_model);
       renderFailCauseChart(detail.failure_causes);
