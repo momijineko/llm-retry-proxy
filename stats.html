@@ -63,6 +63,21 @@
   .hero-overview .stat-card{border-color:var(--border-strong)}
   .hero-overview .cum-sub{font-size:11px;color:var(--muted-2);margin-top:4px;font-weight:500;font-variant-numeric:tabular-nums;line-height:1.4}
   .hero-overview .cum-sub .prefix{color:var(--muted-2);opacity:.6;font-weight:400;margin-right:3px}
+  .hero-overview .rate-sub{font-size:11px;color:var(--muted-2);margin-top:6px;font-weight:500;font-variant-numeric:tabular-nums;line-height:1.5;display:none}
+  .hero-overview .rate-sub .rate-tag{color:var(--muted-2);opacity:.55;font-weight:400;margin-right:3px}
+  .hero-overview .rate-sub .rate-val{margin-right:10px}
+  .hero-overview .rate-sub .rate-val:last-child{margin-right:0}
+  .hero-overview .rate-sub .rate-cfg{display:inline-flex;align-items:center;cursor:pointer;color:var(--muted-2);opacity:.35;font-size:11px;margin-left:2px;transition:opacity .15s;vertical-align:middle}
+  .hero-overview .rate-sub .rate-cfg:hover{opacity:.85}
+  .rate-pop{position:fixed;z-index:200;background:var(--card);border:1px solid var(--border-strong);border-radius:var(--radius-sm);box-shadow:var(--shadow-lg);padding:12px 14px;display:none;font-size:12px}
+  .rate-pop.open{display:block}
+  .rate-pop label{display:block;color:var(--muted);font-size:11px;margin-bottom:6px}
+  .rate-pop input[type=datetime-local]{border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px;font-family:inherit;color:var(--text-2);margin-bottom:8px}
+  .rate-pop .rate-pop-btns{display:flex;gap:8px}
+  .rate-pop button{flex:1;border:1px solid var(--border);background:var(--bg);color:var(--text-2);padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;transition:all .15s}
+  .rate-pop .save{background:var(--primary);border-color:var(--primary);color:#fff}
+  .rate-pop .save:hover{background:var(--primary-d)}
+  .rate-pop .clear:hover{border-color:var(--danger);color:var(--danger-d)}
 
   .mini-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -156,6 +171,7 @@
       <div id="modelList"></div>
     </div>
   </div>
+  <div class="rate-pop" id="ratePop"><label>订阅起始时间</label><input type="datetime-local" id="planStartInput"><div class="rate-pop-btns"><button class="save" id="planStartSave">确定</button><button class="clear" id="planStartClear">清除</button></div></div>
   <label class="switch"><input type="checkbox" id="autoRefresh"><span>自动刷新 (15s)</span></label>
   <button class="btn btn-primary" id="refreshBtn">刷新</button>
 </header>
@@ -184,7 +200,7 @@
   <div id="detailOverviewSection" class="section-wrap" style="display:none">
     <div class="sec-title">区间概览 <span class="count" id="rangeLabel">今天</span></div>
     <div class="overview hero-overview">
-      <div class="stat-card"><div class="label">总请求数</div><div class="value" id="s_total">-</div><div class="cum-sub"><span class="prefix">累计</span><span id="c_total_sub">-</span></div></div>
+      <div class="stat-card"><div class="label">总请求数</div><div class="value" id="s_total">-</div><div class="cum-sub"><span class="prefix">累计</span><span id="c_total_sub">-</span></div><div class="rate-sub" id="s_rate"></div></div>
       <div class="stat-card"><div class="label">总重试次数</div><div class="value" id="s_retries">-</div><div class="hint" id="s_retries_hint"></div><div class="cum-sub"><span class="prefix">累计</span><span id="c_retries_sub">-</span></div></div>
       <div class="stat-card"><div class="label">上游可用率</div><div class="value" id="s_upstream">-</div><div class="hint">首次即成功</div><div class="cum-sub"><span class="prefix">累计</span><span id="c_upstream_sub">-</span></div></div>
       <div class="stat-card"><div class="label">下游可用率</div><div class="value" id="s_avail">-</div><div class="hint" id="s_avail_hint"></div><div class="cum-sub"><span class="prefix">累计</span><span id="c_avail_sub">-</span></div></div>
@@ -295,7 +311,7 @@ function fmtTs(ts){
   return ts.slice(5,10);
 }
 
-function renderOverview(s,d,c){
+function renderOverview(s,d,c,rc){
   document.getElementById('s_total').textContent=s.total_requests;
   document.getElementById('s_retries').textContent=s.total_retries;
   document.getElementById('s_retries_hint').textContent=s.total_requests?`每请求 ${(s.total_retries/s.total_requests).toFixed(2)} 次`:'';
@@ -315,6 +331,29 @@ function renderOverview(s,d,c){
     document.getElementById('c_fail_sub').textContent=c.failed;
     const span=c.first_ts&&c.last_ts?c.first_ts.slice(5,10)+' ~ '+c.last_ts.slice(5,10):'-';
     document.getElementById('c_span_sub').textContent=span;
+    const rateEl=document.getElementById('s_rate');
+    if(rc){
+      let html=`<span class="rate-tag">5h</span><span class="rate-val">${rc['5h']}</span>`;
+      html+=`<span class="rate-tag">周</span><span class="rate-val">${rc.week}</span>`;
+      html+=`<span class="rate-tag">月</span><span class="rate-val">${rc.month}</span>`;
+      html+=`<span class="rate-cfg" id="rateCfg" title="设置订阅起始时间">&#9881;</span>`;
+      rateEl.style.display='block';
+      rateEl.innerHTML=html;
+      document.getElementById('rateCfg').addEventListener('click',e=>{
+        e.stopPropagation();
+        const pop=document.getElementById('ratePop');
+        const inp=document.getElementById('planStartInput');
+        const ps2=getPlanStart();
+        if(ps2)inp.value=toLocalInput(ps2);
+        const r=e.currentTarget.getBoundingClientRect();
+        pop.style.left=r.left+'px';
+        pop.style.top=(r.bottom+6)+'px';
+        pop.classList.toggle('open');
+      });
+    }else{rateEl.style.display='none';rateEl.innerHTML='';}
+  }else{
+    document.getElementById('s_rate').style.display='none';
+    document.getElementById('s_rate').innerHTML='';
   }
 }
 
@@ -475,6 +514,8 @@ async function load(){
   try{
     let url='/stats/api?range='+currentRange;
     if(selectedModels.size>0)url+='&model='+encodeURIComponent([...selectedModels].join(','));
+    const ps=getPlanStart();
+    if(ps)url+='&plan_start='+encodeURIComponent(ps);
     const r=await fetch(url);const d=await r.json();
     const detail=d.detail||{};const cum=d.cumulative||{};
     if(d.available_models){
@@ -497,7 +538,7 @@ async function load(){
     document.getElementById('noDetail').style.display=(empty&&cumHas)?'block':'none';
     document.getElementById('emptyState').style.display=(!cumHas&&empty)?'block':'none';
     if(!empty){
-      renderOverview(detail.summary,detail.duration_stats,cum);
+      renderOverview(detail.summary,detail.duration_stats,cum,d.rate_counts);
       renderAvailability(detail.availability);
       renderAvailModelChart(detail.by_model);
       renderFailCauseChart(detail.failure_causes);
@@ -564,6 +605,27 @@ document.addEventListener('click',()=>document.getElementById('modelDropdown').c
 document.getElementById('modelDropdown').addEventListener('click',e=>e.stopPropagation());
 document.getElementById('modelAll').addEventListener('click',()=>{selectedModels=new Set();populateModelDropdown();updateModelBtn();load()});
 document.getElementById('modelNone').addEventListener('click',()=>{const boxes=[...document.querySelectorAll('#modelList input')];boxes.forEach(cb=>cb.checked=!cb.checked);const checked=boxes.filter(c=>c.checked).map(c=>c.value);if(checked.length===0||checked.length===availableModels.length)selectedModels=new Set();else selectedModels=new Set(checked);updateModelBtn();load()});
+
+const PLAN_KEY='plan_start_ts';
+function getPlanStart(){return localStorage.getItem(PLAN_KEY)||''}
+function setPlanStart(v){localStorage.setItem(PLAN_KEY,v)}
+function clearPlanStart(){localStorage.removeItem(PLAN_KEY)}
+function toLocalInput(iso){const d=new Date(iso);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())}
+function fromLocalInput(v){const d=new Date(v);if(isNaN(d))return'';const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
+document.getElementById('planStartSave').addEventListener('click',()=>{
+  const v=document.getElementById('planStartInput').value;
+  if(v){setPlanStart(fromLocalInput(v))}else{clearPlanStart()}
+  document.getElementById('ratePop').classList.remove('open');
+  load();
+});
+document.getElementById('planStartClear').addEventListener('click',()=>{
+  clearPlanStart();
+  document.getElementById('planStartInput').value='';
+  document.getElementById('ratePop').classList.remove('open');
+  load();
+});
+document.addEventListener('click',()=>document.getElementById('ratePop').classList.remove('open'));
+document.getElementById('ratePop').addEventListener('click',e=>e.stopPropagation());
 
 load();
 </script>

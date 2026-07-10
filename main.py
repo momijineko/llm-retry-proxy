@@ -958,8 +958,22 @@ def _cumulative_view() -> dict:
     }
 
 
+def _count_succeeded_since(records: list, cutoff: datetime) -> int:
+    """统计 cutoff 之后成功的请求数"""
+    count = 0
+    for r in records:
+        ts = r.get("ts", "")
+        try:
+            t = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            continue
+        if t >= cutoff and _req_succeeded(r):
+            count += 1
+    return count
+
+
 @app.get("/stats/api")
-async def stats_api(range: str = "today", model: str = ""):
+async def stats_api(range: str = "today", model: str = "", plan_start: str = ""):
     range_map = {"today": 1, "7d": 7, "30d": 30, "all": 0}
     days = range_map.get(range, 1)
     records = load_log_records(days)
@@ -972,6 +986,26 @@ async def stats_api(range: str = "today", model: str = ""):
     window_records = load_log_records(2)
     if selected:
         window_records = [r for r in window_records if r.get("model", "") in selected]
+    # 速率统计：最近5h/周/月的成功请求次数，独立加载30天记录
+    rate_records = load_log_records(30)
+    if selected:
+        rate_records = [r for r in rate_records if r.get("model", "") in selected]
+    now = datetime.now()
+    c5h = _count_succeeded_since(rate_records, now - timedelta(hours=5))
+    if plan_start:
+        try:
+            ps_dt = datetime.fromisoformat(plan_start)
+            elapsed_days = max(0, (now - ps_dt).days)
+            week_start = ps_dt + timedelta(days=(elapsed_days // 7) * 7)
+            month_start = ps_dt + timedelta(days=(elapsed_days // 30) * 30)
+            c_week = _count_succeeded_since(rate_records, week_start)
+            c_month = _count_succeeded_since(rate_records, month_start)
+        except (ValueError, TypeError):
+            c_week = _count_succeeded_since(rate_records, now - timedelta(days=7))
+            c_month = _count_succeeded_since(rate_records, now - timedelta(days=30))
+    else:
+        c_week = _count_succeeded_since(rate_records, now - timedelta(days=7))
+        c_month = _count_succeeded_since(rate_records, now - timedelta(days=30))
     return {
         "detail": compute_stats(records, range),
         "cumulative": _cumulative_view(),
@@ -979,6 +1013,7 @@ async def stats_api(range: str = "today", model: str = ""):
         "record_count": len(records),
         "available_models": available_models,
         "upstream_windows": _upstream_window_stats(window_records),
+        "rate_counts": {"5h": c5h, "week": c_week, "month": c_month, "has_plan": bool(plan_start)},
     }
 
 
