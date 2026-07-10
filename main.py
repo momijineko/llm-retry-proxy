@@ -973,7 +973,7 @@ def _count_succeeded_since(records: list, cutoff: datetime) -> int:
 
 
 @app.get("/stats/api")
-async def stats_api(range: str = "today", model: str = "", plan_start: str = ""):
+async def stats_api(range: str = "today", model: str = "", plan_start: str = "", rate_mode: str = ""):
     range_map = {"today": 1, "7d": 7, "30d": 30, "all": 0}
     days = range_map.get(range, 1)
     records = load_log_records(days)
@@ -986,30 +986,44 @@ async def stats_api(range: str = "today", model: str = "", plan_start: str = "")
     window_records = load_log_records(2)
     if selected:
         window_records = [r for r in window_records if r.get("model", "") in selected]
-    # 速率统计：最近5h/周/月的成功请求次数，独立加载30天记录
+    # 速率统计：5h/周/月的成功请求次数，独立加载30天记录
     rate_records = load_log_records(30)
     if selected:
         rate_records = [r for r in rate_records if r.get("model", "") in selected]
     now = datetime.now()
+    ps_dt = None
     if plan_start:
         try:
             ps_dt = datetime.fromisoformat(plan_start)
-            elapsed_days = max(0, (now - ps_dt).days)
-            week_start = ps_dt + timedelta(days=(elapsed_days // 7) * 7)
-            month_start = ps_dt + timedelta(days=(elapsed_days // 30) * 30)
-            elapsed_5h = max(0, int((now - ps_dt).total_seconds() // 3600 // 5))
-            hour5_start = ps_dt + timedelta(hours=elapsed_5h * 5)
-            c5h = _count_succeeded_since(rate_records, hour5_start)
-            c_week = _count_succeeded_since(rate_records, week_start)
-            c_month = _count_succeeded_since(rate_records, month_start)
         except (ValueError, TypeError):
-            c5h = _count_succeeded_since(rate_records, now - timedelta(hours=5))
-            c_week = _count_succeeded_since(rate_records, now - timedelta(days=7))
-            c_month = _count_succeeded_since(rate_records, now - timedelta(days=30))
+            pass
+
+    def _sliding():
+        return (
+            _count_succeeded_since(rate_records, now - timedelta(hours=5)),
+            _count_succeeded_since(rate_records, now - timedelta(days=7)),
+            _count_succeeded_since(rate_records, now - timedelta(days=30)),
+        )
+
+    if rate_mode == "platform" and ps_dt:
+        # 平台流控：5h整点滑动/周每日08:00滑动/月固定31天
+        whole_hour = now.replace(minute=0, second=0, microsecond=0)
+        c5h = _count_succeeded_since(rate_records, max(whole_hour - timedelta(hours=5), ps_dt))
+        today_0800 = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now < today_0800:
+            today_0800 -= timedelta(days=1)
+        c_week = _count_succeeded_since(rate_records, max(today_0800 - timedelta(days=7), ps_dt))
+        c_month = _count_succeeded_since(rate_records, ps_dt)
+    elif rate_mode == "fixed" and ps_dt:
+        # 固定周期：从订阅时间按5h/7d/30d块对齐
+        elapsed_days = max(0, (now - ps_dt).days)
+        elapsed_5h = max(0, int((now - ps_dt).total_seconds() // 3600 // 5))
+        c5h = _count_succeeded_since(rate_records, ps_dt + timedelta(hours=elapsed_5h * 5))
+        c_week = _count_succeeded_since(rate_records, ps_dt + timedelta(days=(elapsed_days // 7) * 7))
+        c_month = _count_succeeded_since(rate_records, ps_dt + timedelta(days=(elapsed_days // 30) * 30))
     else:
-        c5h = _count_succeeded_since(rate_records, now - timedelta(hours=5))
-        c_week = _count_succeeded_since(rate_records, now - timedelta(days=7))
-        c_month = _count_succeeded_since(rate_records, now - timedelta(days=30))
+        # 滑动窗口（默认）
+        c5h, c_week, c_month = _sliding()
     return {
         "detail": compute_stats(records, range),
         "cumulative": _cumulative_view(),
@@ -1017,7 +1031,7 @@ async def stats_api(range: str = "today", model: str = "", plan_start: str = "")
         "record_count": len(records),
         "available_models": available_models,
         "upstream_windows": _upstream_window_stats(window_records),
-        "rate_counts": {"5h": c5h, "week": c_week, "month": c_month, "has_plan": bool(plan_start)},
+        "rate_counts": {"5h": c5h, "week": c_week, "month": c_month},
     }
 
 

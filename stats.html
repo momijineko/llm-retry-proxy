@@ -78,6 +78,11 @@
   .rate-pop .save{background:var(--primary);border-color:var(--primary);color:#fff}
   .rate-pop .save:hover{background:var(--primary-d)}
   .rate-pop .clear:hover{border-color:var(--danger);color:var(--danger-d)}
+  .rate-pop .rate-modes{display:flex;gap:10px;margin-bottom:10px}
+  .rate-pop .rate-mode{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-2);cursor:pointer}
+  .rate-pop .rate-mode input{accent-color:var(--primary);cursor:pointer}
+  .rate-pop .rate-plan-field{transition:opacity .15s}
+  .rate-pop .rate-plan-field.disabled{opacity:.35;pointer-events:none}
 
   .mini-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -171,7 +176,7 @@
       <div id="modelList"></div>
     </div>
   </div>
-  <div class="rate-pop" id="ratePop"><label>订阅起始时间</label><input type="datetime-local" id="planStartInput"><div class="rate-pop-btns"><button class="save" id="planStartSave">确定</button><button class="clear" id="planStartClear">清除</button></div></div>
+  <div class="rate-pop" id="ratePop"><label>流控模式</label><div class="rate-modes"><label class="rate-mode"><input type="radio" name="rateMode" value="platform"> 平台流控</label><label class="rate-mode"><input type="radio" name="rateMode" value="sliding"> 滑动窗口</label><label class="rate-mode"><input type="radio" name="rateMode" value="fixed"> 固定周期</label></div><div class="rate-plan-field" id="planField"><label>订阅起始时间</label><input type="datetime-local" id="planStartInput"></div><div class="rate-pop-btns"><button class="save" id="planStartSave">确定</button><button class="clear" id="planStartClear">清除</button></div></div>
   <label class="switch"><input type="checkbox" id="autoRefresh"><span>自动刷新 (15s)</span></label>
   <button class="btn btn-primary" id="refreshBtn">刷新</button>
 </header>
@@ -345,6 +350,9 @@ function renderOverview(s,d,c,rc){
         const inp=document.getElementById('planStartInput');
         const ps2=getPlanStart();
         if(ps2)inp.value=toLocalInput(ps2);
+        const mode=getRateMode();
+        document.querySelectorAll('input[name=rateMode]').forEach(r=>{r.checked=(r.value===mode)});
+        updatePlanFieldState();
         const r=e.currentTarget.getBoundingClientRect();
         pop.style.left=r.left+'px';
         pop.style.top=(r.bottom+6)+'px';
@@ -516,6 +524,8 @@ async function load(){
     if(selectedModels.size>0)url+='&model='+encodeURIComponent([...selectedModels].join(','));
     const ps=getPlanStart();
     if(ps)url+='&plan_start='+encodeURIComponent(ps);
+    const mode=getRateMode();
+    if(mode)url+='&rate_mode='+encodeURIComponent(mode);
     const r=await fetch(url);const d=await r.json();
     const detail=d.detail||{};const cum=d.cumulative||{};
     if(d.available_models){
@@ -607,12 +617,24 @@ document.getElementById('modelAll').addEventListener('click',()=>{selectedModels
 document.getElementById('modelNone').addEventListener('click',()=>{const boxes=[...document.querySelectorAll('#modelList input')];boxes.forEach(cb=>cb.checked=!cb.checked);const checked=boxes.filter(c=>c.checked).map(c=>c.value);if(checked.length===0||checked.length===availableModels.length)selectedModels=new Set();else selectedModels=new Set(checked);updateModelBtn();load()});
 
 const PLAN_KEY='plan_start_ts';
+const MODE_KEY='rate_mode';
 function getPlanStart(){return localStorage.getItem(PLAN_KEY)||''}
 function setPlanStart(v){localStorage.setItem(PLAN_KEY,v)}
 function clearPlanStart(){localStorage.removeItem(PLAN_KEY)}
+function getRateMode(){return localStorage.getItem(MODE_KEY)||''}
+function setRateMode(v){localStorage.setItem(MODE_KEY,v)}
+function clearRateMode(){localStorage.removeItem(MODE_KEY)}
 function toLocalInput(iso){const d=new Date(iso);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())}
 function fromLocalInput(v){const d=new Date(v);if(isNaN(d))return'';const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
+function updatePlanFieldState(){
+  const checked=document.querySelector('input[name=rateMode]:checked');
+  const field=document.getElementById('planField');
+  field.classList.toggle('disabled',checked&&checked.value==='sliding');
+}
+document.querySelectorAll('input[name=rateMode]').forEach(r=>r.addEventListener('change',updatePlanFieldState));
 document.getElementById('planStartSave').addEventListener('click',()=>{
+  const modeEl=document.querySelector('input[name=rateMode]:checked');
+  if(modeEl)setRateMode(modeEl.value);else clearRateMode();
   const v=document.getElementById('planStartInput').value;
   if(v){setPlanStart(fromLocalInput(v))}else{clearPlanStart()}
   document.getElementById('ratePop').classList.remove('open');
@@ -620,7 +642,9 @@ document.getElementById('planStartSave').addEventListener('click',()=>{
 });
 document.getElementById('planStartClear').addEventListener('click',()=>{
   clearPlanStart();
+  clearRateMode();
   document.getElementById('planStartInput').value='';
+  document.querySelectorAll('input[name=rateMode]').forEach(r=>r.checked=false);
   document.getElementById('ratePop').classList.remove('open');
   load();
 });
