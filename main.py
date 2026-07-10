@@ -991,19 +991,23 @@ async def stats_api(range: str = "today", model: str = "", plan_start: str = "")
     if selected:
         rate_records = [r for r in rate_records if r.get("model", "") in selected]
     now = datetime.now()
-    c5h = _count_succeeded_since(rate_records, now - timedelta(hours=5))
     if plan_start:
         try:
             ps_dt = datetime.fromisoformat(plan_start)
             elapsed_days = max(0, (now - ps_dt).days)
             week_start = ps_dt + timedelta(days=(elapsed_days // 7) * 7)
             month_start = ps_dt + timedelta(days=(elapsed_days // 30) * 30)
+            elapsed_5h = max(0, int((now - ps_dt).total_seconds() // 3600 // 5))
+            hour5_start = ps_dt + timedelta(hours=elapsed_5h * 5)
+            c5h = _count_succeeded_since(rate_records, hour5_start)
             c_week = _count_succeeded_since(rate_records, week_start)
             c_month = _count_succeeded_since(rate_records, month_start)
         except (ValueError, TypeError):
+            c5h = _count_succeeded_since(rate_records, now - timedelta(hours=5))
             c_week = _count_succeeded_since(rate_records, now - timedelta(days=7))
             c_month = _count_succeeded_since(rate_records, now - timedelta(days=30))
     else:
+        c5h = _count_succeeded_since(rate_records, now - timedelta(hours=5))
         c_week = _count_succeeded_since(rate_records, now - timedelta(days=7))
         c_month = _count_succeeded_since(rate_records, now - timedelta(days=30))
     return {
