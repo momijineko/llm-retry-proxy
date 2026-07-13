@@ -661,6 +661,60 @@ def _upstream_window_stats(records: list) -> list:
     return result
 
 
+MODE_LABELS = {
+    "off": "串行重试",
+    "race": "请求竞速",
+    "stagger": "滚动竞速",
+}
+
+
+def _mode_comparison(records: list) -> list:
+    """按竞速模式聚合对比数据。旧日志无 mode 字段的归入 'off'（串行）。"""
+    buckets = defaultdict(lambda: {
+        "requests": 0, "retries": 0, "succeeded": 0, "first_ok": 0,
+        "max_retries": 0, "fail": 0, "durations": [],
+    })
+    for r in records:
+        m = r.get("mode", "") or "off"
+        b = buckets[m]
+        b["requests"] += 1
+        b["retries"] += r.get("retries", 0)
+        if _req_succeeded(r):
+            b["succeeded"] += 1
+            if r.get("retries", 0) == 0:
+                b["first_ok"] += 1
+        else:
+            b["fail"] += 1
+        b["max_retries"] = max(b["max_retries"], r.get("retries", 0))
+        d = r.get("duration_s")
+        if isinstance(d, (int, float)):
+            b["durations"].append(d)
+    # 固定顺序：off / race / stagger
+    order = ["off", "race", "stagger"]
+    out = []
+    for m in order:
+        if m not in buckets:
+            continue
+        b = buckets[m]
+        ds = sorted(b["durations"])
+        n = len(ds)
+        out.append({
+            "mode": m,
+            "mode_label": MODE_LABELS.get(m, "未知/旧数据"),
+            "requests": b["requests"],
+            "retries": b["retries"],
+            "avg_retries": round(b["retries"] / b["requests"], 2) if b["requests"] else 0,
+            "succeeded": b["succeeded"],
+            "failed": b["fail"],
+            "availability_pct": round(b["succeeded"] / b["requests"] * 100, 2) if b["requests"] else 0,
+            "upstream_availability_pct": round(b["first_ok"] / b["requests"] * 100, 2) if b["requests"] else 0,
+            "avg_duration": round(sum(ds) / n, 3) if n else 0,
+            "p95_duration": round(_percentile(ds, 0.95), 3) if n else 0,
+            "max_retries": b["max_retries"],
+        })
+    return out
+
+
 def compute_stats(records: list, range_str: str = "today") -> dict:
     total = len(records)
     total_retries = sum(r.get("retries", 0) for r in records)
@@ -887,6 +941,7 @@ def compute_stats(records: list, range_str: str = "today") -> dict:
         "fastest_requests": fastest_requests,
         "by_hour": by_hour,
         "by_path": by_path,
+        "mode_comparison": _mode_comparison(records),
         "config": {
             "provider": PROVIDER,
             "upstream_url": UPSTREAM_URL,
@@ -1376,8 +1431,6 @@ async def proxy(path: str, request: Request):
             content_type = winner.headers.get("content-type")
             status = winner.status_code
 
-            logger.info(f"{_tag(method, path, provider, model)} -> {_sc(status)} #{winner_attempt}胜出({total_sent}发) {time.time()-t0:.2f}s")
-
             await write_log({
                 "ts": datetime.now().isoformat(timespec="milliseconds"),
                 "method": method,
@@ -1391,6 +1444,7 @@ async def proxy(path: str, request: Request):
                 "duration_s": round(time.time() - t0, 3),
                 "succeeded": status < 400,
                 "retry_codes": retry_codes,
+                "mode": HEDGE_MODE,
             })
 
             async def hedge_body_gen():
@@ -1423,6 +1477,7 @@ async def proxy(path: str, request: Request):
                 "duration_s": round(time.time() - t0, 3),
                 "succeeded": False,
                 "retry_codes": retry_codes,
+                "mode": HEDGE_MODE,
             })
             return Response(
                 content=(
@@ -1461,6 +1516,7 @@ async def proxy(path: str, request: Request):
                 "duration_s": round(time.time() - t0, 3),
                 "succeeded": False,
                 "retry_codes": retry_codes,
+                "mode": HEDGE_MODE,
             })
             return Response(
                 content=(
@@ -1543,6 +1599,7 @@ async def proxy(path: str, request: Request):
             "duration_s": round(time.time() - t0, 3),
             "succeeded": status < 400,
             "retry_codes": retry_codes,
+            "mode": HEDGE_MODE,
         })
 
         async def body_gen():

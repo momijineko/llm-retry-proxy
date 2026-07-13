@@ -282,6 +282,15 @@
     </div>
     <div class="card" style="margin-top:14px"><h2>时间趋势（请求数 / 重试数）</h2><div id="timelineChart" class="chart"></div></div>
 
+    <div class="sec-title">竞速模式对比</div>
+    <div class="grid2">
+      <div class="card"><h2>各模式可用率对比</h2><div id="modeAvailChart" class="chart sm"></div></div>
+      <div class="card"><h2>各模式耗时与重试</h2><div id="modeDurationChart" class="chart sm"></div></div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>各模式详细指标</h2>
+      <div class="scroll-table"><table><thead><tr><th>模式</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均重试</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">平均耗时(s)</th><th class="num">P95(s)</th><th class="num">最大重试</th></tr></thead><tbody id="modeTbody"></tbody></table></div>
+    </div>
+
     <div class="sec-title">明细</div>
     <div class="grid2">
       <div class="card"><h2>按供应商</h2>
@@ -506,6 +515,39 @@ function renderPathTable(data){
     <td class="num">${pctPill(d.availability_pct)}</td></tr>`).join('');
 }
 
+function renderModeAvailChart(data){
+  const c=C('modeAvailChart');if(!c)return;
+  if(!data.length){c.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});return}
+  const labels=data.map(d=>esc(d.mode_label));
+  c.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},formatter:p=>p.map(x=>`${x.marker}${x.seriesName}: ${x.value}%`).join('<br>')},legend:{data:['上游可用率','下游可用率'],top:0,textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:16},grid:{left:50,right:20,top:36,bottom:40},xAxis:{type:'category',data:labels,axisLabel:{color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:{type:'value',max:100,name:'%',nameTextStyle:{color:'#9ca3af',fontSize:11},axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},series:[
+    {name:'上游可用率',type:'bar',barGap:'10%',data:data.map(d=>({value:d.upstream_availability_pct,itemStyle:{color:COL.gray,borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',formatter:'{c}%',fontSize:10,color:'#6b7280'}},
+    {name:'下游可用率',type:'bar',data:data.map(d=>({value:d.availability_pct,itemStyle:{color:availColor(d.availability_pct),borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',formatter:'{c}%',fontSize:10,color:'#6b7280'}},
+  ]});
+}
+
+function renderModeDurationChart(data){
+  const c=C('modeDurationChart');if(!c)return;
+  if(!data.length){c.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});return}
+  const labels=data.map(d=>esc(d.mode_label));
+  c.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{data:['平均耗时','P95耗时','平均重试'],top:0,textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:16},grid:{left:50,right:50,top:36,bottom:40},xAxis:{type:'category',data:labels,axisLabel:{color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:[{type:'value',name:'秒',nameTextStyle:{color:'#9ca3af',fontSize:11},axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},{type:'value',name:'重试次数',axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{show:false},axisLine:{show:false},axisTick:{show:false}}],series:[
+    {name:'平均耗时',type:'bar',data:data.map(d=>({value:d.avg_duration,itemStyle:{color:COL.blue,borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',formatter:p=>p.value+'s',fontSize:10,color:'#6b7280'}},
+    {name:'P95耗时',type:'bar',data:data.map(d=>({value:d.p95_duration,itemStyle:{color:COL.purple,borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',formatter:p=>p.value+'s',fontSize:10,color:'#6b7280'}},
+    {name:'平均重试',type:'line',yAxisIndex:1,smooth:true,data:data.map(d=>d.avg_retries),itemStyle:{color:COL.warn},lineStyle:{width:2.5},symbol:'circle',symbolSize:6},
+  ]});
+}
+
+function renderModeTable(data){
+  document.getElementById('modeTbody').innerHTML=data.map(d=>`<tr>
+    <td>${esc(d.mode_label)}</td>
+    <td class="num">${d.requests}</td><td class="num">${d.retries}</td>
+    <td class="num">${d.avg_retries}</td>
+    <td class="num">${pctPill(d.upstream_availability_pct)}</td>
+    <td class="num">${pctPill(d.availability_pct)}</td>
+    <td class="num">${d.avg_duration}</td><td class="num">${d.p95_duration}</td>
+    <td class="num"><span class="badge">${d.max_retries}</span></td>
+  </tr>`).join('');
+}
+
 let currentRange='today';
 let selectedModels=new Set();
 let availableModels=[];
@@ -572,6 +614,9 @@ async function load(){
       renderAggTable('providerTbody',detail.by_provider,'provider');
       renderAggTable('modelTbody',detail.by_model,'model');
       renderPathTable(detail.by_path);
+      renderModeAvailChart(detail.mode_comparison||[]);
+      renderModeDurationChart(detail.mode_comparison||[]);
+      renderModeTable(detail.mode_comparison||[]);
     }
     document.getElementById('lastUpdate').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN');
     if(window.__echartsFailed)document.getElementById('errTip').style.display='flex';
