@@ -204,7 +204,7 @@ def _update_summary_mem(summary: dict, r: dict):
     summary["total_retries"] += r.get("retries", 0)
     if _req_succeeded(r):
         summary["total_succeeded"] += 1
-        if r.get("retries", 0) == 0:
+        if r.get("first_ok", r.get("retries", 0) == 0):
             summary["total_first_ok"] = summary.get("total_first_ok", 0) + 1
     else:
         summary["total_failed"] += 1
@@ -222,7 +222,7 @@ def _update_summary_mem(summary: dict, r: dict):
         b["retries"] += r.get("retries", 0)
         if _req_succeeded(r):
             b["succeeded"] += 1
-            if r.get("retries", 0) == 0:
+            if r.get("first_ok", r.get("retries", 0) == 0):
                 b["first_ok"] = b.get("first_ok", 0) + 1
         else:
             b["failed"] += 1
@@ -568,7 +568,7 @@ def _agg_by(records: list, key: str, label: str, key_fn=None):
         b["retries"] += r.get("retries", 0)
         if _req_succeeded(r):
             b["succeeded"] += 1
-            if r.get("retries", 0) == 0:
+            if r.get("first_ok", r.get("retries", 0) == 0):
                 b["first_ok"] += 1
         else:
             b["fail"] += 1
@@ -619,7 +619,7 @@ def _window_label(mins: int) -> str:
 
 def _upstream_window_stats(records: list) -> list:
     """计算不同时间窗口的上游可用率（滑动窗口，从当前时间向前推）。
-    上游可用率 = 首次尝试即成功的请求占比（retries==0 && final_status<400）。
+    上游可用率 = 首次尝试即成功的请求占比（first_ok字段(旧日志回退retries==0) && final_status<400）。
     同时计算环比：与上一等长窗口（如近5分钟 vs 前5分钟）的百分点差值。
     下游经重试后基本都 100%，无参考意义，不计算。"""
     windows = [5, 15, 30, 60, 360, 1440]  # 5分钟/15分钟/30分钟/1小时/6小时/24小时
@@ -642,11 +642,11 @@ def _upstream_window_stats(records: list) -> list:
         for t, r in parsed:
             if t >= cutoff:
                 total += 1
-                if _req_succeeded(r) and r.get("retries", 0) == 0:
+                if _req_succeeded(r) and r.get("first_ok", r.get("retries", 0) == 0):
                     first_ok += 1
             elif t >= prev_cutoff:
                 prev_total += 1
-                if _req_succeeded(r) and r.get("retries", 0) == 0:
+                if _req_succeeded(r) and r.get("first_ok", r.get("retries", 0) == 0):
                     prev_first_ok += 1
         cur_ua = round(first_ok / total * 100, 2) if total else None
         prev_ua = round(prev_first_ok / prev_total * 100, 2) if prev_total else None
@@ -681,7 +681,7 @@ def _mode_comparison(records: list) -> list:
         b["retries"] += r.get("retries", 0)
         if _req_succeeded(r):
             b["succeeded"] += 1
-            if r.get("retries", 0) == 0:
+            if r.get("first_ok", r.get("retries", 0) == 0):
                 b["first_ok"] += 1
         else:
             b["fail"] += 1
@@ -719,7 +719,7 @@ def compute_stats(records: list, range_str: str = "today") -> dict:
     total = len(records)
     total_retries = sum(r.get("retries", 0) for r in records)
     succeeded = sum(1 for r in records if _req_succeeded(r))
-    upstream_ok = sum(1 for r in records if _req_succeeded(r) and r.get("retries", 0) == 0)
+    upstream_ok = sum(1 for r in records if _req_succeeded(r) and r.get("first_ok", r.get("retries", 0) == 0))
     failed = total - succeeded
     avail = round(succeeded / total * 100, 2) if total else 0
     upstream_avail = round(upstream_ok / total * 100, 2) if total else 0
@@ -765,7 +765,7 @@ def compute_stats(records: list, range_str: str = "today") -> dict:
         b["retries"] += r.get("retries", 0)
         if _req_succeeded(r):
             b["succeeded"] += 1
-            if r.get("retries", 0) == 0:
+            if r.get("first_ok", r.get("retries", 0) == 0):
                 b["first_ok"] += 1
         else:
             b["failed"] += 1
@@ -892,7 +892,7 @@ def compute_stats(records: list, range_str: str = "today") -> dict:
         hour_buckets[h]["retries"] += r.get("retries", 0)
         if _req_succeeded(r):
             hour_buckets[h]["succeeded"] += 1
-            if r.get("retries", 0) == 0:
+            if r.get("first_ok", r.get("retries", 0) == 0):
                 hour_buckets[h]["first_ok"] += 1
     by_hour = []
     for h in range(24):
@@ -1199,7 +1199,7 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
             logger.info(
                 f"{_tag(method, path, provider, model)} -> {_sc(winner.status_code)} #{winner_attempt}胜出(R{round_num},{total_sent}发) {time.time() - t0:.2f}s"
             )
-            return winner, winner_attempt, total_sent, last_status, retry_codes
+            return winner, winner_attempt, total_sent, last_status, retry_codes, (round_num == 1)
 
         if MAX_RETRIES > 0 and total_sent >= MAX_RETRIES:
             break
@@ -1218,7 +1218,7 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
         )
         await asyncio.sleep(wait)
 
-    return None, 0, total_sent, last_status, retry_codes
+    return None, 0, total_sent, last_status, retry_codes, False
 
 
 async def _hedge_request(method, url, req_headers, body, path, t0, provider, model):
@@ -1394,7 +1394,7 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
             in_flight[new_task] = now
             logger.info(f"{_tag(method, path, provider, model)} 补发#{total_sent}(在飞{len(in_flight)}) {now - t0:.1f}s")
 
-    return winner, winner_attempt, total_sent, last_status, retry_codes
+    return winner, winner_attempt, total_sent, last_status, retry_codes, (winner is not None and winner_attempt == 1)
 
 
 @app.api_route(
@@ -1418,11 +1418,11 @@ async def proxy(path: str, request: Request):
 
     if HEDGE_MODE in ("race", "stagger"):
         if HEDGE_MODE == "race":
-            winner, winner_attempt, total_sent, last_status, retry_codes = await _race_request(
+            winner, winner_attempt, total_sent, last_status, retry_codes, first_ok = await _race_request(
                 method, url, req_headers, body, path, t0, provider, model
             )
         else:
-            winner, winner_attempt, total_sent, last_status, retry_codes = await _hedge_request(
+            winner, winner_attempt, total_sent, last_status, retry_codes, first_ok = await _hedge_request(
                 method, url, req_headers, body, path, t0, provider, model
             )
         if winner is not None:
@@ -1445,6 +1445,7 @@ async def proxy(path: str, request: Request):
                 "succeeded": status < 400,
                 "retry_codes": retry_codes,
                 "mode": HEDGE_MODE,
+                "first_ok": first_ok,
             })
 
             async def hedge_body_gen():
@@ -1478,6 +1479,7 @@ async def proxy(path: str, request: Request):
                 "succeeded": False,
                 "retry_codes": retry_codes,
                 "mode": HEDGE_MODE,
+                "first_ok": first_ok,
             })
             return Response(
                 content=(
@@ -1517,6 +1519,7 @@ async def proxy(path: str, request: Request):
                 "succeeded": False,
                 "retry_codes": retry_codes,
                 "mode": HEDGE_MODE,
+                "first_ok": False,
             })
             return Response(
                 content=(
@@ -1600,6 +1603,7 @@ async def proxy(path: str, request: Request):
             "succeeded": status < 400,
             "retry_codes": retry_codes,
             "mode": HEDGE_MODE,
+            "first_ok": (attempt == 1),
         })
 
         async def body_gen():
