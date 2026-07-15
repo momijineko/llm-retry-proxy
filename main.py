@@ -64,6 +64,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), handlers=[_h])
 logger = logging.getLogger("forward")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
 UPSTREAM_URL = os.getenv("UPSTREAM_URL", "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2").rstrip("/")
 LISTEN_HOST = os.getenv("LISTEN_HOST", "0.0.0.0")
@@ -341,7 +342,7 @@ def _load_key_pools_csv(path: str) -> dict:
 
     if pools:
         total = sum(len(p.entries) for p in pools.values())
-        logger.info(f"号池CSV已加载: {fpath} ({len(pools)}个上游, 共{total}个key)")
+        logger.debug(f"号池CSV已加载: {fpath} ({len(pools)}个上游, 共{total}个key)")
     return pools
 
 
@@ -387,7 +388,7 @@ def _build_key_pools() -> dict:
             pools[UPSTREAM_URL] = KeyPool(keys, PROVIDER)
     if pools:
         total = sum(len(p.entries) for p in pools.values())
-        logger.info(f"号池已加载: {len(pools)}个上游, 共{total}个key")
+        logger.debug(f"号池已加载: {len(pools)}个上游, 共{total}个key")
     return pools
 
 
@@ -1989,4 +1990,4 @@ async def proxy(path: str, request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level="info", access_log=False)
+    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_config=None, access_log=False)
