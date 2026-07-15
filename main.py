@@ -1989,4 +1989,4 @@ async def proxy(path: str, request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level="info")
+    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level="info", access_log=False)
