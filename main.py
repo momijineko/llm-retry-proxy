@@ -76,8 +76,23 @@ RETRY_BACKOFF = os.getenv("RETRY_BACKOFF", "false").lower() in ("1", "true", "ye
 RETRY_BACKOFF_MAX = float(os.getenv("RETRY_BACKOFF_MAX", "60"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "60"))
 RETRY_STATUS_CODES = set(
-    int(x) for x in os.getenv("RETRY_STATUS_CODES", "503,502,504,529,429").split(",") if x.strip()
+    int(x) for x in os.getenv("RETRY_STATUS_CODES", "503,502,504,524,529,429").split(",") if x.strip()
 )
+
+# 宽松重试/换key模式: on=按规则触发(5xx+429+401/403+网络异常), off=仅 RETRY_STATUS_CODES 白名单
+RETRY_BROAD = os.getenv("RETRY_BROAD", "false").lower() in ("1", "true", "yes", "on")
+
+
+def _should_retry_status(status: int) -> bool:
+    """是否触发重试+换key。
+    宽松模式: 5xx / 429 / 401 / 403 全算（服务端过载+限流+鉴权失败），排除 400/404/422 等请求级错误。
+    非宽松模式: 仅 RETRY_STATUS_CODES 白名单（向后兼容）。
+    """
+    if RETRY_BROAD:
+        return status >= 500 or status in (429, 401, 403)
+    return status in RETRY_STATUS_CODES
+
+
 TIMEOUT = float(os.getenv("TIMEOUT", "300"))
 CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "10"))
 PROVIDER = os.getenv("PROVIDER", "xfyun")
@@ -605,7 +620,7 @@ async def lifespan(app: FastAPI):
     mode_desc = {"off": "串行重试", "race": "请求竞速(一次并发)", "stagger": "滚动竞速(交错补发)"}.get(HEDGE_MODE, HEDGE_MODE)
     backoff_429_desc = f"指数退避(上限{RETRY_BACKOFF_MAX_429:.0f}s)" if RETRY_BACKOFF_429 else "固定间隔"
     backoff_desc = f"指数退避(上限{RETRY_BACKOFF_MAX:.0f}s)" if RETRY_BACKOFF else "固定间隔"
-    logger.info(f"重试: 间隔={RETRY_INTERVAL}s+{backoff_desc}, 429={RETRY_INTERVAL_429}s+{backoff_429_desc}(优先Retry-After), 最大次数={retry_desc}, 状态码={sorted(RETRY_STATUS_CODES)}")
+    logger.info(f"重试: 间隔={RETRY_INTERVAL}s+{backoff_desc}, 429={RETRY_INTERVAL_429}s+{backoff_429_desc}(优先Retry-After), 最大次数={retry_desc}, 状态码={sorted(RETRY_STATUS_CODES)}, 宽松={'开(5xx/429/401/403)' if RETRY_BROAD else '关'}")
     logger.info(f"模式: {mode_desc}" + (f", 最大并发={MAX_CONCURRENT}" if HEDGE_MODE != "off" else ""))
     logger.info(f"记录: provider={PROVIDER}, 日志目录={LOG_DIR}, 保留{LOG_RETENTION_DAYS}天")
     logger.info(f"代理: trust_env={'是(跟随系统代理)' if TRUST_ENV else '否(直连)'}")
@@ -1424,7 +1439,7 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
                     last_status = 0
                     retry_codes.append(0)
                     logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt_num}({time.time() - t0:.1f}s): {result!r}")
-                elif result.status_code in RETRY_STATUS_CODES:
+                elif _should_retry_status(result.status_code):
                     last_status = result.status_code
                     retry_codes.append(result.status_code)
                     if result.status_code == 429:
@@ -1612,7 +1627,7 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
                     new_task = asyncio.create_task(do_send(total_sent))
                     in_flight[new_task] = now
 
-            elif result.status_code in RETRY_STATUS_CODES:
+            elif _should_retry_status(result.status_code):
                 last_status = result.status_code
                 retry_codes.append(result.status_code)
                 # 号池：冷却该 key，下次 do_send 自动选下一个可用 key
@@ -1866,10 +1881,14 @@ async def proxy(path: str, request: Request):
             logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt}({elapsed:.2f}s) {e!r} {sleep_for:.2f}s后重试")
             if pool is not None and current_key_entry is not None:
                 pool.mark_cooldown(current_key_entry, KEY_COOLDOWN)
+            # 号池：有可用 key 则立即换 key 重试，跳过等待
+            if pool is not None and pool.has_fresh():
+                logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt} 换key 总{time.time()-t0:.1f}s")
+                continue
             await asyncio.sleep(sleep_for)
             continue
 
-        if response.status_code in RETRY_STATUS_CODES:
+        if _should_retry_status(response.status_code):
             last_status = response.status_code
             retry_codes.append(response.status_code)
             ra_wait = parse_retry_after(response.headers.get("retry-after")) if response.status_code == 429 else None
