@@ -93,6 +93,11 @@ def _should_retry_status(status: int) -> bool:
     return status in RETRY_STATUS_CODES
 
 
+def _is_host_level_error(exc: Exception) -> bool:
+    """连接建立阶段的错误(DNS解析失败/连接被拒/连接超时),与 key 无关,换 key 无意义。"""
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+
+
 TIMEOUT = float(os.getenv("TIMEOUT", "300"))
 CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "10"))
 PROVIDER = os.getenv("PROVIDER", "xfyun")
@@ -1403,6 +1408,7 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
 
         # 号池：每轮选当前最便宜可用 key
         round_key_entry = None
+        round_host_error = False
         round_hdrs = req_headers
         if pool is not None:
             round_key_entry = pool.pick()
@@ -1438,6 +1444,8 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
                 if kind == "error":
                     last_status = 0
                     retry_codes.append(0)
+                    if _is_host_level_error(result):
+                        round_host_error = True
                     logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt_num}({time.time() - t0:.1f}s): {result!r}")
                 elif _should_retry_status(result.status_code):
                     last_status = result.status_code
@@ -1492,7 +1500,8 @@ async def _race_request(method, url, req_headers, body, path, t0, provider, mode
             break
 
         # 号池：冷却当前 key，有可用 key 则立即换 key 下一轮（跳过退避）
-        if pool is not None and round_key_entry is not None:
+        # 连接级错误(DNS/连接失败/超时)与 key 无关，不冷却 key，走正常退避
+        if pool is not None and round_key_entry is not None and not round_host_error:
             pool.mark_cooldown(round_key_entry, KEY_COOLDOWN, saw_429_wait if saw_429_wait > 0 else None)
             if pool.has_fresh():
                 logger.info(f"{_tag(method, path, provider, model)}{key_tag} R{round_num}全败 换key {time.time() - t0:.1f}s")
@@ -1620,7 +1629,8 @@ async def _hedge_request(method, url, req_headers, body, path, t0, provider, mod
                 last_status = 0
                 retry_codes.append(0)
                 logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt_num}({now - t0:.1f}s) {result!r} 立即补发")
-                if pool is not None and key_entry is not None:
+                # 连接级错误与 key 无关，不冷却 key
+                if pool is not None and key_entry is not None and not _is_host_level_error(result):
                     pool.mark_cooldown(key_entry, KEY_COOLDOWN)
                 if can_fire(now):
                     total_sent += 1
@@ -1878,13 +1888,15 @@ async def proxy(path: str, request: Request):
             retry_codes.append(0)
             elapsed = time.time() - cycle_start
             sleep_for = max(RETRY_INTERVAL - elapsed, 0.0)
+            host_err = _is_host_level_error(e)
             logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt}({elapsed:.2f}s) {e!r} {sleep_for:.2f}s后重试")
-            if pool is not None and current_key_entry is not None:
+            # 连接级错误(DNS/连接失败/超时)与 key 无关，不冷却 key 不换 key，直接退避重试同一 key
+            if pool is not None and current_key_entry is not None and not host_err:
                 pool.mark_cooldown(current_key_entry, KEY_COOLDOWN)
-            # 号池：有可用 key 则立即换 key 重试，跳过等待
-            if pool is not None and pool.has_fresh():
-                logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt} 换key 总{time.time()-t0:.1f}s")
-                continue
+                # 号池：有可用 key 则立即换 key 重试，跳过等待
+                if pool.has_fresh():
+                    logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt} 换key 总{time.time()-t0:.1f}s")
+                    continue
             await asyncio.sleep(sleep_for)
             continue
 
