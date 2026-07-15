@@ -10,6 +10,7 @@ env/
 
 # Environment / secrets
 .env
+key_pool.csv
 
 # Logs & runtime data
 logs/
@@ -27,3 +28,7 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# Local tooling
+.omo/
+.playwright-mcp/

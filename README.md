@@ -81,6 +81,12 @@ curl http://127.0.0.1:8080/chat/completions \
 | `CONNECT_TIMEOUT` | `10` | 连接上游超时（秒） |
 | `PROVIDER` | `xfyun` | 供应商标签，写入每条重试记录，用于区分不同上游/账号 |
 | `EXTRA_UPSTREAMS` | （空） | 额外上游路由，按路径前缀分流。格式 `prefix\|url\|provider`，多组逗号分隔。匹配前缀的请求去掉前缀后转发到对应 `url`，未匹配的走默认 `UPSTREAM_URL`。详见下方[多上游路由](#多上游路由) |
+| `KEY_POOLS` | （空） | 号池配置（环境变量方式），启用后代理注入 key 并按倍率从低到高降级。格式 `key1;key2;key3`（用于默认上游）或 `url\|provider\|key1;key2`（多上游）。留空则保持透传客户端 key 的原有行为。详见下方[号池](#号池key-pool) |
+| `KEY_POOL_FILE` | （空） | 号池 CSV 文件路径，**优先于 `KEY_POOLS`**。格式 `key,url,provider`，行序即优先级（上=便宜，下=贵）。详见下方[号池](#号池key-pool) |
+| `KEY_COOLDOWN` | `30` | 单个 key 遇到 429/5xx 后的冷却时间（秒）。冷却期间优先跳过该 key，用更贵但可用的 key 降级 |
+| `KEY_STICKY` | `60` | key 粘性持续时间（秒）。选定一个 key 后保持使用直到过期或被限流，避免频繁切换导致上游缓存失效。`0` = 禁用（每次都选最便宜可用 key） |
+| `KEY_AUTH_HEADER` | `authorization` | 号池注入鉴权头的 header 名 |
+| `KEY_AUTH_SCHEME` | `Bearer` | 鉴权 scheme 前缀（如 `Bearer`），设为空则只放裸 key |
 | `LOG_DIR` | `logs` | 日志目录。明细按天拆分为 `retry_YYYY-MM-DD.jsonl`，累计汇总存 `_summary.json` |
 | `LOG_RETENTION_DAYS` | `30` | 明细日志保留天数，超期自动删除（`0` = 不清理）。**累计汇总不受影响**，历史总量永久保留 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
@@ -125,6 +131,76 @@ EXTRA_UPSTREAMS=/anthropic|https://api.anthropic.com|anthropic,/gemini|https://g
 ```
 
 统计面板的「按供应商」表格会按 `provider` 标签分别统计各上游的可用率/重试次数。「按路径」表格则按原始请求路径（含前缀）聚合。
+
+## 号池（Key Pool）
+
+通过 `KEY_POOLS` 配置一组 API key，代理会**自动注入鉴权头**并按**倍率从低到高**（cheap→expensive）逐 key 降级。适用于中转站不同分组对应不同倍率的场景：优先用便宜 key，遇到 429/5xx 自动切到更贵但可用的 key，被限的 key 冷却后恢复。
+
+### 配置格式
+
+支持两种配置方式，**CSV 文件优先于环境变量**。
+
+#### 方式一：CSV 文件（推荐，适合批量配置）
+
+```env
+KEY_POOL_FILE=key_pool.csv
+```
+
+CSV 格式（首行表头，`#` 开头为注释）：
+
+```csv
+key,url,provider,label
+sk-cheap-group,,,低倍率组
+sk-normal-group,,,中倍率组
+sk-premium-group,,,高倍率组
+# 多上游示例（同一 url 的 key 自动归入同一池，按行序排列）
+sk-other-key,https://other.com,other,备用站
+```
+
+- `key`（必填）：API key
+- `url`（可选）：上游地址，留空 = `UPSTREAM_URL`
+- `provider`（可选）：供应商标签，留空 = `PROVIDER`
+- `label`（可选）：key 标签/备注，用于日志显示和统计面板分组。留空则用 key 前 8 位
+- **行序即优先级**：上面的 = 低倍率（便宜），下面的 = 高倍率（贵）
+
+> 项目附带 `key_pool.csv.example` 模板，复制为 `key_pool.csv` 即可使用。
+
+#### 方式二：环境变量（适合少量 key）
+
+```env
+# 默认上游（UPSTREAM_URL）的 key 池，按倍率从低到高排列，分号分隔
+KEY_POOLS=sk-cheap;sk-normal;sk-premium
+
+# 多上游：每组 url|provider|key1;key2，逗号分隔
+KEY_POOLS=https://aihub.top|aihub|sk-cheap;sk-premium,https://other.com|other|sk-other1;sk-other2
+```
+
+### 降级机制
+
+1. 请求进来后，代理**剥离客户端原有的 Authorization 头**，注入号池中当前最便宜可用的 key
+2. **串行模式（`HEDGE_MODE=off`）**：每次重试换下一个 key，立即降级（不等待退避）。只有**所有 key 都被冷却**时才进入现有退避等待
+3. **竞速模式（`race`/`stagger`）**：每轮/每次发请求选当前最便宜可用 key，失败冷却该 key，下一轮自动选下一个。时序逻辑不变
+4. 被 429/5xx 命中的 key 进入 `KEY_COOLDOWN`（默认 30 秒）冷却期，冷却期间优先跳过；429 带的 `Retry-After` 头会被优先采纳（取 `max(冷却时间, Retry-After)`）
+5. **粘性保持**（`KEY_STICKY` 默认 60 秒）：选定一个 key 后保持使用，直到粘性过期或该 key 被限流。粘性期间即使更便宜的 key 恢复了也不切回，避免频繁切换导致上游缓存失效。设为 `0` 禁用（每次都选最便宜可用 key）
+6. 全部 key 冷却时，`pick()` 返回最快到期的 key（**软冷却**，不阻塞请求），同时走现有指数退避等待
+
+### 向后兼容
+
+- `KEY_POOLS` 留空（默认）→ **完全保持原有行为**：透传客户端 Authorization 头，不注入任何 key
+- 配置了 `KEY_POOLS` → 代理注入 key，客户端原有的 Authorization 头被覆盖
+
+### 日志
+
+每条重试记录新增 `key_id` 字段（key 前 8 字符），便于分析哪个 key 被限流。`/health` 端点也返回号池状态（各 key 的冷却/失败情况）。
+
+### 自定义鉴权头
+
+部分上游使用非标准鉴权头（如 `x-api-key`），可通过以下变量自定义：
+
+```env
+KEY_AUTH_HEADER=x-api-key
+KEY_AUTH_SCHEME=           # 空值，直接放裸 key，不加 Bearer 前缀
+```
 
 ## 重试行为说明
 
@@ -188,6 +264,7 @@ logs/
 | `duration_s` | 总耗时（秒） |
 | `succeeded` | 是否最终拿到 2xx/3xx 响应（`final_status < 400`，4xx/5xx 视为失败） |
 | `retry_codes` | 重试过程中上游返回的错误码列表，如 `[503, 503, 429]`。无重试时为空数组 `[]`。用于统计面板的错误码分析 |
+| `key_id` | 号池模式下使用的 key 标签（CSV 中 `label` 列，未设则用 key 前 8 字符），未启用号池时为空字符串。统计面板「按 key」表格按此字段分组 |
 
 示例：
 
@@ -209,10 +286,10 @@ python -c "import pandas as pd; df=pd.read_json('logs/retry_$(date +%Y-%m-%d).js
 
 ```bash
 curl http://127.0.0.1:8080/health
-# {"status":"ok","upstream":"https://maas-coding-api.cn-huabei-1.xf-yun.com/v2","routes":[{"prefix":"/","upstream":"https://.../v2","provider":"xfyun"},{"prefix":"/anthropic","upstream":"https://.../anthropic","provider":"anthropic"}]}
+# {"status":"ok","upstream":"https://maas-coding-api.cn-huabei-1.xf-yun.com/v2","routes":[{"prefix":"/","upstream":"https://.../v2","provider":"xfyun"}],"key_pools":{}}
 ```
 
-`routes` 列出所有已配置路由（`/` 为默认上游）。
+`routes` 列出所有已配置路由（`/` 为默认上游）。`key_pools` 列出号池状态（各 key 的冷却/失败情况），未配置号池时为空对象 `{}`。
 
 ## 可视化分析面板
 
