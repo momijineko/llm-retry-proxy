@@ -1970,6 +1970,12 @@ async def proxy(path: str, request: Request):
             try:
                 async for chunk in response.aiter_bytes():
                     yield chunk
+            except httpx.TransportError as e:
+                # 上游在流式传输中途断连(incomplete chunked read 等);
+                # 响应头已发送,无法重试/改状态码,只能记告警并优雅结束流
+                logger.warning(
+                    f"{_tag(method, path, provider, model)}{key_tag} 流式中断 #{attempt} {e!r} 总{time.time()-t0:.2f}s"
+                )
             finally:
                 await response.aclose()
 
