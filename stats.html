@@ -222,9 +222,9 @@
   <div id="cumDistSection" class="section-wrap" style="display:none">
     <div class="sec-title">累计分布 <span class="count">全量历史 · 含已归档明细</span></div>
     <div class="grid2" style="margin-bottom:14px;margin-top:14px">
-      <div class="card"><h2>累计状态码分布</h2><div id="cumStatusChart" class="chart sm"></div></div>
-      <div class="card"><h2>累计各模型</h2>
-        <div class="scroll-table"><table><thead><tr><th>模型</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">最大</th></tr></thead><tbody id="cumModelTbody"></tbody></table></div>
+      <div class="card" style="display:flex;flex-direction:column"><h2>累计状态码分布</h2><div id="cumStatusChart" style="flex:1;min-height:240px"></div></div>
+      <div class="card" style="display:flex;flex-direction:column"><h2>累计各模型</h2>
+        <div class="scroll-table" style="flex:1;max-height:340px"><table><thead><tr><th>模型</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">最大</th></tr></thead><tbody id="cumModelTbody"></tbody></table></div>
       </div>
     </div>
   </div>
@@ -308,7 +308,7 @@
 
 <script>
 const charts={};
-function C(id){if(window.__echartsFailed)return null;if(!charts[id])charts[id]=echarts.init(document.getElementById(id));return charts[id]}
+function C(id){if(window.__echartsFailed)return null;if(!charts[id]){const el=document.getElementById(id);charts[id]=echarts.init(el);if(window.ResizeObserver)new ResizeObserver(()=>{if(charts[id])charts[id].resize()}).observe(el)}return charts[id]}
 window.addEventListener('resize',()=>Object.values(charts).forEach(c=>c&&c.resize()));
 const COL={primary:'#6366f1',ok:'#10b981',warn:'#f59e0b',danger:'#ef4444',blue:'#3b82f6',gray:'#94a3b8',purple:'#8b5cf6',cyan:'#06b6d4',pink:'#ec4899'};
 const CATCOL={'2xx':'#10b981','3xx':'#3b82f6','4xx':'#f59e0b','5xx':'#ef4444','exception':'#94a3b8'};
