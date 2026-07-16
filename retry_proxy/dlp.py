@@ -194,12 +194,18 @@ def inspect_json_body(body, enabled_rules, start_marker, end_marker, strip_marke
             return output
         return value
 
-    def visit_user_messages(items):
+    def visit_sensitive_items(items):
         output = list(items)
-        user_indexes = [index for index, item in enumerate(items)
-                        if isinstance(item, dict) and item.get("role") == "user"]
-        if user_indexes:
-            for index in user_indexes:
+        sensitive_indexes = [
+            index for index, item in enumerate(items)
+            if isinstance(item, dict) and (
+                item.get("role") in ("user", "tool") or
+                item.get("type") in ("function_call_output", "computer_call_output",
+                                     "local_shell_call_output", "mcp_call_output")
+            )
+        ]
+        if sensitive_indexes:
+            for index in sensitive_indexes:
                 output[index] = visit(items[index])
         else:
             output = [visit(item) if isinstance(item, str) else item for item in items]
@@ -209,12 +215,12 @@ def inspect_json_body(body, enabled_rules, start_marker, end_marker, strip_marke
         cleaned = dict(payload)
         recognized = False
         if isinstance(payload.get("messages"), list):
-            cleaned["messages"] = visit_user_messages(payload["messages"])
+            cleaned["messages"] = visit_sensitive_items(payload["messages"])
             recognized = True
         if "input" in payload:
             value = payload["input"]
             if isinstance(value, list):
-                cleaned["input"] = visit_user_messages(value)
+                cleaned["input"] = visit_sensitive_items(value)
             elif isinstance(value, (str, dict)):
                 cleaned["input"] = visit(value)
             recognized = True

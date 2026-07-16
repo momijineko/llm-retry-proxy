@@ -14,7 +14,7 @@ rules:
 
   credentials:
     # 常见 API Key、GitHub/AWS/Slack Token，以及 key=value 形式的凭据。
-    pattern: '(?:\bsk-[A-Za-z0-9_-]{16,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[A-Z0-9]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}|\b(?:api[_ -]?key|access[_ -]?token|secret|password)\s*[:=]\s*[^\s,;]{8,})'
+    pattern: '(?:\bsk-[A-Za-z0-9_-]{16,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[A-Z0-9]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}|\b(?:api[_ -]?key|apikey|access[_ -]?token|secret|password)["'']?\s*[:=]\s*["'']?[^\s"'',;}{]{8,})'
     flags: [IGNORECASE]
 
   jwt:
