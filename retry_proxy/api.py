@@ -146,7 +146,7 @@ def create_handlers(service, store):
             else:
                 dlp = inspect_json_body(body, settings.dlp_rules, settings.dlp_exempt_start,
                                         settings.dlp_exempt_end, settings.dlp_strip_exempt_markers,
-                                        redact=settings.dlp_mode == "redact",
+                                        mode=settings.dlp_mode,
                                         rule_file=settings.dlp_rule_file)
                 if dlp.malformed_exemption:
                     logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免标记不完整")
@@ -156,14 +156,15 @@ def create_handlers(service, store):
                     body = dlp.body
                 if dlp.matched_rules:
                     rules = ",".join(dlp.matched_rules)
-                    action = {"block": "拦截", "redact": "脱敏"}.get(settings.dlp_mode, "告警")
-                    count = f" count={dlp.redactions}" if dlp.redactions else ""
-                    logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP{action} rules={rules}{count}")
-                    if settings.dlp_mode == "block":
+                    if dlp.blocked_rules:
+                        logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP拦截 rules={','.join(dlp.blocked_rules)}")
                         payload = json.dumps({"error": {"type": "sensitive_data_blocked",
                                              "message": "Request blocked by sensitive data policy",
-                                             "rules": list(dlp.matched_rules)}}, ensure_ascii=False)
+                                             "rules": list(dlp.blocked_rules)}}, ensure_ascii=False)
                         return Response(payload, status_code=422, media_type="application/json")
+                    action = "脱敏" if dlp.redactions else "告警"
+                    count = f" count={dlp.redactions}" if dlp.redactions else ""
+                    logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP{action} rules={rules}{count}")
                 if dlp.exemptions:
                     logger.info(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免 count={dlp.exemptions}")
         model_name = parse_model(body)

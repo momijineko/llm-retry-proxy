@@ -1,47 +1,121 @@
-# DLP 规则文件。修改后需要重启服务，启动时会校验格式和正则。
-version: 1
+# DLP v2 规则。修改后重启服务；格式和正则会在启动时校验。
+version: 2
 
-# 每条规则包含：
-#   pattern: Python 正则表达式，建议使用单引号避免反斜杠转义。
-#   flags: 可选，支持 IGNORECASE、MULTILINE、DOTALL。
-#   validator: 可选，支持 cn_id_checksum（中国身份证）和 luhn（银行卡）。
-# 新增普通正则规则后，还需将规则名加入 .env 的 DLP_RULES 才会启用。
+defaults:
+  # 规则未单独指定 action 时使用 DLP_MODE；此项是引擎兜底值。
+  action: redact
+  placeholder: '[REDACTED:{rule}]'
+
+# 字段说明：
+#   pattern: Python 正则，建议使用 YAML 单引号。
+#   keywords: 至少出现一个关键词才运行正则，降低误报和开销。
+#   min_entropy: 匹配文本的最低 Shannon 熵；0 表示不检查。
+#   validator: cn_id_checksum 或 luhn。
+#   action: audit / redact / block，可覆盖全局 DLP_MODE。
+#   allowlist: 匹配文本含任一值时忽略，适合示例占位符。
+#   max_matches: 单个文本字段最多接受的命中数。
+#   enabled: false 的规则即使出现在 DLP_RULES 中也不运行。
 rules:
   private_key:
-    # 完整替换 PEM / PGP 私钥块，避免只隐藏头部而泄漏正文。
+    description: PEM、OpenSSH、PGP 私钥块
     pattern: '-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----.*?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----.*?-----END PGP PRIVATE KEY BLOCK-----'
+    keywords: ['private key', 'pgp private']
     flags: [IGNORECASE, DOTALL]
+    max_matches: 10
+
+  ai_tokens:
+    description: OpenAI、Anthropic 等 AI 平台 Token
+    pattern: '\b(?:sk-(?:proj-|ant-api\d+-|ant-admin\d+-)?[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{30,})\b'
+    keywords: ['sk-', 'aiza']
+    min_entropy: 2.8
+    allowlist: [your_key, example, placeholder]
+
+  code_tokens:
+    description: GitHub、GitLab、Bitbucket Token
+    pattern: '\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|ATATT3[A-Za-z0-9_=-]{40,})\b'
+    keywords: ['github_pat_', 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'glpat-', 'atatt3']
+    min_entropy: 3.0
+
+  cloud_tokens:
+    description: AWS、Alibaba、Azure 云凭据
+    pattern: '\b(?:(?:AKIA|ASIA|A3T[A-Z0-9]|ABIA|ACCA)[A-Z0-9]{16}|LTAI[A-Za-z0-9]{20}|ABSK[A-Za-z0-9+/]{40,}={0,2}|[A-Za-z0-9_~.]{3}\dQ~[A-Za-z0-9_~.-]{31,34})\b'
+    keywords: [akia, asia, ltai, absk, 'q~']
+    min_entropy: 2.8
+
+  saas_tokens:
+    description: Slack、Stripe、SendGrid、Twilio Token
+    pattern: '\b(?:xox[baprs]-[A-Za-z0-9-]{10,}|[sr]k_live_[A-Za-z0-9]{16,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|SK[0-9a-fA-F]{32})\b'
+    keywords: ['xox', 'sk_live_', 'rk_live_', 'sg.', 'sk']
+    min_entropy: 2.8
+
+  package_tokens:
+    description: npm、PyPI、Docker Hub Token
+    pattern: '\b(?:npm_[A-Za-z0-9]{30,}|pypi-[A-Za-z0-9_-]{40,}|dckr_pat_[A-Za-z0-9_-]{20,})\b'
+    keywords: ['npm_', 'pypi-', 'dckr_pat_']
+    min_entropy: 3.0
 
   credentials:
-    # 常见 API Key、GitHub/AWS/Slack Token，以及 key=value 形式的凭据。
-    pattern: '(?:\bsk-[A-Za-z0-9_-]{16,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[A-Z0-9]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}|\b(?:api[_ -]?key|apikey|access[_ -]?token|secret|password)["'']?\s*[:=]\s*["'']?[^\s"'',;}{]{8,})'
+    description: key=value、JSON 和 YAML 中的通用凭据
+    pattern: '\b(?:api[_ -]?key|apikey|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|secret|password|passwd)["'']?\s*[:=]\s*["'']?[^\s"'',;}{]{8,}'
+    keywords: [api_key, apikey, 'api key', token, 'access token', 'refresh token', secret, 'client secret', password, passwd]
     flags: [IGNORECASE]
+    min_entropy: 2.0
+    allowlist: [your_key, your_token, example, placeholder, changeme]
+    max_matches: 50
 
   jwt:
+    description: JSON Web Token
     pattern: '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b'
+    keywords: ['eyj']
+    min_entropy: 3.0
 
   connection_string:
-    # 仅匹配含 user:password@host 的常见数据库连接串。
-    pattern: '\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s:/@]+:[^\s@/]+@[^\s]+'
+    description: 含用户名密码的数据库和消息队列连接串
+    pattern: '\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|amqps|mssql)://[^\s:/@]+:[^\s@/]+@[^\s]+'
+    keywords: ['://']
     flags: [IGNORECASE]
 
   id_card:
+    description: 中国大陆身份证（校验位验证）
     pattern: '(?<!\d)\d{17}[\dXx](?!\d)'
     validator: cn_id_checksum
 
   bank_card:
+    description: 银行卡号（Luhn 验证）
     pattern: '(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)'
     validator: luhn
 
-# 当 JSON 对象的字段名命中此列表时，整个字符串值按 structured_secret 处理。
-# structured_secret 同样需要出现在 DLP_RULES 中。字段名匹配不区分大小写。
-sensitive_json_keys:
-  - password
-  - passwd
-  - secret
-  - client_secret
-  - api_key
-  - apikey
-  - access_token
-  - refresh_token
-  - private_key
+  structured_secret:
+    description: JSON/YAML 敏感字段值
+    min_entropy: 1.5
+    allowlist: [your_key, your_token, example, placeholder, changeme]
+    json_keys:
+      - password
+      - passwd
+      - secret
+      - client_secret
+      - api_key
+      - apikey
+      - access_token
+      - refresh_token
+      - private_key
+      - session_token
+
+  email:
+    description: 电子邮箱（可选 PII）
+    pattern: '\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b'
+    flags: [IGNORECASE]
+    action: audit
+    enabled: false
+
+  phone_cn:
+    description: 中国大陆手机号（可选 PII）
+    pattern: '(?<!\d)1[3-9]\d{9}(?!\d)'
+    action: audit
+    enabled: false
+
+  ip_address:
+    description: IPv4 地址（可选 PII）
+    pattern: '(?<!\d)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?!\d)'
+    action: audit
+    enabled: false

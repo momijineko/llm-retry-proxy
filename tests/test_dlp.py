@@ -1,0 +1,102 @@
+import json
+import os
+import tempfile
+import unittest
+
+import yaml
+
+from retry_proxy.dlp import inspect_json_body, load_policy, validate_policy
+
+
+RULE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "retry_proxy", "dlp_rules.yaml")
+MARKER_START = "[[ALLOW_SENSITIVE]]"
+MARKER_END = "[[/ALLOW_SENSITIVE]]"
+
+
+class DlpTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        load_policy.cache_clear()
+        cls.policy = load_policy(RULE_FILE)
+        cls.enabled = frozenset(name for name, rule in cls.policy.rules.items() if rule.enabled)
+
+    def inspect(self, payload, mode="redact", enabled=None, rule_file=RULE_FILE):
+        return inspect_json_body(
+            json.dumps(payload).encode(), enabled or self.enabled, MARKER_START, MARKER_END,
+            mode=mode, rule_file=rule_file,
+        )
+
+    def test_policy_validates(self):
+        result = validate_policy(RULE_FILE)
+        self.assertEqual(result["version"], 2)
+        self.assertGreaterEqual(result["enabled"], 10)
+
+    def test_all_user_history_and_tool_outputs_are_scanned(self):
+        field = "api" + "Key"
+        value = "value" + "1234567890"
+        tool_output = json.dumps({field: value})
+        payload = {"messages": [
+            {"role": "system", "content": tool_output},
+            {"role": "user", "content": {field: value}},
+            {"role": "assistant", "content": tool_output},
+            {"role": "tool", "content": tool_output},
+            {"role": "user", "content": {field: value}},
+        ]}
+        result = self.inspect(payload)
+        cleaned = json.loads(result.body)
+        self.assertIn("structured_secret", result.matched_rules)
+        self.assertNotIn(value, json.dumps(cleaned["messages"][1]))
+        self.assertNotIn(value, cleaned["messages"][3]["content"])
+        self.assertNotIn(value, json.dumps(cleaned["messages"][4]))
+        self.assertIn(value, cleaned["messages"][0]["content"])
+        self.assertIn(value, cleaned["messages"][2]["content"])
+
+    def test_explicit_exemption_wins(self):
+        text = MARKER_START + "skipped value" + MARKER_END
+        result = self.inspect({"input": text})
+        self.assertEqual(result.exemptions, 1)
+        self.assertEqual(json.loads(result.body)["input"], "skipped value")
+
+    def test_entropy_and_allowlist_reduce_false_positives(self):
+        prefix = "".join(chr(code) for code in (115, 107, 45))
+        low_entropy = prefix + "a" * 32
+        varied = prefix + "A1b2C3d4E5f6G7h8J9k0LmNoPqRsTuVx"
+        self.assertNotIn("ai_tokens", self.inspect({"input": low_entropy}).matched_rules)
+        self.assertIn("ai_tokens", self.inspect({"input": varied}).matched_rules)
+        allowed = "api_key=YOUR_KEY_123456789"
+        self.assertNotIn("credentials", self.inspect({"input": allowed}).matched_rules)
+        structured = self.inspect({"input": {"api_key": "YOUR_KEY"}})
+        self.assertNotIn("structured_secret", structured.matched_rules)
+
+    def test_binary_payloads_are_skipped(self):
+        payload = "data:image/png;base64," + "A" * 5000
+        result = self.inspect({"input": {"image_url": payload}})
+        self.assertEqual(json.loads(result.body)["input"]["image_url"], payload)
+        self.assertFalse(result.matched_rules)
+
+    def test_rule_actions_and_longest_overlap(self):
+        policy = {
+            "version": 2,
+            "defaults": {"action": "redact", "placeholder": "[REDACTED:{rule}]"},
+            "rules": {
+                "short": {"pattern": "secret", "action": "audit"},
+                "long": {"pattern": "secret-value", "action": "block"},
+                "mask": {"pattern": "token-[0-9]+", "placeholder": "<hidden:{rule}>"},
+            },
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", encoding="utf-8", delete=False) as handle:
+            yaml.safe_dump(policy, handle)
+            path = handle.name
+        try:
+            load_policy.cache_clear()
+            result = self.inspect({"input": "secret-value token-12345"}, enabled=frozenset(policy["rules"]), rule_file=path)
+            self.assertEqual(result.blocked_rules, ("long",))
+            self.assertIn("<hidden:mask>", result.body.decode())
+            self.assertNotIn("token-12345", result.body.decode())
+        finally:
+            os.unlink(path)
+            load_policy.cache_clear()
+
+
+if __name__ == "__main__":
+    unittest.main()

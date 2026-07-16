@@ -262,7 +262,7 @@ logs/
 
 ```env
 DLP_MODE=redact
-DLP_RULES=credentials,private_key,jwt,connection_string,id_card,bank_card,structured_secret
+DLP_RULES=private_key,ai_tokens,code_tokens,cloud_tokens,saas_tokens,package_tokens,credentials,jwt,connection_string,id_card,bank_card,structured_secret
 ```
 
 `redact` 会把未豁免的敏感信息替换为 `[REDACTED:规则名]`，让 Agent 和用户根据上下文决定下一步，不会因普通命中中断调用链。也可以使用 `audit` 仅告警，或使用 `block` 返回 HTTP 422 并停止转发。
@@ -270,6 +270,12 @@ DLP_RULES=credentials,private_key,jwt,connection_string,id_card,bank_card,struct
 对于 Chat/Responses/Anthropic 风格请求，DLP 每次都会处理所有用户消息和工具输出，确保本地文件、MCP、Shell 等工具返回的凭据也会在转发副本中脱敏；system/developer 指令、assistant 内容和 JSON Schema 不参与扫描。无法识别结构的通用 JSON 请求会回退到递归扫描全部字符串。
 
 检测规则集中维护在带注释的 `retry_proxy/dlp_rules.yaml`。该文件说明了正则、标志、校验器和敏感 JSON 字段名的配置方式；需要定制时可以直接编辑，或通过 `DLP_RULE_FILE` 指向另一份 YAML/JSON 规则文件。规则文件会在启用 DLP 时随服务启动校验，格式或正则错误会阻止服务启动，避免静默失去防护。
+
+v2 规则支持 `keywords`、`min_entropy`、`validator`、`action`、`placeholder`、`allowlist`、`max_matches` 和 `enabled`。修改后可以先验证：
+
+```bash
+python -m retry_proxy.dlp validate
+```
 
 确定需要发送的敏感内容可以包在豁免标记内：
 

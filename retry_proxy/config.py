@@ -143,7 +143,7 @@ class Settings:
     key_auth_header: str = os.getenv("KEY_AUTH_HEADER", "authorization").lower()
     key_auth_scheme: str = os.getenv("KEY_AUTH_SCHEME", "Bearer")
     dlp_mode: str = os.getenv("DLP_MODE", "off").lower()
-    dlp_rules: frozenset = frozenset(x.strip() for x in os.getenv("DLP_RULES", "credentials,private_key,jwt,connection_string,id_card,bank_card,structured_secret").split(",") if x.strip())
+    dlp_rules: frozenset = frozenset(x.strip() for x in os.getenv("DLP_RULES", "private_key,ai_tokens,code_tokens,cloud_tokens,saas_tokens,package_tokens,credentials,jwt,connection_string,id_card,bank_card,structured_secret").split(",") if x.strip())
     dlp_rule_file: str = os.getenv("DLP_RULE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "dlp_rules.yaml"))
     dlp_exempt_start: str = os.getenv("DLP_EXEMPT_START", "[[ALLOW_SENSITIVE]]")
     dlp_exempt_end: str = os.getenv("DLP_EXEMPT_END", "[[/ALLOW_SENSITIVE]]")
