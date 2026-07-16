@@ -14,6 +14,7 @@ defaults:
 #   action: audit / redact / block，可覆盖全局 DLP_MODE。
 #   allowlist: 匹配文本含任一值时忽略，适合示例占位符。
 #   max_matches: 单个文本字段最多接受的命中数。
+#   secret_group: 用捕获组限定实际替换区间；默认 0（整个匹配）。
 #   enabled: false 的规则即使出现在 DLP_RULES 中也不运行。
 rules:
   private_key:
@@ -62,6 +63,15 @@ rules:
     min_entropy: 2.0
     allowlist: [your_key, your_token, example, placeholder, changeme]
     max_matches: 50
+
+  csv_credentials:
+    description: key_pool.csv 等凭据表格的第一列 key
+    pattern: '(?m)^([^#,\r\n][^,\r\n]{7,}),(?:https?://[^,\r\n]*)?,[^,\r\n]*,[^,\r\n]*(?:,[^,\r\n]*){0,2}$'
+    keywords: ['key,url,provider']
+    secret_group: 1
+    min_entropy: 1.5
+    allowlist: [your_key, example, placeholder]
+    max_matches: 200
 
   jwt:
     description: JSON Web Token

@@ -29,6 +29,7 @@ class DlpRule:
     placeholder: str = ""
     allowlist: tuple[str, ...] = ()
     max_matches: int = 100
+    secret_group: int = 0
     enabled: bool = True
     json_keys: frozenset[str] = frozenset()
 
@@ -105,14 +106,18 @@ def load_policy(path):
             raise ValueError(f"DLP rule {name!r} placeholder must contain {{rule}}")
         min_entropy = float(definition.get("min_entropy", 0))
         max_matches = int(definition.get("max_matches", 100))
+        secret_group = int(definition.get("secret_group", 0))
         enabled = definition.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError(f"DLP rule {name!r} enabled must be boolean")
-        if min_entropy < 0 or max_matches <= 0:
+        if min_entropy < 0 or max_matches <= 0 or secret_group < 0:
             raise ValueError(f"DLP rule {name!r} has invalid limits")
+        compiled = re.compile(pattern_text, flags) if pattern_text else None
+        if compiled is not None and secret_group > compiled.groups:
+            raise ValueError(f"DLP rule {name!r} secret_group does not exist")
         rules[name] = DlpRule(
             name=name,
-            pattern=re.compile(pattern_text, flags) if pattern_text else None,
+            pattern=compiled,
             validator=validator,
             keywords=tuple(word.lower() for word in _string_list(definition.get("keywords"), "keywords", name)),
             min_entropy=min_entropy,
@@ -120,6 +125,7 @@ def load_policy(path):
             placeholder=placeholder,
             allowlist=tuple(word.lower() for word in _string_list(definition.get("allowlist"), "allowlist", name)),
             max_matches=max_matches,
+            secret_group=secret_group,
             enabled=enabled,
             json_keys=json_keys,
         )
@@ -191,11 +197,11 @@ def _inspect_text(value, enabled_rules, mode, policy):
             continue
         count = 0
         for match in rule.pattern.finditer(value):
-            candidate = match.group()
+            candidate = match.group(rule.secret_group)
             if not _candidate_valid(candidate, rule):
                 continue
             action = _rule_action(rule, mode, policy)
-            spans.append((match.start(), match.end(), name, action, rule))
+            spans.append((match.start(rule.secret_group), match.end(rule.secret_group), name, action, rule))
             matched.add(name)
             if action == "block": blocked.add(name)
             if action == "audit": audited.add(name)

@@ -74,6 +74,15 @@ class DlpTests(unittest.TestCase):
         self.assertEqual(json.loads(result.body)["input"]["image_url"], payload)
         self.assertFalse(result.matched_rules)
 
+    def test_csv_key_column_is_redacted_without_removing_metadata(self):
+        key = "random" + "KeyValue123456789"
+        csv_text = "key,url,provider,label,models,paths\n" + key + ",https://example.test,example,image,gpt-image-*,images/*"
+        result = self.inspect({"messages": [{"role": "tool", "content": csv_text}]})
+        cleaned = json.loads(result.body)["messages"][0]["content"]
+        self.assertIn("csv_credentials", result.matched_rules)
+        self.assertNotIn(key, cleaned)
+        self.assertIn("https://example.test,example,image,gpt-image-*,images/*", cleaned)
+
     def test_rule_actions_and_longest_overlap(self):
         policy = {
             "version": 2,
