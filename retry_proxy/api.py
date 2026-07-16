@@ -62,13 +62,24 @@ def create_handlers(service, store):
             with open(settings.stats_html_path, encoding="utf-8") as f: return Response(f.read(), media_type="text/html; charset=utf-8")
         return Response("stats.html not found", status_code=404)
 
-    async def stats_api(range="today", model="", plan_start="", rate_mode=""):
+    async def stats_api(range="today", model="", provider="", plan_start="", rate_mode=""):
         days = {"today": 1, "7d": 7, "30d": 30, "all": 0}.get(range, 1)
-        records = store.load(days); selected = {m.strip() for m in model.split(",") if m.strip()} if model else set()
-        available = sorted({r.get("model", "") for r in records if r.get("model")})
-        if selected: records = [r for r in records if r.get("model") in selected]
+        records = store.load(days)
+        selected_models = {m.strip() for m in model.split(",") if m.strip()} if model else set()
+        selected_providers = {p.strip() for p in provider.split(",") if p.strip()} if provider else set()
+        available_providers = sorted({r.get("provider", "") for r in records if r.get("provider")})
+        if selected_providers:
+            records = [r for r in records if r.get("provider") in selected_providers]
+        available_models = sorted({r.get("model", "") for r in records if r.get("model")})
+        if selected_models:
+            records = [r for r in records if r.get("model") in selected_models]
         window = store.load(2); rate = store.load(30)
-        if selected: window = [r for r in window if r.get("model") in selected]; rate = [r for r in rate if r.get("model") in selected]
+        if selected_providers:
+            window = [r for r in window if r.get("provider") in selected_providers]
+            rate = [r for r in rate if r.get("provider") in selected_providers]
+        if selected_models:
+            window = [r for r in window if r.get("model") in selected_models]
+            rate = [r for r in rate if r.get("model") in selected_models]
         now = datetime.now(); ps_dt = None
         if plan_start:
             try: ps_dt = datetime.fromisoformat(plan_start)
@@ -98,7 +109,9 @@ def create_handlers(service, store):
                "retry_backoff_max": settings.retry_backoff_max, "retry_backoff_429": settings.retry_backoff_429,
                "retry_backoff_max_429": settings.retry_backoff_max_429, "max_retries": settings.max_retries, "timeout": settings.timeout}
         return {"detail": compute_stats(records, range, cfg), "cumulative": _cumulative(store.summary), "range": range,
-                "record_count": len(records), "available_models": available, "upstream_windows": _upstream_window_stats(window), "rate_counts": {"5h": c5h, "week": c_week, "month": c_month}}
+                "record_count": len(records), "available_models": available_models,
+                "available_providers": available_providers, "upstream_windows": _upstream_window_stats(window),
+                "rate_counts": {"5h": c5h, "week": c_week, "month": c_month}}
 
     async def logs_page():
         if os.path.exists(settings.logs_html_path):

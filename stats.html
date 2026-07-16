@@ -7,16 +7,16 @@
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" onerror="window.__echartsFailed=true"></script>
 <style>
   :root{
-    --bg:#f6f7fb; --bg-grad:linear-gradient(180deg,#eef1f8 0%,#f6f7fb 240px);
-    --card:#fff; --card-2:#fafbfd; --border:#e6e8ef; --border-strong:#d1d5e0;
+    --bg:#f4f6f8;
+    --card:#fff; --card-2:#f8fafc; --border:#e2e7ee; --border-strong:#cbd3df;
     --text:#0f172a; --text-2:#334155; --muted:#6b7280; --muted-2:#9ca3af;
-    --primary:#6366f1; --primary-d:#4f46e5; --primary-l:#eef2ff;
+    --primary:#2563eb; --primary-d:#1d4ed8; --primary-l:#eff6ff;
     --ok:#10b981; --ok-l:#ecfdf5; --ok-d:#047857;
     --warn:#f59e0b; --warn-l:#fffbeb; --warn-d:#b45309;
     --danger:#ef4444; --danger-l:#fef2f2; --danger-d:#b91c1c;
     --blue:#3b82f6; --blue-l:#eff6ff; --blue-d:#1d4ed8;
     --gray:#94a3b8; --purple:#8b5cf6; --cyan:#06b6d4; --pink:#ec4899;
-    --radius:14px; --radius-sm:10px; --radius-xs:8px;
+    --radius:8px; --radius-sm:8px; --radius-xs:6px;
     --shadow-xs:0 1px 2px rgba(15,23,42,.04);
     --shadow:0 1px 3px rgba(15,23,42,.05),0 1px 2px rgba(15,23,42,.03);
     --shadow-md:0 4px 12px -2px rgba(15,23,42,.08),0 2px 6px -2px rgba(15,23,42,.04);
@@ -24,12 +24,12 @@
   }
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
-  body{margin:0;font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,sans-serif;background:var(--bg);background-image:var(--bg-grad);background-repeat:no-repeat;color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+  body{margin:0;font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 
-  header{background:rgba(255,255,255,.85);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:12px 28px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:50}
+  header{background:rgba(255,255,255,.94);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:12px 28px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:50}
   header .brand{display:flex;align-items:center;gap:10px}
-  header .logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--primary),var(--purple));display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;font-weight:700;box-shadow:0 2px 8px rgba(99,102,241,.35)}
-  header h1{font-size:16px;margin:0;font-weight:700;letter-spacing:-.01em}
+  header .logo{width:30px;height:30px;border-radius:7px;background:var(--primary);display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;font-weight:700;box-shadow:0 2px 6px rgba(37,99,235,.24)}
+  header h1{font-size:16px;margin:0;font-weight:700;letter-spacing:0}
   header .sub{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px}
   header .sub .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.15);animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
@@ -37,22 +37,37 @@
   .btn{border:1px solid var(--border);background:var(--card);color:var(--text-2);padding:7px 14px;border-radius:var(--radius-xs);cursor:pointer;font-size:13px;font-weight:500;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
   .btn:hover{border-color:var(--primary);color:var(--primary);background:var(--primary-l);box-shadow:var(--shadow-xs)}
   .btn:active{transform:translateY(1px)}
+  :is(.btn,.rs,.side-nav a):focus-visible{outline:2px solid var(--primary);outline-offset:2px}
   .btn-primary{background:var(--primary);border-color:var(--primary);color:#fff}
   .btn-primary:hover{background:var(--primary-d);border-color:var(--primary-d);color:#fff;box-shadow:0 2px 8px rgba(99,102,241,.3)}
   .switch{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--muted);cursor:pointer;user-select:none}
   .switch input{accent-color:var(--primary);cursor:pointer}
   .switch input:checked+span{color:var(--primary);font-weight:500}
 
-  main{max-width:1520px;margin:0 auto;padding:22px 28px 56px}
-  .sec-title{font-size:14px;font-weight:700;margin:32px 0 16px;display:flex;align-items:center;gap:10px;color:var(--text);letter-spacing:-.005em}
+  .dashboard-layout{max-width:1720px;margin:0 auto;padding:24px 28px 56px;display:grid;grid-template-columns:200px minmax(0,1fr);gap:24px;align-items:start}
+  main{min-width:0}
+  .side-nav{position:sticky;top:78px;max-height:calc(100vh - 98px);overflow:auto;padding:14px 10px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-xs)}
+  .side-nav .nav-label{padding:0 8px 12px;color:var(--text);font-size:13px;font-weight:700;border-bottom:1px solid var(--border);margin-bottom:10px}
+  .side-nav .nav-group{padding:9px 8px 4px;color:var(--muted-2);font-size:10px;font-weight:700;text-transform:uppercase}
+  .side-nav .nav-group[hidden]{display:none}
+  .side-nav a{display:flex;align-items:center;gap:9px;min-height:36px;margin:1px 0;padding:7px 9px;border-left:3px solid transparent;border-radius:5px;color:var(--muted);font-size:12px;font-weight:500;text-decoration:none;transition:color .15s,background .15s,border-color .15s}
+  .side-nav a::before{content:"";width:5px;height:5px;background:#cbd5e1;border-radius:50%;flex:0 0 auto;transition:background .15s,transform .15s}
+  .side-nav a:hover{color:var(--text);background:var(--card-2)}
+  .side-nav a.active{color:var(--primary-d);background:var(--primary-l);border-left-color:var(--primary);font-weight:650}
+  .side-nav a.active::before{background:var(--primary);transform:scale(1.25)}
+  .side-nav a[hidden]{display:none}
+  .side-nav .nav-divider{height:1px;background:var(--border);margin:12px 8px 8px}
+  .side-nav .nav-top::before{border-radius:1px;transform:rotate(45deg);border-width:1.5px 0 0 1.5px}
+  .sec-title{font-size:14px;font-weight:700;margin:36px 0 16px;display:flex;align-items:center;gap:10px;color:var(--text);letter-spacing:0}
+  .sec-title[id]{scroll-margin-top:84px}
   .sec-title:first-of-type{margin-top:10px}
-  .sec-title::before{content:"";width:4px;height:16px;border-radius:2px;background:linear-gradient(180deg,var(--primary),var(--purple));flex-shrink:0}
+  .sec-title::before{content:"";width:4px;height:16px;border-radius:2px;background:var(--primary);flex-shrink:0}
   .sec-title .count{font-size:12px;font-weight:500;color:var(--muted);background:var(--card);border:1px solid var(--border);padding:2px 8px;border-radius:99px}
 
   .overview{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
   .stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;box-shadow:var(--shadow);transition:all .2s;position:relative;overflow:hidden}
-  .stat-card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--primary),var(--purple));opacity:0;transition:opacity .2s}
-  .stat-card:hover{box-shadow:var(--shadow-md);transform:translateY(-1px);border-color:var(--border-strong)}
+  .stat-card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--primary),var(--cyan));opacity:0;transition:opacity .2s}
+  .stat-card:hover{box-shadow:var(--shadow-md);border-color:var(--border-strong)}
   .stat-card:hover::before{opacity:1}
   .stat-card .label{font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:500;display:flex;align-items:center;gap:6px}
   .stat-card .label .ico{width:14px;height:14px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:9px}
@@ -89,7 +104,7 @@
   .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
   .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);transition:box-shadow .2s}
   .card:hover{box-shadow:var(--shadow-md)}
-  .card h2{font-size:13px;margin:0 0 16px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:8px;letter-spacing:-.005em}
+  .card h2{font-size:13px;margin:0 0 16px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:8px;letter-spacing:0}
   .card h2::before{content:"";width:3px;height:14px;border-radius:2px;background:var(--primary);flex-shrink:0}
   .chart{width:100%;height:300px}
   .chart.sm{height:264px}
@@ -121,6 +136,8 @@
   .range-switch .rs:hover{color:var(--text);background:var(--bg)}
   .range-switch .rs.active{background:var(--primary);color:#fff;box-shadow:0 1px 4px rgba(99,102,241,.3)}
 
+  .filter-group{display:flex;align-items:center;gap:8px}
+  .filter-group .btn{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .model-filter{position:relative}
   .model-dropdown{position:absolute;top:100%;right:0;margin-top:6px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xs);box-shadow:var(--shadow-lg);padding:10px;min-width:220px;max-height:340px;overflow-y:auto;z-index:100;display:none}
   .model-dropdown.open{display:block}
@@ -141,16 +158,19 @@
   .section-wrap{animation:fadeIn .3s ease}
   @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 
-  .scroll-table{max-height:400px;overflow-y:auto;border-radius:var(--radius-xs)}
+  .scroll-table{max-height:400px;overflow:auto;border-radius:var(--radius-xs)}
+  .scroll-table table{min-width:680px}
   .scroll-table::-webkit-scrollbar{width:6px;height:6px}
   .scroll-table::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:3px}
   .scroll-table::-webkit-scrollbar-track{background:transparent}
 
-  @media(max-width:1100px){.overview{grid-template-columns:repeat(3,1fr)}.mini-cards{grid-template-columns:1fr}.grid2,.grid3{grid-template-columns:1fr}}
-  @media(max-width:640px){header{flex-wrap:wrap;gap:8px;padding:10px 16px}main{padding:16px}.overview{grid-template-columns:repeat(2,1fr)}.stat-card{padding:14px}.stat-card .value{font-size:22px}}
+  .duration-overview{grid-template-columns:repeat(5,1fr)}
+  @media(max-width:1180px){.dashboard-layout{grid-template-columns:156px minmax(0,1fr);gap:16px;padding-inline:20px}.overview{grid-template-columns:repeat(3,1fr)}.mini-cards{grid-template-columns:1fr}.grid2,.grid3{grid-template-columns:1fr}.duration-overview{grid-template-columns:repeat(3,1fr)}}
+  @media(max-width:820px){header{flex-wrap:wrap}.dashboard-layout{display:block;padding:0 16px 40px}.side-nav{position:relative;top:auto;z-index:1;display:flex;gap:2px;max-height:none;margin:0 -16px 16px;padding:9px 16px;overflow-x:auto;background:#edf1f6;border:0;border-bottom:1px solid var(--border);border-radius:0;box-shadow:none}.side-nav .nav-label,.side-nav .nav-group,.side-nav .nav-divider,.side-nav .nav-top{display:none}.side-nav a{flex:0 0 auto;min-height:32px;margin:0;padding:5px 9px;border:1px solid transparent;border-radius:6px;white-space:nowrap}.side-nav a::before{display:none}.side-nav a.active{border-color:#bfdbfe}.sec-title[id]{scroll-margin-top:84px}}
+  @media(max-width:640px){header{gap:8px;padding:10px 16px}.range-switch{order:3;width:100%;overflow-x:auto}.range-switch .rs{flex:1;white-space:nowrap}.filter-group{order:4;width:100%}.filter-group .model-filter{flex:1}.filter-group .btn{width:100%;justify-content:center}.model-dropdown{left:0;right:auto;max-width:calc(100vw - 32px)}.switch{display:none}.overview,.duration-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-card{padding:14px}.stat-card .value{font-size:22px}.card{padding:16px}.chart{height:270px}.chart.sm{height:240px}}
 </style>
 </head>
-<body>
+<body id="top">
 <header>
   <div class="brand">
     <div class="logo">R</div>
@@ -166,6 +186,17 @@
     <button class="rs" data-range="30d">30天</button>
     <button class="rs" data-range="all">全部</button>
   </div>
+  <div class="filter-group">
+  <div class="model-filter">
+    <button class="btn" id="providerFilterBtn">供应商: 全部 ▾</button>
+    <div class="model-dropdown" id="providerDropdown">
+      <div class="model-actions">
+        <button class="ma" id="providerAll">全选</button>
+        <button class="ma" id="providerNone">反选</button>
+      </div>
+      <div id="providerList"></div>
+    </div>
+  </div>
   <div class="model-filter">
     <button class="btn" id="modelFilterBtn">模型: 全部 ▾</button>
     <div class="model-dropdown" id="modelDropdown">
@@ -176,10 +207,30 @@
       <div id="modelList"></div>
     </div>
   </div>
+  </div>
   <div class="rate-pop" id="ratePop"><label>流控模式</label><div class="rate-modes"><label class="rate-mode"><input type="radio" name="rateMode" value="platform"> 平台流控</label><label class="rate-mode"><input type="radio" name="rateMode" value="sliding"> 滑动窗口</label><label class="rate-mode"><input type="radio" name="rateMode" value="fixed"> 固定周期</label></div><div class="rate-plan-field" id="planField"><label>订阅起始时间</label><input type="datetime-local" id="planStartInput"></div><div class="rate-pop-btns"><button class="save" id="planStartSave">确定</button><button class="clear" id="planStartClear">清除</button></div></div>
   <label class="switch"><input type="checkbox" id="autoRefresh"><span>自动刷新 (15s)</span></label>
   <button class="btn btn-primary" id="refreshBtn">刷新</button>
 </header>
+<div class="dashboard-layout">
+<aside class="side-nav" aria-label="分析版块导航">
+  <div class="nav-label">快速导航</div>
+  <div class="nav-group">概览</div>
+  <a href="#overview" data-target="overview">区间概览</a>
+  <a href="#windows" data-target="windows">分时可用率</a>
+  <a href="#cumulative" data-target="cumulative">累计分布</a>
+  <div class="nav-group">分析</div>
+  <a href="#availability" data-target="availability">可用性</a>
+  <a href="#status-codes" data-target="status-codes">状态码</a>
+  <a href="#retry-analysis" data-target="retry-analysis">重试分析</a>
+  <a href="#duration" data-target="duration">耗时分析</a>
+  <a href="#time-patterns" data-target="time-patterns">时间模式</a>
+  <a href="#hedge-modes" data-target="hedge-modes">竞速模式</a>
+  <div class="nav-group">数据</div>
+  <a href="#details" data-target="details">明细</a>
+  <div class="nav-divider"></div>
+  <a class="nav-top" href="#top">返回顶部</a>
+</aside>
 <main>
   <div class="err-tip" id="errTip">ECharts 加载失败，请检查网络连接（需访问 CDN）。</div>
 
@@ -203,7 +254,7 @@
   </div>
 
   <div id="detailOverviewSection" class="section-wrap" style="display:none">
-    <div class="sec-title">区间概览 <span class="count" id="rangeLabel">今天</span></div>
+    <div class="sec-title" id="overview">区间概览 <span class="count" id="rangeLabel">今天</span></div>
     <div class="overview hero-overview">
       <div class="stat-card"><div class="label">总请求数</div><div class="value" id="s_total">-</div><div class="cum-sub"><span class="prefix">累计</span><span id="c_total_sub">-</span></div><div class="rate-sub" id="s_rate"></div></div>
       <div class="stat-card"><div class="label">总重试次数</div><div class="value" id="s_retries">-</div><div class="hint" id="s_retries_hint"></div><div class="cum-sub"><span class="prefix">累计</span><span id="c_retries_sub">-</span></div></div>
@@ -215,12 +266,12 @@
   </div>
 
   <div id="windowSection" class="section-wrap" style="display:none">
-    <div class="sec-title">上游分时可用率 <span class="count">滑动窗口 · 实时</span></div>
+    <div class="sec-title" id="windows">上游分时可用率 <span class="count">滑动窗口 · 实时</span></div>
     <div class="overview" id="upstreamWindows"></div>
   </div>
 
   <div id="cumDistSection" class="section-wrap" style="display:none">
-    <div class="sec-title">累计分布 <span class="count">全量历史 · 含已归档明细</span></div>
+    <div class="sec-title" id="cumulative">累计分布 <span class="count">全量历史 · 含已归档明细</span></div>
     <div class="grid2" style="margin-bottom:14px;margin-top:14px">
       <div class="card" style="display:flex;flex-direction:column"><h2>累计状态码分布</h2><div id="cumStatusChart" style="flex:1;min-height:240px"></div></div>
       <div class="card" style="display:flex;flex-direction:column"><h2>累计各模型</h2>
@@ -232,7 +283,7 @@
   <div id="noDetail" class="empty" style="display:none">本时段范围内无明细记录（累计数据见上方）。</div>
 
   <div id="content" class="section-wrap" style="display:none">
-    <div class="sec-title">可用性分析</div>
+    <div class="sec-title" id="availability">可用性分析</div>
     <div class="mini-cards">
       <div class="stat-card"><div class="label">当前连续</div><div class="value" id="a_cur">-</div><div class="hint" id="a_cur_hint"></div></div>
       <div class="stat-card"><div class="label">最长连续失败</div><div class="value" id="a_worst">-</div><div class="hint">次</div></div>
@@ -244,22 +295,22 @@
     </div>
     <div class="card" style="margin-top:14px"><h2>可用率时间趋势</h2><div id="availTimelineChart" class="chart sm"></div></div>
 
-    <div class="sec-title">状态码分布</div>
+    <div class="sec-title" id="status-codes">状态码分布</div>
     <div class="grid2">
       <div class="card"><h2>上游状态码分布</h2><div id="statusCatChart" class="chart sm"></div></div>
       <div class="card"><h2>上游状态码</h2><div id="upstreamStatusChart" class="chart sm"></div></div>
     </div>
     <div class="card" style="margin-top:14px"><h2>各模型状态码构成</h2><div id="statusByModelChart" class="chart"></div></div>
 
-    <div class="sec-title">重试分析</div>
+    <div class="sec-title" id="retry-analysis">重试分析</div>
     <div class="grid2">
       <div class="card"><h2>重试次数分布</h2><div id="distChart" class="chart sm"></div></div>
       <div class="card"><h2>重试负担分桶</h2><div id="burdenChart" class="chart sm"></div></div>
     </div>
     <div class="card" style="margin-top:14px"><h2>上游错误码分布（含重试）</h2><div id="errorCodesChart" class="chart sm"></div></div>
 
-    <div class="sec-title">耗时分析</div>
-    <div class="overview" style="grid-template-columns:repeat(5,1fr)">
+    <div class="sec-title" id="duration">耗时分析</div>
+    <div class="overview duration-overview">
       <div class="stat-card"><div class="label">平均</div><div class="value" id="d_avg">-</div><div class="hint">秒</div></div>
       <div class="stat-card"><div class="label">P50</div><div class="value" id="d_p50">-</div><div class="hint">秒</div></div>
       <div class="stat-card"><div class="label">P95</div><div class="value" id="d_p95">-</div><div class="hint">秒</div></div>
@@ -275,14 +326,14 @@
       </div>
     </div>
 
-    <div class="sec-title">时间模式</div>
+    <div class="sec-title" id="time-patterns">时间模式</div>
     <div class="grid2">
       <div class="card"><h2>按时段（0-23点）</h2><div id="byHourChart" class="chart"></div></div>
       <div class="card"><h2>分时可用率（0-23点）</h2><div id="availByHourChart" class="chart"></div></div>
     </div>
     <div class="card" style="margin-top:14px"><h2>时间趋势（请求数 / 重试数）</h2><div id="timelineChart" class="chart"></div></div>
 
-    <div class="sec-title">竞速模式对比</div>
+    <div class="sec-title" id="hedge-modes">竞速模式对比</div>
     <div class="grid2">
       <div class="card"><h2>各模式可用率对比</h2><div id="modeAvailChart" class="chart sm"></div></div>
       <div class="card"><h2>各模式耗时与重试</h2><div id="modeDurationChart" class="chart sm"></div></div>
@@ -291,7 +342,7 @@
       <div class="scroll-table"><table><thead><tr><th>模式</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均重试</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">平均耗时(s)</th><th class="num">P95(s)</th><th class="num">最大重试</th></tr></thead><tbody id="modeTbody"></tbody></table></div>
     </div>
 
-    <div class="sec-title">明细</div>
+    <div class="sec-title" id="details">明细</div>
     <div class="grid2">
       <div class="card"><h2>按供应商</h2>
         <div class="scroll-table"><table><thead><tr><th>供应商</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">最大</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">P95(s)</th><th>主失败码</th></tr></thead><tbody id="providerTbody"></tbody></table></div>
@@ -305,6 +356,7 @@
     </div>
   </div>
 </main>
+</div>
 
 <script>
 const charts={};
@@ -314,11 +366,42 @@ const COL={primary:'#6366f1',ok:'#10b981',warn:'#f59e0b',danger:'#ef4444',blue:'
 const CATCOL={'2xx':'#10b981','3xx':'#3b82f6','4xx':'#f59e0b','5xx':'#ef4444','exception':'#94a3b8'};
 const PALETTE=['#6366f1','#10b981','#f59e0b','#ef4444','#3b82f6','#8b5cf6','#06b6d4','#ec4899','#94a3b8','#f97316'];
 
+const sectionLinks=[...document.querySelectorAll('.side-nav a[data-target]')];
+const sectionObserver=new IntersectionObserver(entries=>{
+  const visible=entries.filter(entry=>entry.isIntersecting).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top);
+  if(!visible.length)return;
+  const id=visible[0].target.id;
+  sectionLinks.forEach(link=>{
+    const active=link.dataset.target===id;
+    link.classList.toggle('active',active);
+    if(active)link.setAttribute('aria-current','location');else link.removeAttribute('aria-current');
+  });
+},{rootMargin:'-18% 0px -70% 0px',threshold:0});
+sectionLinks.forEach(link=>{
+  const section=document.getElementById(link.dataset.target);
+  if(section)sectionObserver.observe(section);
+});
+function updateNavVisibility(){
+  sectionLinks.forEach(link=>{
+    const section=document.getElementById(link.dataset.target);
+    link.hidden=!section||section.offsetParent===null;
+  });
+  document.querySelectorAll('.side-nav .nav-group').forEach(group=>{
+    let item=group.nextElementSibling;
+    let hasVisibleLink=false;
+    while(item&&!item.classList.contains('nav-group')&&!item.classList.contains('nav-divider')){
+      if(item.matches('a[data-target]')&&!item.hidden)hasVisibleLink=true;
+      item=item.nextElementSibling;
+    }
+    group.hidden=!hasVisibleLink;
+  });
+}
+
 function availColor(p){return p>=95?COL.ok:p>=80?COL.warn:COL.danger}
 function ratePill(r){const c=r>=0.95?'ok':r>=0.8?'warn':'danger';return `<span class="pill ${c}">${(r*100).toFixed(1)}%</span>`}
 function pctPill(p){const c=p>=95?'ok':p>=80?'warn':'danger';return `<span class="pill ${c}">${p.toFixed(1)}%</span>`}
 function statusTag(s,cat){return `<span class="tag" style="background:${CATCOL[cat]||COL.gray}1a;color:${CATCOL[cat]||COL.gray}">${s===0?'异常':s}</span>`}
-function esc(s){return String(s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}
+function esc(s){return String(s||'').replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]))}
 function fmtTs(ts){
   if(currentRange==='today')return ts.slice(11,16);
   if(currentRange==='7d'||currentRange==='30d')return ts.slice(5,13).replace('T',' ');
@@ -551,6 +634,8 @@ function renderModeTable(data){
 let currentRange='today';
 let selectedModels=new Set();
 let availableModels=[];
+let selectedProviders=new Set();
+let availableProviders=[];
 const RANGE_LABELS={today:'今天','7d':'近 7 天','30d':'近 30 天',all:'全部历史'};
 function statusColorStr(s){s=parseInt(s);return s===0?COL.gray:s<300?COL.ok:s<400?COL.blue:s<500?COL.warn:COL.danger}
 
@@ -563,6 +648,7 @@ function renderCumulative(c){
 async function load(){
   try{
     let url='/stats/api?range='+currentRange;
+    if(selectedProviders.size>0)url+='&provider='+encodeURIComponent([...selectedProviders].join(','));
     if(selectedModels.size>0)url+='&model='+encodeURIComponent([...selectedModels].join(','));
     const ps=getPlanStart();
     if(ps)url+='&plan_start='+encodeURIComponent(ps);
@@ -570,10 +656,20 @@ async function load(){
     if(mode)url+='&rate_mode='+encodeURIComponent(mode);
     const r=await fetch(url);const d=await r.json();
     const detail=d.detail||{};const cum=d.cumulative||{};
+    if(d.available_providers){
+      const changed=JSON.stringify(d.available_providers)!==JSON.stringify(availableProviders);
+      availableProviders=d.available_providers;
+      if(changed)populateProviderDropdown();
+      updateProviderBtn();
+    }
     if(d.available_models){
       const changed=JSON.stringify(d.available_models)!==JSON.stringify(availableModels);
       availableModels=d.available_models;
-      if(changed)populateModelDropdown();
+      if(changed){
+        const previousSelection=[...selectedModels].sort().join('\u0000');
+        populateModelDropdown();
+        if(previousSelection!==[...selectedModels].sort().join('\u0000'))return load();
+      }
       updateModelBtn();
     }
     document.getElementById('rangeLabel').textContent=RANGE_LABELS[d.range]||d.range;
@@ -618,6 +714,7 @@ async function load(){
       renderModeDurationChart(detail.mode_comparison||[]);
       renderModeTable(detail.mode_comparison||[]);
     }
+    updateNavVisibility();
     document.getElementById('lastUpdate').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN');
     if(window.__echartsFailed)document.getElementById('errTip').style.display='flex';
   }catch(e){document.getElementById('lastUpdate').textContent='加载失败: '+e.message}
@@ -655,11 +752,39 @@ function updateModelBtn(){
   const names=[...selectedModels];
   btn.textContent='模型: '+(names.length<=2?names.join(', '):names[0]+' +'+(names.length-1))+' ▾';
 }
-document.getElementById('modelFilterBtn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('modelDropdown').classList.toggle('open')});
-document.addEventListener('click',()=>document.getElementById('modelDropdown').classList.remove('open'));
+document.getElementById('modelFilterBtn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('providerDropdown').classList.remove('open');document.getElementById('modelDropdown').classList.toggle('open')});
+document.addEventListener('click',()=>document.querySelectorAll('.model-dropdown').forEach(menu=>menu.classList.remove('open')));
 document.getElementById('modelDropdown').addEventListener('click',e=>e.stopPropagation());
 document.getElementById('modelAll').addEventListener('click',()=>{selectedModels=new Set();populateModelDropdown();updateModelBtn();load()});
 document.getElementById('modelNone').addEventListener('click',()=>{const boxes=[...document.querySelectorAll('#modelList input')];boxes.forEach(cb=>cb.checked=!cb.checked);const checked=boxes.filter(c=>c.checked).map(c=>c.value);if(checked.length===0||checked.length===availableModels.length)selectedModels=new Set();else selectedModels=new Set(checked);updateModelBtn();load()});
+
+function populateProviderDropdown(){
+  const list=document.getElementById('providerList');
+  selectedProviders=new Set([...selectedProviders].filter(provider=>availableProviders.includes(provider)));
+  list.innerHTML=availableProviders.map(provider=>{
+    const checked=(selectedProviders.size===0||selectedProviders.has(provider))?'checked':'';
+    return `<label class="model-item"><input type="checkbox" value="${esc(provider)}" ${checked}><span>${esc(provider)}</span></label>`;
+  }).join('');
+  list.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    cb.addEventListener('change',()=>{
+      const checked=[...list.querySelectorAll('input:checked')].map(item=>item.value);
+      if(checked.length===0||checked.length===availableProviders.length)selectedProviders=new Set();
+      else selectedProviders=new Set(checked);
+      updateProviderBtn();
+      load();
+    });
+  });
+}
+function updateProviderBtn(){
+  const btn=document.getElementById('providerFilterBtn');
+  if(selectedProviders.size===0){btn.textContent='供应商: 全部 ▾';return;}
+  const names=[...selectedProviders];
+  btn.textContent='供应商: '+(names.length<=2?names.join(', '):names[0]+' +'+(names.length-1))+' ▾';
+}
+document.getElementById('providerFilterBtn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('modelDropdown').classList.remove('open');document.getElementById('providerDropdown').classList.toggle('open')});
+document.getElementById('providerDropdown').addEventListener('click',e=>e.stopPropagation());
+document.getElementById('providerAll').addEventListener('click',()=>{selectedProviders=new Set();populateProviderDropdown();updateProviderBtn();load()});
+document.getElementById('providerNone').addEventListener('click',()=>{const boxes=[...document.querySelectorAll('#providerList input')];boxes.forEach(cb=>cb.checked=!cb.checked);const checked=boxes.filter(c=>c.checked).map(c=>c.value);if(checked.length===0||checked.length===availableProviders.length)selectedProviders=new Set();else selectedProviders=new Set(checked);updateProviderBtn();load()});
 
 const PLAN_KEY='plan_start_ts';
 const MODE_KEY='rate_mode';
