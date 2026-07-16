@@ -1,0 +1,27 @@
+services:
+  llm-retry-proxy:
+    build:
+      context: .
+    container_name: llm-retry-proxy
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LISTEN_HOST: 0.0.0.0
+      KEY_POOL_FILE: /app/key_pool.csv
+      LOG_DIR: /app/logs
+    ports:
+      - "${LISTEN_PORT:-8080}:${LISTEN_PORT:-8080}"
+    volumes:
+      - ./key_pool.csv:/app/key_pool.csv:ro
+      - ./logs:/app/logs
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('LISTEN_PORT','8080')+'/health', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

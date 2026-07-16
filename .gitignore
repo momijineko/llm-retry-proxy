@@ -14,6 +14,7 @@ key_pool.csv
 
 # Logs & runtime data
 logs/
+logs.import/
 *.log
 *.jsonl
 *.jsonl.bak

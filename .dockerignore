@@ -1,0 +1,7 @@
+.git
+.env
+key_pool.csv
+logs
+logs.import
+__pycache__
+*.py[cod]
