@@ -160,14 +160,28 @@
 
   .scroll-table{max-height:400px;overflow:auto;border-radius:var(--radius-xs)}
   .scroll-table table{min-width:680px}
+  .table-note{margin:-8px 0 12px;color:var(--muted);font-size:11px}
+  .key-pool-list{display:grid;gap:14px}
+  .key-pool-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}
+  .key-pool-head h2{margin:0}
+  .key-pool-endpoint{margin-top:3px;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
+  .key-pool-size{flex:0 0 auto;color:var(--muted);font-size:11px;background:var(--card-2);border:1px solid var(--border);border-radius:99px;padding:2px 8px}
+  .key-pool-metrics{display:flex;flex-wrap:wrap;gap:8px 18px;margin:0 0 8px;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);color:var(--muted);font-size:11px}
+  .key-pool-metrics strong{margin-left:4px;color:var(--text-2);font-size:12px;font-variant-numeric:tabular-nums}
+  .key-pool-body{display:grid;grid-template-columns:minmax(300px,.7fr) minmax(520px,1.3fr);gap:20px;align-items:start;margin-top:14px}
+  .key-pool-chart-panel{min-width:0;padding-right:20px;border-right:1px solid var(--border)}
+  .key-pool-panel-title{font-size:12px;font-weight:700;color:var(--text-2);margin-bottom:4px}
+  .key-pool-panel-sub{font-size:10px;color:var(--muted);margin-bottom:6px}
+  .key-pool-chart{width:100%;min-height:190px}
+  .key-pool-table{max-height:340px}
   .scroll-table::-webkit-scrollbar{width:6px;height:6px}
   .scroll-table::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:3px}
   .scroll-table::-webkit-scrollbar-track{background:transparent}
 
   .duration-overview{grid-template-columns:repeat(5,1fr)}
-  @media(max-width:1180px){.dashboard-layout{grid-template-columns:156px minmax(0,1fr);gap:16px;padding-inline:20px}.overview{grid-template-columns:repeat(3,1fr)}.mini-cards{grid-template-columns:1fr}.grid2,.grid3{grid-template-columns:1fr}.duration-overview{grid-template-columns:repeat(3,1fr)}}
+  @media(max-width:1180px){.dashboard-layout{grid-template-columns:156px minmax(0,1fr);gap:16px;padding-inline:20px}.overview{grid-template-columns:repeat(3,1fr)}.mini-cards{grid-template-columns:1fr}.grid2,.grid3{grid-template-columns:1fr}.duration-overview{grid-template-columns:repeat(3,1fr)}.key-pool-body{grid-template-columns:1fr}.key-pool-chart-panel{padding-right:0;border-right:0;border-bottom:1px solid var(--border);padding-bottom:12px}}
   @media(max-width:820px){header{flex-wrap:wrap}.dashboard-layout{display:block;padding:0 16px 40px}.side-nav{position:relative;top:auto;z-index:1;display:flex;gap:2px;max-height:none;margin:0 -16px 16px;padding:9px 16px;overflow-x:auto;background:#edf1f6;border:0;border-bottom:1px solid var(--border);border-radius:0;box-shadow:none}.side-nav .nav-label,.side-nav .nav-group,.side-nav .nav-divider,.side-nav .nav-top{display:none}.side-nav a{flex:0 0 auto;min-height:32px;margin:0;padding:5px 9px;border:1px solid transparent;border-radius:6px;white-space:nowrap}.side-nav a::before{display:none}.side-nav a.active{border-color:#bfdbfe}.sec-title[id]{scroll-margin-top:84px}}
-  @media(max-width:640px){header{gap:8px;padding:10px 16px}.range-switch{order:3;width:100%;overflow-x:auto}.range-switch .rs{flex:1;white-space:nowrap}.filter-group{order:4;width:100%}.filter-group .model-filter{flex:1}.filter-group .btn{width:100%;justify-content:center}.model-dropdown{left:0;right:auto;max-width:calc(100vw - 32px)}.switch{display:none}.overview,.duration-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-card{padding:14px}.stat-card .value{font-size:22px}.card{padding:16px}.chart{height:270px}.chart.sm{height:240px}}
+  @media(max-width:640px){header{gap:8px;padding:10px 16px}.range-switch{order:3;width:100%;overflow-x:auto}.range-switch .rs{flex:1;white-space:nowrap}.filter-group{order:4;width:100%}.filter-group .model-filter{flex:1}.filter-group .btn{width:100%;justify-content:center}.model-dropdown{left:0;right:auto;max-width:calc(100vw - 32px)}.switch{display:none}.overview,.duration-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-card{padding:14px}.card{padding:16px}.stat-card .value{font-size:22px}.chart{height:270px}.chart.sm{height:240px}}
 </style>
 </head>
 <body id="top">
@@ -219,6 +233,8 @@
   <a href="#overview" data-target="overview">区间概览</a>
   <a href="#windows" data-target="windows">分时可用率</a>
   <a href="#cumulative" data-target="cumulative">累计分布</a>
+  <div class="nav-group">号池</div>
+  <a href="#key-pools" data-target="key-pools">Key 可用率</a>
   <div class="nav-group">分析</div>
   <a href="#availability" data-target="availability">可用性</a>
   <a href="#status-codes" data-target="status-codes">状态码</a>
@@ -278,6 +294,11 @@
         <div class="scroll-table" style="flex:1;max-height:340px"><table><thead><tr><th>模型</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">最大</th></tr></thead><tbody id="cumModelTbody"></tbody></table></div>
       </div>
     </div>
+  </div>
+
+  <div id="keyPoolSection" class="section-wrap" style="display:none">
+    <div class="sec-title" id="key-pools">号池 Key 可用率 <span class="count" id="keyPoolCount"></span></div>
+    <div class="key-pool-list" id="keyPoolList"></div>
   </div>
 
   <div id="noDetail" class="empty" style="display:none">本时段范围内无明细记录（累计数据见上方）。</div>
@@ -360,7 +381,8 @@
 
 <script>
 const charts={};
-function C(id){if(window.__echartsFailed)return null;if(!charts[id]){const el=document.getElementById(id);charts[id]=echarts.init(el);if(window.ResizeObserver)new ResizeObserver(()=>{if(charts[id])charts[id].resize()}).observe(el)}return charts[id]}
+const chartObservers={};
+function C(id){if(window.__echartsFailed)return null;if(!charts[id]){const el=document.getElementById(id);charts[id]=echarts.init(el);if(window.ResizeObserver){const observer=new ResizeObserver(()=>{if(charts[id])charts[id].resize()});observer.observe(el);chartObservers[id]=observer}}return charts[id]}
 window.addEventListener('resize',()=>Object.values(charts).forEach(c=>c&&c.resize()));
 const COL={primary:'#6366f1',ok:'#10b981',warn:'#f59e0b',danger:'#ef4444',blue:'#3b82f6',gray:'#94a3b8',purple:'#8b5cf6',cyan:'#06b6d4',pink:'#ec4899'};
 const CATCOL={'2xx':'#10b981','3xx':'#3b82f6','4xx':'#f59e0b','5xx':'#ef4444','exception':'#94a3b8'};
@@ -589,6 +611,73 @@ function renderAggTable(id,data,key){
     <td>${d.dominant_fail_status!==null?`<span class="tag" style="background:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}1a;color:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}">${d.dominant_fail_status===0?'异常':d.dominant_fail_status}×${d.fail_status_count}</span>`:'-'}</td>
   </tr>`).join('');
 }
+function renderKeyRows(data){
+  return data.map(d=>`<tr>
+    <td class="mono">${esc(d.key_id)}</td>
+    <td>${d.cooled?`<span class="pill warn">冷却 ${Math.ceil(d.cooldown_remaining||0)}s</span>`:'<span class="pill ok">可用</span>'}</td>
+    <td class="num">${Math.max(d.attempts-d.ignored_attempts,0)}</td>
+    <td class="num">${d.failed_attempts}</td>
+    <td class="num">${d.availability_pct===null?'—':pctPill(d.availability_pct)}</td>
+    <td class="num">${d.request_availability_pct===null?'—':pctPill(d.request_availability_pct)}</td>
+  </tr>`).join('');
+}
+function keyPoolEndpoint(pool){
+  let host=pool.upstream;
+  try{const url=new URL(pool.upstream);host=url.host+(url.pathname==='/'?'':url.pathname.replace(/\/$/,''))}catch(_e){}
+  return host;
+}
+function keyPoolMetrics(keys){
+  const attempts=keys.reduce((sum,key)=>sum+key.attempts,0);
+  const ignored=keys.reduce((sum,key)=>sum+key.ignored_attempts,0);
+  const failed=keys.reduce((sum,key)=>sum+key.failed_attempts,0);
+  const measured=Math.max(attempts-ignored,0);
+  const availability=measured?((measured-failed)/measured*100).toFixed(1)+'%':'—';
+  const ready=keys.filter(key=>!key.cooled).length;
+  return `<span>当前可用<strong>${ready}/${keys.length}</strong></span><span>有效样本<strong>${measured}</strong></span><span>失败尝试<strong>${failed}</strong></span><span>加权可用率<strong>${availability}</strong></span>`;
+}
+function renderKeyPoolChart(id,data){
+  const chart=C(id);if(!chart)return;
+  const measured=data.filter(row=>row.availability_pct!==null).sort((a,b)=>a.availability_pct-b.availability_pct);
+  const attention=[];const seen=new Set();
+  const add=row=>{if(row&&!seen.has(row.key_id)){seen.add(row.key_id);attention.push(row)}};
+  measured.filter(row=>row.availability_pct<95).forEach(add);
+  data.filter(row=>row.cooled).forEach(add);
+  data.filter(row=>row.availability_pct===null).forEach(add);
+  measured.forEach(add);
+  const rows=attention.slice(0,8);
+  chart.setOption({
+    animationDuration:350,
+    tooltip:{trigger:'axis',axisPointer:{type:'shadow'},backgroundColor:'rgba(15,23,42,.94)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12},formatter:params=>{
+      const row=params[0].data.raw;const sampleCount=Math.max(row.attempts-row.ignored_attempts,0);
+      return `<strong>${esc(row.key_id)}</strong><br>Key 可用率：${row.availability_pct===null?'暂无样本':row.availability_pct.toFixed(1)+'%'}<br>有效样本：${sampleCount}<br>失败尝试：${row.failed_attempts}<br>忽略连接故障：${row.ignored_attempts}`;
+    }},
+    grid:{left:82,right:48,top:8,bottom:24,containLabel:false},
+    xAxis:{type:'value',min:0,max:100,axisLabel:{formatter:'{value}%',color:'#9ca3af',fontSize:9},splitLine:{lineStyle:{color:'#eef1f5',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},
+    yAxis:{type:'category',inverse:true,data:rows.map(row=>row.key_id),axisLabel:{color:'#334155',fontSize:10,width:70,overflow:'truncate'},axisLine:{show:false},axisTick:{show:false}},
+    series:[{type:'bar',barWidth:12,showBackground:true,backgroundStyle:{color:'#eef1f5',borderRadius:3},data:rows.map(row=>{
+      const value=row.availability_pct===null?0:row.availability_pct;
+      const color=row.availability_pct===null?COL.gray:availColor(value);
+      return {value,raw:row,itemStyle:{color,borderRadius:3},label:{show:true,position:value>=22?'insideRight':'right',color:value>=22?'#fff':color,fontSize:9,formatter:row.availability_pct===null?'暂无':value.toFixed(1)+'%'}};
+    })}]
+  });
+}
+function renderKeyPools(pools){
+  pools=pools||[];
+  const section=document.getElementById('keyPoolSection');
+  section.style.display=pools.length?'block':'none';
+  Object.keys(charts).filter(id=>id.startsWith('keyPoolChart')).forEach(id=>{charts[id].dispose();delete charts[id];if(chartObservers[id]){chartObservers[id].disconnect();delete chartObservers[id]}});
+  if(!pools.length){document.getElementById('keyPoolList').innerHTML='';return;}
+  document.getElementById('keyPoolCount').textContent=pools.length+' 个号池';
+  document.getElementById('keyPoolList').innerHTML=pools.map((pool,index)=>`<div class="card">
+    <div class="key-pool-head"><div><h2>${esc(pool.provider||'未命名号池')}</h2><div class="key-pool-endpoint mono">${esc(keyPoolEndpoint(pool))}</div></div><span class="key-pool-size">${pool.keys.length} Keys</span></div>
+    <div class="key-pool-metrics">${keyPoolMetrics(pool.keys)}</div>
+    <div class="key-pool-body">
+      <div class="key-pool-chart-panel"><div class="key-pool-panel-title">需关注 Key</div><div class="key-pool-panel-sub">低于 95%、冷却中或暂无样本</div><div class="key-pool-chart" id="keyPoolChart${index}" style="height:${Math.max(190,Math.min(pool.keys.length,8)*28+42)}px"></div></div>
+      <div class="scroll-table key-pool-table"><table><thead><tr><th>Key</th><th>当前状态</th><th class="num">有效样本</th><th class="num">失败尝试</th><th class="num">Key 可用率</th><th class="num">请求成功率</th></tr></thead><tbody>${renderKeyRows(pool.keys)}</tbody></table></div>
+    </div>
+  </div>`).join('');
+  pools.forEach((pool,index)=>renderKeyPoolChart('keyPoolChart'+index,pool.keys));
+}
 function renderPathTable(data){
   document.getElementById('pathTbody').innerHTML=data.map(d=>`<tr>
     <td class="mono">${esc(d.path)}</td><td class="num">${d.requests}</td>
@@ -656,6 +745,7 @@ async function load(){
     if(mode)url+='&rate_mode='+encodeURIComponent(mode);
     const r=await fetch(url);const d=await r.json();
     const detail=d.detail||{};const cum=d.cumulative||{};
+    renderKeyPools(d.key_pools||[]);
     if(d.available_providers){
       const changed=JSON.stringify(d.available_providers)!==JSON.stringify(availableProviders);
       availableProviders=d.available_providers;

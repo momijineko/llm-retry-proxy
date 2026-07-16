@@ -13,7 +13,7 @@ from .dlp import inspect_json_body
 from .routes import ROUTES, is_excluded_path, match_route
 from .key_pool import KEY_POOLS
 from .retry import filter_headers, parse_model, reset_client_ip, set_client_ip, _tag
-from .stats import _req_succeeded, _upstream_window_stats, compute_stats
+from .stats import _normalize_provider, _req_succeeded, _upstream_window_stats, compute_key_pool_stats, compute_stats
 
 SKIP_REQUEST_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade"}
 SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "keep-alive", "content-encoding"}
@@ -108,9 +108,16 @@ def create_handlers(service, store):
                "retry_interval_429": settings.retry_interval_429, "retry_backoff": settings.retry_backoff,
                "retry_backoff_max": settings.retry_backoff_max, "retry_backoff_429": settings.retry_backoff_429,
                "retry_backoff_max_429": settings.retry_backoff_max_429, "max_retries": settings.max_retries, "timeout": settings.timeout}
+        pool_configs = []
+        for url, pool in KEY_POOLS.items():
+            pool_provider = _normalize_provider(pool.provider or settings.provider)
+            if not selected_providers or pool_provider in selected_providers:
+                pool_configs.append({"id": url, "upstream": url, "provider": pool_provider,
+                                     "keys": pool.status()})
         return {"detail": compute_stats(records, range, cfg), "cumulative": _cumulative(store.summary), "range": range,
                 "record_count": len(records), "available_models": available_models,
                 "available_providers": available_providers, "upstream_windows": _upstream_window_stats(window),
+                "key_pools": compute_key_pool_stats(records, pool_configs),
                 "rate_counts": {"5h": c5h, "week": c_week, "month": c_month}}
 
     async def logs_page():
@@ -182,6 +189,7 @@ def create_handlers(service, store):
                     logger.info(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免 count={dlp.exemptions}")
         model_name = parse_model(body)
         base_pool = KEY_POOLS.get(upstream)
+        key_pool = upstream if base_pool else ""
         request_pool = base_pool.for_request(model_name, remaining) if base_pool else None
         ip_token = set_client_ip(client_ip)
         try:
@@ -195,6 +203,7 @@ def create_handlers(service, store):
         retry_codes = result.retry_codes
         first_ok = result.first_ok
         key_id = result.key_id
+        key_attempts = getattr(result, "key_attempts", None) or []
         start = result.started_at
         await store.write({"ts": datetime.now().isoformat(timespec="milliseconds"), "method": request.method,
                            "path": "/" + path, "provider": provider, "model": model_name,
@@ -202,7 +211,8 @@ def create_handlers(service, store):
                            "attempts": total_sent, "retries": max(total_sent - 1, 0),
                            "duration_s": round(time.time() - start, 3), "succeeded": bool(response and response.status_code < 400),
                            "retry_codes": retry_codes, "mode": settings.hedge_mode, "first_ok": first_ok,
-                           "key_id": key_id, "client_ip": client_ip})
+                           "key_id": key_id, "key_pool": key_pool, "key_attempts": key_attempts,
+                           "client_ip": client_ip})
         if response is None:
             logger.error(f"{_tag(request.method, path, provider, model_name, client_ip)} 放弃({total_sent}发) {time.time() - start:.1f}s")
             return Response(f'{{"error":{{"message":"upstream overloaded after {total_sent} attempts","type":"upstream_error","code":"503"}}}}', status_code=503, media_type="application/json", headers={"X-Forward-Attempts": str(total_sent)})

@@ -102,6 +102,92 @@ def _agg_by(records: list, key: str, label: str, key_fn=None):
     return out
 
 
+def _agg_by_key(records: list) -> list:
+    attempts = defaultdict(lambda: {"attempts": 0, "available": 0, "failed": 0, "ignored": 0, "legacy": 0})
+    requests = {item["key_id"]: item for item in _agg_by(records, "key_id", "key_id") if item["key_id"] != "(unknown)"}
+    for record in records:
+        trace = record.get("key_attempts")
+        if isinstance(trace, list) and trace:
+            for item in trace:
+                if not isinstance(item, dict) or not item.get("key_id"):
+                    continue
+                bucket = attempts[item["key_id"]]
+                bucket["attempts"] += 1
+                if item.get("available") is True:
+                    bucket["available"] += 1
+                elif item.get("available") is False:
+                    bucket["failed"] += 1
+                else:
+                    bucket["ignored"] += 1
+            continue
+        key_id = record.get("key_id", "")
+        if key_id:
+            bucket = attempts[key_id]
+            bucket["attempts"] += 1
+            bucket["legacy"] += 1
+            bucket["available" if _req_succeeded(record) else "failed"] += 1
+
+    out = []
+    for key_id in attempts.keys() | requests.keys():
+        attempt = attempts[key_id]
+        request = requests.get(key_id, {})
+        measured = attempt["available"] + attempt["failed"]
+        out.append({
+            "key_id": key_id,
+            "attempts": attempt["attempts"],
+            "failed_attempts": attempt["failed"],
+            "ignored_attempts": attempt["ignored"],
+            "legacy_attempts": attempt["legacy"],
+            "availability_pct": round(attempt["available"] / measured * 100, 2) if measured else None,
+            "requests": request.get("requests", 0),
+            "request_availability_pct": request.get("availability_pct") if request else None,
+            "avg_retries": request.get("avg_retries", 0),
+            "max_retries": request.get("max_retries", 0),
+        })
+    return sorted(out, key=lambda item: item["attempts"], reverse=True)
+
+
+def compute_key_pool_stats(records: list, pool_configs: list) -> list:
+    pools = []
+    for config in pool_configs:
+        raw_keys = config.get("keys", ())
+        key_ids = tuple(dict.fromkeys(item.get("key_id") if isinstance(item, dict) else item for item in raw_keys))
+        key_ids = tuple(key_id for key_id in key_ids if key_id)
+        key_meta = {item["key_id"]: item for item in raw_keys if isinstance(item, dict) and item.get("key_id")}
+        pools.append({**config, "keys": key_ids, "key_meta": key_meta, "key_set": set(key_ids), "records": []})
+
+    for record in records:
+        explicit_pool = record.get("key_pool", "")
+        if explicit_pool:
+            matches = [pool for pool in pools if pool["id"] == explicit_pool]
+        else:
+            record_keys = {record.get("key_id", "")}
+            for attempt in record.get("key_attempts") or []:
+                if isinstance(attempt, dict):
+                    record_keys.add(attempt.get("key_id", ""))
+            record_keys.discard("")
+            provider = _normalize_provider(record.get("provider", ""))
+            matches = [pool for pool in pools if _normalize_provider(pool.get("provider", "")) == provider
+                       and record_keys & pool["key_set"]]
+        if len(matches) == 1:
+            matches[0]["records"].append(record)
+
+    result = []
+    for pool in pools:
+        stats_by_key = {item["key_id"]: item for item in _agg_by_key(pool["records"])}
+        key_stats = []
+        for key_id in pool["keys"]:
+            stats = stats_by_key.get(key_id, {
+                "key_id": key_id, "attempts": 0, "failed_attempts": 0, "ignored_attempts": 0,
+                "legacy_attempts": 0, "availability_pct": None, "requests": 0,
+                "request_availability_pct": None, "avg_retries": 0, "max_retries": 0,
+            })
+            key_stats.append({**stats, **pool["key_meta"].get(key_id, {})})
+        result.append({"id": pool["id"], "provider": pool.get("provider", ""),
+                       "upstream": pool.get("upstream", pool["id"]), "keys": key_stats})
+    return result
+
+
 def _window_label(mins: int) -> str:
     if mins < 60:
         return f"近{mins}分钟"
@@ -413,7 +499,7 @@ def compute_stats(records: list, range_str: str, config: dict) -> dict:
         },
         "by_provider": _agg_by(records, "provider", "provider"),
         "by_model": [m for m in _agg_by(records, "model", "model", key_fn=_model_key) if not m["model"].endswith("/(unknown)")],
-        "by_key": [k for k in _agg_by(records, "key_id", "key_id") if k["key_id"] != "(unknown)"],
+        "by_key": _agg_by_key(records),
         "retry_distribution": retry_distribution,
         "retry_burden": retry_burden,
         "timeline": timeline,
@@ -439,5 +525,3 @@ def compute_stats(records: list, range_str: str, config: dict) -> dict:
         "mode_comparison": _mode_comparison(records),
         "config": config,
     }
-
-

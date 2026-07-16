@@ -218,7 +218,7 @@ KEY_POOLS=https://aihub.top|aihub|sk-cheap;sk-premium,https://other.com|other|sk
 
 ### 日志
 
-每条重试记录新增 `key_id` 字段（key 前 8 字符），便于分析哪个 key 被限流。`/health` 端点也返回号池状态（各 key 的冷却/失败情况）。
+每条重试记录包含实际号池 `key_pool`、最终使用的 `key_id` 和逐次尝试的 `key_attempts`，统计面板据此按号池分别计算各 key 的可用率，并用对比图和精简表格展示。只有当前配置了号池时才显示该版块；多号池会分别展示，并由页面右上角的供应商筛选统一控制。`/health` 端点也返回号池状态（各 key 的冷却/失败情况）。
 
 ### 自定义鉴权头
 
@@ -324,11 +324,13 @@ python -m retry_proxy.dlp validate
 | `succeeded` | 是否最终拿到 2xx/3xx 响应（`final_status < 400`，4xx/5xx 视为失败） |
 | `retry_codes` | 重试过程中上游返回的错误码列表，如 `[503, 503, 429]`。无重试时为空数组 `[]`。用于统计面板的错误码分析 |
 | `key_id` | 号池模式下使用的 key 标签（CSV 中 `label` 列，未设则用 key 前 8 字符），未启用号池时为空字符串。统计面板「按 key」表格按此字段分组 |
+| `key_pool` | 号池模式下实际使用的号池标识（当前为对应上游 URL），未启用号池时为空字符串。用于隔离多号池中的同名 key |
+| `key_attempts` | 号池模式下逐次完成的 key 尝试及可用性判定。触发换 key 的响应记为 `false`，正常响应记为 `true`，主机级连接故障记为 `null` 并从 key 可用率中排除 |
 
 示例：
 
 ```json
-{"ts":"2026-07-07T11:52:35.123","method":"POST","path":"/chat/completions","provider":"xfyun","model":"spark-v4","upstream_status":200,"final_status":200,"attempts":3,"retries":2,"duration_s":0.852,"succeeded":true,"retry_codes":[503,503]}
+{"ts":"2026-07-07T11:52:35.123","method":"POST","path":"/chat/completions","provider":"xfyun","model":"spark-v4","upstream_status":200,"final_status":200,"attempts":3,"retries":2,"duration_s":0.852,"succeeded":true,"retry_codes":[503,503],"key_pool":"https://example.com/v2","key_id":"premium","key_attempts":[{"key_id":"cheap","available":false},{"key_id":"normal","available":false},{"key_id":"premium","available":true}]}
 ```
 
 快速分析示例：
