@@ -194,13 +194,13 @@ def inspect_json_body(body, enabled_rules, start_marker, end_marker, strip_marke
             return output
         return value
 
-    def visit_latest_user(items):
+    def visit_user_messages(items):
         output = list(items)
         user_indexes = [index for index, item in enumerate(items)
                         if isinstance(item, dict) and item.get("role") == "user"]
         if user_indexes:
-            index = user_indexes[-1]
-            output[index] = visit(items[index])
+            for index in user_indexes:
+                output[index] = visit(items[index])
         else:
             output = [visit(item) if isinstance(item, str) else item for item in items]
         return output
@@ -209,12 +209,12 @@ def inspect_json_body(body, enabled_rules, start_marker, end_marker, strip_marke
         cleaned = dict(payload)
         recognized = False
         if isinstance(payload.get("messages"), list):
-            cleaned["messages"] = visit_latest_user(payload["messages"])
+            cleaned["messages"] = visit_user_messages(payload["messages"])
             recognized = True
         if "input" in payload:
             value = payload["input"]
             if isinstance(value, list):
-                cleaned["input"] = visit_latest_user(value)
+                cleaned["input"] = visit_user_messages(value)
             elif isinstance(value, (str, dict)):
                 cleaned["input"] = visit(value)
             recognized = True

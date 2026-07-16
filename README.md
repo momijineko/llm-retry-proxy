@@ -267,7 +267,7 @@ DLP_RULES=credentials,private_key,jwt,connection_string,id_card,bank_card,struct
 
 `redact` 会把未豁免的敏感信息替换为 `[REDACTED:规则名]`，让 Agent 和用户根据上下文决定下一步，不会因普通命中中断调用链。也可以使用 `audit` 仅告警，或使用 `block` 返回 HTTP 422 并停止转发。
 
-对于 Chat/Responses/Anthropic 风格请求，DLP 只处理本次新增的最后一条用户消息或当前 `input`，不会重复扫描 system/developer 指令、工具输出、JSON Schema 和历史消息。无法识别结构的通用 JSON 请求会回退到递归扫描全部字符串。
+对于 Chat/Responses/Anthropic 风格请求，DLP 每次都会处理所有用户角色消息或当前 `input`，确保下游重复提交的历史原文仍会在转发副本中脱敏；system/developer 指令、assistant/tool 输出和 JSON Schema 不参与扫描。无法识别结构的通用 JSON 请求会回退到递归扫描全部字符串。
 
 检测规则集中维护在带注释的 `retry_proxy/dlp_rules.yaml`。该文件说明了正则、标志、校验器和敏感 JSON 字段名的配置方式；需要定制时可以直接编辑，或通过 `DLP_RULE_FILE` 指向另一份 YAML/JSON 规则文件。规则文件会在启用 DLP 时随服务启动校验，格式或正则错误会阻止服务启动，避免静默失去防护。
 
