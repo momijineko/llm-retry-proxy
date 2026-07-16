@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实时日志 · llm-retry-proxy</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-elevated: #161b22;
+    --bg-header: #0d1117;
+    --border: #30363d;
+    --border-strong: #484f58;
+    --text: #c9d1d9;
+    --text-bright: #e6edf3;
+    --text-dim: #8b949e;
+    --text-faint: #484f58;
+    --primary: #6366f1;
+    --primary-d: #4f46e5;
+    --accent-purple: #8b5cf6;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --debug: #56d4dd;
+    --info: #3fb950;
+    --radius: 10px;
+    --radius-sm: 8px;
+    --radius-xs: 6px;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow: hidden;
+  }
+
+  /* ── Sticky Header ── */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(13, 17, 23, 0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    min-height: 56px;
+  }
+
+  header .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  header .logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--primary), var(--accent-purple));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 700;
+    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
+    flex-shrink: 0;
+  }
+
+  header .brand-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  header h1 {
+    font-size: 15px;
+    margin: 0;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--text-bright);
+    line-height: 1.2;
+  }
+
+  header .sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  header .sub .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+
+  header .sub .status-dot.connected {
+    background: var(--ok);
+    box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.15);
+    animation: pulse 2s infinite;
+  }
+
+  header .sub .status-dot.connecting {
+    background: var(--warn);
+    box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.15);
+    animation: pulse 1s infinite;
+  }
+
+  header .sub .status-dot.disconnected {
+    background: var(--danger);
+    box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.15);
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  header .spacer { flex: 1; min-width: 8px; }
+
+  /* ── Toolbar ── */
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--text);
+    padding: 5px 12px;
+    border-radius: var(--radius-xs);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: var(--font-sans);
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    user-select: none;
+    white-space: nowrap;
+  }
+
+  .btn:hover {
+    border-color: var(--border-strong);
+    background: #1f242c;
+    color: var(--text-bright);
+  }
+
+  .btn:active { transform: translateY(1px); }
+
+  .btn.active {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: rgba(99, 102, 241, 0.08);
+  }
+
+  .btn-danger:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: rgba(248, 81, 73, 0.06);
+  }
+
+  .search-input {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 5px 10px;
+    color: var(--text);
+    font-size: 12px;
+    font-family: var(--font-sans);
+    outline: none;
+    width: 180px;
+    transition: border-color 0.15s;
+  }
+
+  .search-input::placeholder { color: var(--text-faint); }
+  .search-input:focus { border-color: var(--primary); }
+
+  .level-filter {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+    flex-wrap: wrap;
+  }
+
+  .level-filter label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.15s;
+  }
+
+  .level-filter label:hover { color: var(--text); }
+
+  .level-filter input[type="checkbox"] {
+    accent-color: var(--primary);
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+    margin: 0;
+  }
+
+  .line-count {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+  }
+
+  .line-count .sep { color: var(--text-faint); margin: 0 3px; }
+
+  /* ── Terminal Area ── */
+  .terminal-wrapper {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+  }
+
+  .terminal {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 12px 16px 80px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text);
+    scroll-behavior: smooth;
+    /* subtle top gradient to blend with header */
+    background:
+      linear-gradient(180deg, rgba(13,17,23,0) 0px, var(--bg) 8px),
+      var(--bg);
+  }
+
+  .terminal::-webkit-scrollbar { width: 8px; }
+  .terminal::-webkit-scrollbar-track { background: transparent; }
+  .terminal::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+  .terminal::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+  /* ── Log Line ── */
+  .log-line {
+    display: flex;
+    gap: 10px;
+    padding: 2px 0;
+    border-radius: 3px;
+    transition: background 0.08s;
+    word-break: break-word;
+    animation: fadeInLine 0.15s ease;
+  }
+
+  @keyframes fadeInLine {
+    from { opacity: 0; transform: translateY(2px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .log-line:hover { background: rgba(255,255,255,0.03); }
+
+  .log-line.hidden-level,
+  .log-line.hidden-search { display: none; }
+
+  .log-ts {
+    color: #6e7681;
+    font-size: 12px;
+    flex-shrink: 0;
+    user-select: text;
+    min-width: 160px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .log-level {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 4px;
+    line-height: 1.5;
+    min-width: 46px;
+    text-align: center;
+    letter-spacing: 0.02em;
+    user-select: none;
+  }
+
+  .log-level.debug {
+    color: var(--debug);
+    background: rgba(86, 212, 221, 0.08);
+    border: 1px solid rgba(86, 212, 221, 0.15);
+  }
+
+  .log-level.info {
+    color: var(--info);
+    background: rgba(63, 185, 80, 0.08);
+    border: 1px solid rgba(63, 185, 80, 0.15);
+  }
+
+  .log-level.warning {
+    color: var(--warn);
+    background: rgba(210, 153, 34, 0.08);
+    border: 1px solid rgba(210, 153, 34, 0.15);
+  }
+
+  .log-level.error {
+    color: var(--danger);
+    background: rgba(248, 81, 73, 0.08);
+    border: 1px solid rgba(248, 81, 73, 0.15);
+  }
+
+  .log-message {
+    flex: 1;
+    color: var(--text-bright);
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+  }
+
+  /* ── Empty State ── */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-faint);
+    font-size: 13px;
+    gap: 8px;
+    text-align: center;
+    padding: 40px;
+  }
+
+  .empty-state .icon {
+    font-size: 28px;
+    opacity: 0.4;
+    font-family: var(--font-mono);
+  }
+
+  /* ── Resume Scroll Hint ── */
+  .resume-hint {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    padding: 6px 14px;
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    transition: all 0.15s;
+    z-index: 90;
+    font-family: var(--font-sans);
+    user-select: none;
+  }
+
+  .resume-hint:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: #1f242c;
+  }
+
+  .resume-hint.show { display: inline-flex; }
+
+  /* ── Responsive ── */
+  @media (max-width: 720px) {
+    header { padding: 8px 12px; gap: 8px; }
+    header h1 { font-size: 14px; }
+    .search-input { width: 140px; }
+    .level-filter { gap: 6px; font-size: 11px; }
+    .log-ts { min-width: 130px; font-size: 11px; }
+    .terminal { padding: 10px 10px 80px; font-size: 12px; }
+  }
+
+  @media (max-width: 480px) {
+    .search-input { width: 100px; }
+    .line-count { font-size: 10px; }
+    .log-ts { min-width: 110px; font-size: 10px; }
+  }
+
+  /* ── Layout ── */
+  .page {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* Separator in toolbar */
+  .toolbar-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div class="brand">
+      <div class="logo">R</div>
+      <div class="brand-text">
+        <h1>实时日志</h1>
+        <span class="sub">
+          <span class="status-dot connecting" id="connDot"></span>
+          <span id="connText">连接中...</span>
+        </span>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="toolbar">
+      <div class="toolbar-group">
+        <button class="btn" id="pauseBtn">
+          <span id="pauseIcon">⏸</span>
+          <span id="pauseText">暂停</span>
+        </button>
+        <button class="btn btn-danger" id="clearBtn">🗑 清空</button>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group level-filter" id="levelFilter">
+        <label><input type="checkbox" value="DEBUG" checked><span style="color:var(--debug)">DEBUG</span></label>
+        <label><input type="checkbox" value="INFO" checked><span style="color:var(--info)">INFO</span></label>
+        <label><input type="checkbox" value="WARNING" checked><span style="color:var(--warn)">WARN</span></label>
+        <label><input type="checkbox" value="ERROR" checked><span style="color:var(--danger)">ERROR</span></label>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <input type="text" class="search-input" id="searchInput" placeholder="搜索日志内容...">
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <span class="line-count" id="lineCount">0 <span class="sep">/</span> 0</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="terminal-wrapper">
+    <div class="terminal" id="terminal">
+      <div class="empty-state" id="emptyState">
+        <span class="icon">$</span>
+        <span>等待日志数据...</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="resume-hint" id="resumeHint">
+    <span>↓</span> 点击恢复自动滚动
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── DOM refs ──
+  const terminal = document.getElementById('terminal');
+  const emptyState = document.getElementById('emptyState');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const pauseIcon = document.getElementById('pauseIcon');
+  const pauseText = document.getElementById('pauseText');
+  const clearBtn = document.getElementById('clearBtn');
+  const searchInput = document.getElementById('searchInput');
+  const lineCountEl = document.getElementById('lineCount');
+  const connDot = document.getElementById('connDot');
+  const connText = document.getElementById('connText');
+  const resumeHint = document.getElementById('resumeHint');
+  const levelCheckboxes = document.querySelectorAll('#levelFilter input[type="checkbox"]');
+
+  // ── State ──
+  let es = null;
+  let isPaused = false;
+  let isUserScrolledUp = false;
+  let totalReceived = 0;
+  let lastHistoryKey = null;
+  const MAX_DOM_LINES = 3000;
+  const BATCH_SIZE = 50;
+  const LEVELS = { DEBUG: 'debug', INFO: 'info', WARNING: 'warning', ERROR: 'error' };
+
+  // ── Connection status ──
+  function setStatus(state) {
+    connDot.className = 'status-dot ' + state;
+    const texts = {
+      connected: '已连接',
+      connecting: '连接中...',
+      disconnected: '已断开'
+    };
+    connText.textContent = texts[state] || state;
+  }
+
+  // ── Create log line element (efficient, no innerHTML) ──
+  function createLogLine(entry) {
+    const line = document.createElement('div');
+    line.className = 'log-line';
+    line.dataset.ts = entry.ts || '';
+    line.dataset.msg = entry.message || '';
+    line.dataset.level = (entry.level || 'INFO').toUpperCase();
+
+    const ts = document.createElement('span');
+    ts.className = 'log-ts';
+    ts.textContent = entry.ts || '';
+
+    const levelClass = LEVELS[line.dataset.level] || 'info';
+    const lvl = document.createElement('span');
+    lvl.className = 'log-level ' + levelClass;
+    lvl.textContent = line.dataset.level;
+
+    const msg = document.createElement('span');
+    msg.className = 'log-message';
+    msg.textContent = entry.message || '';
+
+    line.appendChild(ts);
+    line.appendChild(lvl);
+    line.appendChild(msg);
+
+    return line;
+  }
+
+  // ── Append entries ──
+  const pendingBatch = [];
+  let batchTimer = null;
+
+  function flushBatch() {
+    if (pendingBatch.length === 0) return;
+    const frag = document.createDocumentFragment();
+    for (const entry of pendingBatch) {
+      frag.appendChild(createLogLine(entry));
+    }
+    pendingBatch.length = 0;
+
+    emptyState.style.display = 'none';
+    terminal.appendChild(frag);
+
+    // Cap DOM lines
+    const excess = terminal.children.length - MAX_DOM_LINES;
+    if (excess > 0) {
+      for (let i = 0; i < excess; i++) {
+        if (terminal.firstElementChild && terminal.firstElementChild !== emptyState) {
+          terminal.removeChild(terminal.firstElementChild);
+        }
+      }
+    }
+
+    // Re-apply filters on new lines
+    applyFilters();
+    updateLineCount();
+
+    // Auto-scroll
+    if (!isUserScrolledUp) {
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+  }
+
+  function queueEntry(entry) {
+    pendingBatch.push(entry);
+    totalReceived++;
+    if (!batchTimer) {
+      batchTimer = requestAnimationFrame(() => {
+        batchTimer = null;
+        flushBatch();
+      });
+    }
+  }
+
+  // ── Deduplication ──
+  function shouldSkip(entry) {
+    if (!lastHistoryKey) return false;
+    const key = (entry.ts || '') + '|' + (entry.message || '');
+    return key === lastHistoryKey;
+  }
+
+  // ── SSE ──
+  function connectStream() {
+    if (es) { try { es.close(); } catch(e) {} es = null; }
+    setStatus('connecting');
+
+    es = new EventSource('/logs/stream');
+
+    es.onopen = () => {
+      setStatus('connected');
+    };
+
+    es.onmessage = (ev) => {
+      if (!ev.data || ev.data.trim() === '') return;
+      if (ev.data.startsWith(':')) return; // keepalive comment
+      try {
+        const entry = JSON.parse(ev.data);
+        if (shouldSkip(entry)) return;
+        queueEntry(entry);
+      } catch (e) {
+        // If not JSON, treat as plain text
+        queueEntry({ ts: new Date().toISOString().replace('T',' ').slice(0,19), level: 'INFO', message: String(ev.data) });
+      }
+    };
+
+    es.onerror = () => {
+      setStatus('disconnected');
+      if (es) { try { es.close(); } catch(e) {} es = null; }
+      // Auto-reconnect after delay unless paused
+      if (!isPaused) {
+        setTimeout(connectStream, 3000);
+      }
+    };
+  }
+
+  // ── Load history ──
+  async function loadHistory() {
+    try {
+      setStatus('connecting');
+      const res = await fetch('/logs/history');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) return;
+
+      // Render history entries
+      const frag = document.createDocumentFragment();
+      for (const entry of data) {
+        frag.appendChild(createLogLine(entry));
+      }
+      emptyState.style.display = 'none';
+      terminal.appendChild(frag);
+
+      // Cap and filter
+      const excess = terminal.children.length - MAX_DOM_LINES;
+      if (excess > 0) {
+        for (let i = 0; i < excess; i++) {
+          if (terminal.firstElementChild && terminal.firstElementChild !== emptyState) {
+            terminal.removeChild(terminal.firstElementChild);
+          }
+        }
+      }
+
+      // Remember last history entry for dedup
+      const last = data[data.length - 1];
+      if (last) {
+        lastHistoryKey = (last.ts || '') + '|' + (last.message || '');
+      }
+      totalReceived += data.length;
+      applyFilters();
+      updateLineCount();
+
+      // Scroll to bottom after history load
+      terminal.scrollTop = terminal.scrollHeight;
+    } catch (e) {
+      console.error('Failed to load history:', e);
+    }
+  }
+
+  // ── Filters ──
+  function getActiveLevels() {
+    const set = new Set();
+    levelCheckboxes.forEach(cb => { if (cb.checked) set.add(cb.value); });
+    return set;
+  }
+
+  function applyFilters() {
+    const activeLevels = getActiveLevels();
+    const query = (searchInput.value || '').trim().toLowerCase();
+    let visible = 0;
+
+    for (const child of terminal.children) {
+      if (child === emptyState) continue;
+      const level = child.dataset.level;
+      const msg = child.dataset.msg || '';
+
+      const levelHidden = !activeLevels.has(level);
+      const searchHidden = query && !msg.toLowerCase().includes(query);
+
+      if (levelHidden) {
+        child.classList.add('hidden-level');
+        child.classList.remove('hidden-search');
+      } else if (searchHidden) {
+        child.classList.remove('hidden-level');
+        child.classList.add('hidden-search');
+      } else {
+        child.classList.remove('hidden-level', 'hidden-search');
+        visible++;
+      }
+    }
+    return visible;
+  }
+
+  function updateLineCount() {
+    const visible = applyFilters();
+    lineCountEl.innerHTML = totalReceived + ' <span class="sep">/</span> ' + visible;
+  }
+
+  // ── Scroll detection ──
+  function checkScroll() {
+    const threshold = 40;
+    const atBottom = (terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight) < threshold;
+    if (atBottom) {
+      isUserScrolledUp = false;
+      resumeHint.classList.remove('show');
+    } else {
+      isUserScrolledUp = true;
+      resumeHint.classList.add('show');
+    }
+  }
+
+  terminal.addEventListener('scroll', checkScroll, { passive: true });
+
+  // ── Event listeners ──
+  pauseBtn.addEventListener('click', () => {
+    isPaused = !isPaused;
+    if (isPaused) {
+      if (es) { es.close(); es = null; }
+      setStatus('disconnected');
+      pauseIcon.textContent = '▶';
+      pauseText.textContent = '继续';
+      pauseBtn.classList.add('active');
+    } else {
+      connectStream();
+      pauseIcon.textContent = '⏸';
+      pauseText.textContent = '暂停';
+      pauseBtn.classList.remove('active');
+    }
+  });
+
+  clearBtn.addEventListener('click', () => {
+    terminal.innerHTML = '';
+    terminal.appendChild(emptyState);
+    emptyState.style.display = 'flex';
+    totalReceived = 0;
+    updateLineCount();
+  });
+
+  searchInput.addEventListener('input', () => {
+    updateLineCount();
+  });
+
+  levelCheckboxes.forEach(cb => {
+    cb.addEventListener('change', updateLineCount);
+  });
+
+  resumeHint.addEventListener('click', () => {
+    isUserScrolledUp = false;
+    resumeHint.classList.remove('show');
+    terminal.scrollTop = terminal.scrollHeight;
+  });
+
+  // ── Init ──
+  async function init() {
+    await loadHistory();
+    connectStream();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

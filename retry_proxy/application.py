@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -6,7 +7,7 @@ import httpx
 from fastapi import FastAPI
 
 from .api import create_handlers
-from .config import logger, settings
+from .config import log_capture, logger, settings
 from .key_pool import KEY_POOLS
 from .log_store import RetryLogStore
 from .retry import RetryProxy
@@ -44,6 +45,7 @@ def _log_startup():
     else:
         logger.info("号池: 未配置(透传客户端key)")
     logger.info(f"统计面板: http://127.0.0.1:{settings.listen_port}/stats")
+    logger.info(f"日志面板: http://127.0.0.1:{settings.listen_port}/logs")
     logger.info("=" * 60)
 
 
@@ -55,6 +57,7 @@ async def lifespan(_app):
                                limits=httpx.Limits(max_connections=200, max_keepalive_connections=50), trust_env=settings.trust_env)
     service.client = client
     app.state.retry_proxy = service
+    log_capture.set_loop(asyncio.get_event_loop())
     _log_startup()
     try:
         yield
@@ -66,8 +69,11 @@ async def lifespan(_app):
 
 app = FastAPI(title="llm-retry-proxy", lifespan=lifespan)
 service = RetryProxy(client=None, pools=KEY_POOLS, log_store=store)
-health, stats_page, stats_api, proxy = create_handlers(service, store)
+health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy = create_handlers(service, store)
 app.add_api_route("/health", health, methods=["GET"])
 app.add_api_route("/stats", stats_page, methods=["GET"])
 app.add_api_route("/stats/api", stats_api, methods=["GET"])
+app.add_api_route("/logs", logs_page, methods=["GET"])
+app.add_api_route("/logs/history", logs_history, methods=["GET"])
+app.add_api_route("/logs/stream", logs_stream, methods=["GET"])
 app.add_api_route("/{path:path}", proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])

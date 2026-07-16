@@ -1,6 +1,10 @@
+import asyncio
+import collections
 import logging
 import os
+import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from io import StringIO
@@ -46,6 +50,59 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
 
+class LogCaptureHandler(logging.Handler):
+    """Thread-safe log handler: ring buffer + SSE subscriber queues."""
+
+    _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+    def __init__(self, maxlen: int = 2000):
+        super().__init__()
+        self._maxlen = maxlen
+        self._buffer: collections.deque = collections.deque(maxlen=maxlen)
+        self._subscribers: set[asyncio.Queue] = set()
+        self._lock = threading.Lock()
+        self._loop = None
+
+    def set_loop(self, loop):
+        self._loop = loop
+
+    def emit(self, record):
+        entry = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created)),
+            "level": record.levelname,
+            "message": self._ANSI_RE.sub("", record.getMessage()),
+        }
+        with self._lock:
+            self._buffer.append(entry)
+            if self._loop is None:
+                return
+            stale = set()
+            for q in self._subscribers:
+                try:
+                    self._loop.call_soon_threadsafe(q.put_nowait, entry)
+                except Exception:
+                    stale.add(q)
+            self._subscribers -= stale
+
+    def subscribe(self):
+        q = asyncio.Queue()
+        with self._lock:
+            self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q):
+        with self._lock:
+            self._subscribers.discard(q)
+
+    def history(self):
+        with self._lock:
+            return list(self._buffer)
+
+
+log_capture = LogCaptureHandler(maxlen=2000)
+logging.getLogger().addHandler(log_capture)
+
+
 def _bool(name, default):
     return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
 
@@ -84,6 +141,10 @@ class Settings:
     @property
     def stats_html_path(self):
         return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "stats.html")
+
+    @property
+    def logs_html_path(self):
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs.html")
 
     @property
     def summary_file(self):

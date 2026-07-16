@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import time
 from datetime import datetime, timedelta
@@ -6,7 +8,7 @@ import httpx
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
-from .config import logger, settings
+from .config import log_capture, logger, settings
 from .routes import ROUTES, is_excluded_path, match_route
 from .key_pool import KEY_POOLS
 from .retry import filter_headers, parse_model, _tag
@@ -89,6 +91,34 @@ def create_handlers(service, store):
         return {"detail": compute_stats(records, range, cfg), "cumulative": _cumulative(store.summary), "range": range,
                 "record_count": len(records), "available_models": available, "upstream_windows": _upstream_window_stats(window), "rate_counts": {"5h": c5h, "week": c_week, "month": c_month}}
 
+    async def logs_page():
+        if os.path.exists(settings.logs_html_path):
+            with open(settings.logs_html_path, encoding="utf-8") as f:
+                return Response(f.read(), media_type="text/html; charset=utf-8")
+        return Response("logs.html not found", status_code=404)
+
+    async def logs_history():
+        return log_capture.history()
+
+    async def logs_stream(request: Request):
+        async def event_gen():
+            q = log_capture.subscribe()
+            try:
+                for entry in log_capture.history():
+                    yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        entry = await asyncio.wait_for(q.get(), timeout=15)
+                        yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                log_capture.unsubscribe(q)
+        return StreamingResponse(event_gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
     async def proxy(path: str, request: Request):
         if is_excluded_path(path): return Response(status_code=404)
         upstream, provider, remaining = match_route(path); url = f"{upstream}/{remaining}" if remaining else upstream
@@ -114,6 +144,9 @@ def create_handlers(service, store):
             logger.error(f"{_tag(request.method, path, provider, model_name)} 放弃({total_sent}发) {time.time() - start:.1f}s")
             return Response(f'{{"error":{{"message":"upstream overloaded after {total_sent} attempts","type":"upstream_error","code":"503"}}}}', status_code=503, media_type="application/json", headers={"X-Forward-Attempts": str(total_sent)})
         headers = filter_headers(response.headers, SKIP_RESPONSE_HEADERS); headers["X-Forward-Attempts"] = str(winner_attempt)
+        # 流式响应禁用反向代理缓冲，否则 nginx/群晖反代会攒批 flush 导致远程访问"一顿一顿"
+        if "event-stream" in response.headers.get("content-type", "") or response.headers.get("content-length") is None:
+            headers["X-Accel-Buffering"] = "no"; headers["Cache-Control"] = "no-cache"
         async def body_gen():
             try:
                 async for chunk in response.aiter_bytes(): yield chunk
@@ -122,4 +155,4 @@ def create_handlers(service, store):
             finally:
                 await response.aclose()
         return StreamingResponse(body_gen(), status_code=response.status_code, headers=headers, media_type=response.headers.get("content-type"))
-    return health, stats_page, stats_api, proxy
+    return health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy
