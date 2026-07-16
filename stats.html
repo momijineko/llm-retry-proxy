@@ -665,7 +665,7 @@ function keyPoolMetrics(keys){
 function renderKeyPoolOverview(pools){
   const allKeys=pools.flatMap(p=>p.keys);
   const m=keyPoolMetrics(allKeys);
-  const availStr=m.availability?m.availability.toFixed(1)+'%':'—';
+  const availStr=m.measured?m.availability.toFixed(1)+'%':'—';
   const availColorStr=availColor(m.availability||0);
   const html=`<div class="stat-card"><div class="label">号池数</div><div class="value">${pools.length}</div></div>
     <div class="stat-card"><div class="label">总 Key 数</div><div class="value">${m.total}</div></div>
@@ -686,7 +686,7 @@ function renderKeyHealthChart(pools){
   const allKeys=pools.flatMap(p=>p.keys);
   const ready=allKeys.filter(k=>!k.cooled&&k.availability_pct!==null).length;
   const cooled=allKeys.filter(k=>k.cooled).length;
-  const noSample=allKeys.filter(k=>k.availability_pct===null).length;
+  const noSample=allKeys.filter(k=>!k.cooled&&k.availability_pct===null).length;
   if(!allKeys.length){c.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});return}
   c.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{bottom:0,type:'scroll',textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:12},series:[{type:'pie',radius:['38%','62%'],center:['50%','44%'],data:[{name:'可用',value:ready,itemStyle:{color:COL.ok,borderColor:'#fff',borderWidth:2}},{name:'冷却中',value:cooled,itemStyle:{color:COL.warn,borderColor:'#fff',borderWidth:2}},{name:'暂无样本',value:noSample,itemStyle:{color:COL.gray,borderColor:'#fff',borderWidth:2}}],label:{formatter:'{b}\n{d}%',fontSize:11,color:'#334155'},emphasis:{scaleSize:6}}]});
 }

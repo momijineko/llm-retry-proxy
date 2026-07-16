@@ -1,8 +1,10 @@
 import asyncio
 import collections
+import hashlib
 import logging
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -10,6 +12,7 @@ from dataclasses import dataclass
 from io import StringIO
 
 from dotenv import load_dotenv
+from fastapi import HTTPException, Request
 
 
 def safe_load_env(path: str = ".env"):
@@ -136,6 +139,9 @@ class Settings:
     hedge_mode: str = os.getenv("HEDGE_MODE", "off").lower()
     max_concurrent: int = int(os.getenv("MAX_CONCURRENT", "10"))
     trust_env: bool = _bool("TRUST_ENV", "false")
+    admin_password: str = (os.getenv("ADMIN_PASSWORD") or os.getenv("ADMIN_TOKEN", "")).strip()
+    admin_cookie_secure: bool = _bool("ADMIN_COOKIE_SECURE", "false")
+    proxy_api_key: str = os.getenv("PROXY_API_KEY", "").strip()
     key_pools_raw: str = os.getenv("KEY_POOLS", "").strip()
     key_pool_file: str = os.getenv("KEY_POOL_FILE", "").strip()
     key_cooldown: float = float(os.getenv("KEY_COOLDOWN", "30"))
@@ -164,6 +170,35 @@ class Settings:
 
 
 settings = Settings()
+
+
+def admin_session_value(password=None):
+    secret = settings.admin_password if password is None else password
+    return hashlib.sha256(f"llm-retry-proxy-session:{secret}".encode("utf-8")).hexdigest()
+
+
+def require_admin(request: Request):
+    if not settings.admin_password:
+        raise HTTPException(status_code=503, detail="admin_auth_not_configured")
+    scheme, _, credential = request.headers.get("authorization", "").partition(" ")
+    bearer_ok = (scheme.lower() == "bearer" and credential
+                 and secrets.compare_digest(credential, settings.admin_password))
+    session = request.cookies.get("admin_session", "")
+    cookie_ok = bool(session and secrets.compare_digest(session, admin_session_value()))
+    if bearer_ok or cookie_ok:
+        return
+    if request.url.path in ("/stats", "/logs"):
+        raise HTTPException(status_code=303, headers={"Location": f"/admin/login?next={request.url.path}"})
+    raise HTTPException(status_code=401, detail="invalid_admin_credentials",
+                        headers={"WWW-Authenticate": "Bearer"})
+
+
+def can_use_key_pool(headers) -> bool:
+    if not settings.proxy_api_key:
+        return True
+    scheme, _, credential = headers.get("authorization", "").partition(" ")
+    return bool(scheme.lower() == "bearer" and credential
+                and secrets.compare_digest(credential, settings.proxy_api_key))
 
 
 def should_retry_status(status: int) -> bool:

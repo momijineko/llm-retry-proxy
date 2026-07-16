@@ -8,7 +8,7 @@ import httpx
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
-from .config import log_capture, logger, settings
+from .config import can_use_key_pool, log_capture, logger, settings
 from .dlp import inspect_json_body
 from .routes import ROUTES, is_excluded_path, match_route
 from .key_pool import KEY_POOLS
@@ -17,6 +17,25 @@ from .stats import _normalize_provider, _req_succeeded, _upstream_window_stats, 
 
 SKIP_REQUEST_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade"}
 SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "keep-alive", "content-encoding"}
+
+
+async def _run_until_disconnect(request, awaitable):
+    work = asyncio.create_task(awaitable)
+    async def watch_disconnect():
+        while not await request.is_disconnected():
+            await asyncio.sleep(0.1)
+    watcher = asyncio.create_task(watch_disconnect())
+    try:
+        done, _ = await asyncio.wait((work, watcher), return_when=asyncio.FIRST_COMPLETED)
+        if work in done:
+            return await work
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+        return None
+    finally:
+        if not watcher.done():
+            watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
 
 
 def _summary_view(summary):
@@ -53,9 +72,7 @@ def _request_ip(request):
 
 def create_handlers(service, store):
     async def health():
-        return {"status": "ok", "upstream": settings.upstream_url,
-                "routes": [{"prefix": p or "/", "upstream": u, "provider": pv} for p, u, pv, _ in ROUTES],
-                "key_pools": {u: {"provider": p.provider or settings.provider, "keys": p.status()} for u, p in KEY_POOLS.items()}}
+        return {"status": "ok"}
 
     async def stats_page():
         if os.path.exists(settings.stats_html_path):
@@ -189,13 +206,23 @@ def create_handlers(service, store):
                     logger.info(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免 count={dlp.exemptions}")
         model_name = parse_model(body)
         base_pool = KEY_POOLS.get(upstream)
-        key_pool = upstream if base_pool else ""
-        request_pool = base_pool.for_request(model_name, remaining) if base_pool else None
+        pool_access = bool(base_pool and can_use_key_pool(request.headers))
+        request_pool = base_pool.for_request(model_name, remaining) if pool_access else None
+        if pool_access and request_pool is None:
+            return Response('{"error":{"type":"key_pool_no_match","message":"No key pool entry matches this request"}}',
+                            status_code=403, media_type="application/json")
+        key_pool = upstream if request_pool else ""
         ip_token = set_client_ip(client_ip)
         try:
-            result = await service.request(request.method, url, filter_headers(request.headers, SKIP_REQUEST_HEADERS), body, path, provider, model_name, request_pool)
+            result = await _run_until_disconnect(
+                request,
+                service.request(request.method, url, filter_headers(request.headers, SKIP_REQUEST_HEADERS),
+                                body, path, provider, model_name, request_pool),
+            )
         finally:
             reset_client_ip(ip_token)
+        if result is None:
+            return Response(status_code=499)
         response = result.response
         winner_attempt = result.winner_attempt
         total_sent = result.total_sent

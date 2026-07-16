@@ -105,6 +105,9 @@ curl http://127.0.0.1:8080/chat/completions \
 | `KEY_AUTH_HEADER` | `authorization` | 号池注入鉴权头的 header 名 |
 | `KEY_AUTH_SCHEME` | `Bearer` | 鉴权 scheme 前缀（如 `Bearer`），设为空则只放裸 key |
 | `LOG_DIR` | `logs` | 日志目录。明细按天拆分为 `retry_YYYY-MM-DD.jsonl`，累计汇总存 `_summary.json` |
+| `ADMIN_PASSWORD` | 空 | 管理页面密码；未配置时 `/stats*`、`/logs*` 禁用。兼容旧 `ADMIN_TOKEN` |
+| `ADMIN_COOKIE_SECURE` | `false` | HTTPS 部署时设为 `true`，限制登录 Cookie 仅通过 HTTPS 发送 |
+| `PROXY_API_KEY` | 空 | 下游使用号池的凭据；配置后，无正确凭据的请求仅作纯代理转发。空值保持旧版开放号池行为 |
 | `LOG_RETENTION_DAYS` | `30` | 明细日志保留天数，超期自动删除（`0` = 不清理）。**累计汇总不受影响**，历史总量永久保留 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 
@@ -204,7 +207,7 @@ KEY_POOLS=https://aihub.top|aihub|sk-cheap;sk-premium,https://other.com|other|sk
 
 ### 降级机制
 
-1. 请求进来后，代理**剥离客户端原有的 Authorization 头**，注入号池中当前最便宜可用的 key
+1. 配置 `PROXY_API_KEY` 后，下游把它作为 Bearer API key 发送即可使用号池；代理随后**剥离该头**，注入号池中当前最便宜可用的上游 key
 2. **串行模式（`HEDGE_MODE=off`）**：每次重试换下一个 key，立即降级（不等待退避）。只有**所有 key 都被冷却**时才进入现有退避等待
 3. **竞速模式（`race`/`stagger`）**：每轮/每次发请求选当前最便宜可用 key，失败冷却该 key，下一轮自动选下一个。时序逻辑不变
 4. 被 429/5xx 命中的 key 进入 `KEY_COOLDOWN`（默认 30 秒）冷却期，冷却期间优先跳过；429 带的 `Retry-After` 头会被优先采纳（取 `max(冷却时间, Retry-After)`）
@@ -214,11 +217,12 @@ KEY_POOLS=https://aihub.top|aihub|sk-cheap;sk-premium,https://other.com|other|sk
 ### 向后兼容
 
 - `KEY_POOLS` 留空（默认）→ **完全保持原有行为**：透传客户端 Authorization 头，不注入任何 key
-- 配置了 `KEY_POOLS` → 代理注入 key，客户端原有的 Authorization 头被覆盖
+- 配置了 `KEY_POOLS`、未配置 `PROXY_API_KEY` → 保持旧行为，代理直接注入号池 key
+- 同时配置 `PROXY_API_KEY` → 只有携带正确 Bearer key 的请求使用号池；未携带或不匹配的请求保留自身鉴权头，按纯代理模式转发
 
 ### 日志
 
-每条重试记录包含实际号池 `key_pool`、最终使用的 `key_id` 和逐次尝试的 `key_attempts`，统计面板据此按号池分别计算各 key 的可用率，并用对比图和精简表格展示。只有当前配置了号池时才显示该版块；多号池会分别展示，并由页面右上角的供应商筛选统一控制。`/health` 端点也返回号池状态（各 key 的冷却/失败情况）。
+每条重试记录包含实际号池 `key_pool`、最终使用的 `key_id` 和逐次尝试的 `key_attempts`，统计面板据此按号池分别计算各 key 的可用率，并用对比图和精简表格展示。只有当前配置了号池时才显示该版块；多号池会分别展示，并由页面右上角的供应商筛选统一控制。重复 key 会被去重；重复标签会自动追加不可逆短指纹，避免统计串线。
 
 ### 自定义鉴权头
 
@@ -236,6 +240,7 @@ KEY_AUTH_SCHEME=           # 空值，直接放裸 key，不加 Bearer 前缀
 - **429 指数退避**（默认开启，`RETRY_BACKOFF_429=true`）：连续收到 429 时，等待时间按 `5→10→20→40→60s` 指数递增（基数 = `RETRY_INTERVAL_429`，倍率 = 2，上限 = `RETRY_BACKOFF_MAX_429`），并叠加 ±20% 随机抖动（jitter）以避免多 Agent 同步重试导致 429 雪崩。`Retry-After` 头仍优先，退避值取 `max(Retry-After, 指数退避值)`。设为 `false` 可回退到固定间隔模式。收到非 429 的重试状态码会重置 429 退避计数器。
 - **非429 指数退避**（默认关闭，`RETRY_BACKOFF=false`）：开启后，连续收到 503/502/504/529 等非429重试状态码时，等待时间按 `1→2→4→8→16→32→60s` 指数递增（基数 = `RETRY_INTERVAL`，倍率 = 2，上限 = `RETRY_BACKOFF_MAX`），同样含 ±20% 抖动。适用于上游持续过载的场景，避免固定 1s 间隔不断冲击已过载的服务端。关闭时保持固定 `RETRY_INTERVAL` 行为。收到 429 会重置非429退避计数器。
 - 对于流式请求：先读取上游响应头与状态码，若为 503 则丢弃 body 并重试；一旦上游开始返回 200 并流式输出，中途断流**不**重试（已向客户端发送部分数据，重试会导致内容错乱）。
+- 下游在等待或换 key 期间主动取消请求时，代理会停止后续重试，并取消 `race` / `stagger` 模式下所有仍在飞的上游请求。
 - 请求异常（连接超时、网络断开等）同样会重试。
 - 达到 `MAX_RETRIES` 后返回一个 503 JSON 错误给客户端；`MAX_RETRIES=0` 时永不放弃。
 
@@ -377,7 +382,13 @@ http://127.0.0.1:8080/stats
 
 支持手动刷新与 15 秒自动刷新。页面通过 CDN 加载 ECharts，需能访问外网。
 
-数据接口（可自行集成）：`GET /stats/api`，返回聚合后的 JSON。
+管理页面需要 `ADMIN_PASSWORD`。浏览器首次打开 `/stats` 或 `/logs` 时会跳转登录页，登录状态通过 `HttpOnly` Cookie 保存 30 天。HTTPS 部署应设置 `ADMIN_COOKIE_SECURE=true`。API 客户端也可直接把同一密码作为 Bearer 凭据：
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_PASSWORD" http://127.0.0.1:8080/stats/api
+```
+
+数据接口：`GET /stats/api`，返回聚合后的 JSON。`/health` 仅返回最小探活状态，不需要鉴权。
 
 ## 推荐
 

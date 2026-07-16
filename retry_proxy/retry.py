@@ -14,6 +14,7 @@ from .key_pool import headers_with_key
 
 
 _client_ip = contextvars.ContextVar("client_ip", default="")
+_spawned_tasks = contextvars.ContextVar("spawned_tasks", default=None)
 
 
 def set_client_ip(value):
@@ -22,6 +23,31 @@ def set_client_ip(value):
 
 def reset_client_ip(token):
     _client_ip.reset(token)
+
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    tasks = _spawned_tasks.get()
+    if tasks is not None:
+        tasks.add(task)
+    return task
+
+
+async def _cancel_spawned(tasks):
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    for task in tasks:
+        if task.cancelled():
+            continue
+        try:
+            result = task.result()
+            if isinstance(result, tuple) and len(result) > 1 and result[0] == "ok":
+                await result[1].aclose()
+        except Exception:
+            pass
 
 
 def parse_model(body):
@@ -118,7 +144,7 @@ class RetryProxy:
                     return "error", exc, n
             start = total_sent; tasks = set()
             for _ in range(to_fire):
-                total_sent += 1; tasks.add(asyncio.create_task(send(total_sent)))
+                total_sent += 1; tasks.add(_spawn(send(total_sent)))
             key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
             self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} R{round_num} {to_fire}发(#{start + 1}-#{total_sent}) {time.time() - t0:.1f}s")
             winner = None; winner_attempt = 0; close = []; saw429 = False; ra_max = 0.0; host_error = False; remaining = tasks
@@ -181,7 +207,7 @@ class RetryProxy:
             except asyncio.CancelledError: raise
             except Exception as exc: return "error", exc, n, entry
         def can_fire(now): return winner is None and (self.config.max_retries == 0 or total_sent < self.config.max_retries) and len(in_flight) < self.config.max_concurrent and now >= next_allowed
-        total_sent = 1; task = asyncio.create_task(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
+        total_sent = 1; task = _spawn(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
         while True:
             key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
             if not in_flight:
@@ -190,14 +216,14 @@ class RetryProxy:
                 if wait > 0: self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} 退避 {wait:.1f}s {time.time() - t0:.1f}s")
                 await asyncio.sleep(wait)
                 if can_fire(time.time()):
-                    total_sent += 1; task = asyncio.create_task(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
+                    total_sent += 1; task = _spawn(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
                 continue
             now = time.time(); delay = max(min(in_flight.values()) + self.config.retry_interval - now, 0)
             done, _ = await asyncio.wait(set(in_flight), timeout=delay, return_when=asyncio.FIRST_COMPLETED)
             now = time.time()
             if not done:
                 if can_fire(now):
-                    total_sent += 1; task = asyncio.create_task(send(total_sent)); in_flight[task] = now; all_tasks.add(task)
+                    total_sent += 1; task = _spawn(send(total_sent)); in_flight[task] = now; all_tasks.add(task)
                     self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} 补发#{total_sent}(在飞{len(in_flight)}) {now - t0:.1f}s")
                 continue
             for task in done:
@@ -211,7 +237,7 @@ class RetryProxy:
                     self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt}({now - t0:.1f}s) {result!r} 立即补发")
                     if pool and entry and not is_host_level_error(result): pool.mark_cooldown(entry, self.config.key_cooldown)
                     if can_fire(now):
-                        total_sent += 1; new_task = asyncio.create_task(send(total_sent)); in_flight[new_task] = now; all_tasks.add(new_task)
+                        total_sent += 1; new_task = _spawn(send(total_sent)); in_flight[new_task] = now; all_tasks.add(new_task)
                 elif _should_retry(result.status_code):
                     _record_key_attempt(key_attempts, entry, False)
                     last_status = result.status_code; retry_codes.append(result.status_code)
@@ -227,7 +253,7 @@ class RetryProxy:
                             wait, _ = calc_backoff_wait(cother, self.config.retry_interval, self.config.retry_backoff_max, True); next_allowed = max(next_allowed, now + wait)
                             self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(result.status_code)} #{attempt} {wait:.1f}s 在飞{len(in_flight)} {now - t0:.1f}s")
                         elif can_fire(now):
-                            total_sent += 1; new_task = asyncio.create_task(send(total_sent)); in_flight[new_task] = now; all_tasks.add(new_task)
+                            total_sent += 1; new_task = _spawn(send(total_sent)); in_flight[new_task] = now; all_tasks.add(new_task)
                             self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(result.status_code)} #{attempt} 立即补发 在飞{len(in_flight)} {now - t0:.1f}s")
                     try: await result.aread()
                     except Exception: pass
@@ -250,12 +276,24 @@ class RetryProxy:
                     except Exception: pass
                 in_flight.clear(); break
             if in_flight and can_fire(time.time()) and any(time.time() - stamp >= self.config.retry_interval for stamp in in_flight.values()):
-                total_sent += 1; task = asyncio.create_task(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
+                total_sent += 1; task = _spawn(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
                 self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} 补发#{total_sent}(在飞{len(in_flight)}) {time.time() - t0:.1f}s")
         return RetryResult(winner, winner_attempt, total_sent, last_status, retry_codes, bool(winner and winner_attempt == 1), last_key_id, t0, key_attempts)
 
     async def request(self, method, url, headers, body, path, provider, model, pool=None):
         start = time.time()
+        spawned = set()
+        spawned_token = _spawned_tasks.set(spawned)
+        try:
+            return await self._request(method, url, headers, body, path, provider, model, pool, start)
+        except asyncio.CancelledError:
+            await _cancel_spawned(spawned)
+            self.logger.info(f"{_tag(method, path, provider, model)} 下游已断开，停止重试")
+            raise
+        finally:
+            _spawned_tasks.reset(spawned_token)
+
+    async def _request(self, method, url, headers, body, path, provider, model, pool, start):
         if model and self.config.hedge_mode == "race":
             return await self._race(method, url, headers, body, path, start, provider, model, pool)
         if model and self.config.hedge_mode == "stagger":

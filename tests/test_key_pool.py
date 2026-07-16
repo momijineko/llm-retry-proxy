@@ -6,6 +6,20 @@ from retry_proxy.key_pool import KeyEntry, KeyPool
 
 
 class KeyPoolStickyTests(unittest.TestCase):
+    def test_duplicate_labels_get_unique_non_secret_ids(self):
+        pool = KeyPool([("sk-secret-one", "shared"), ("sk-secret-two", "shared")])
+
+        ids = [entry.key_id for entry in pool.entries]
+        self.assertEqual(len(set(ids)), 2)
+        self.assertTrue(all(key_id.startswith("shared#") for key_id in ids))
+        self.assertTrue(all("secret" not in key_id for key_id in ids))
+
+    def test_duplicate_raw_keys_are_removed(self):
+        pool = KeyPool([("same-key", "first"), ("same-key", "second")])
+
+        self.assertEqual(len(pool.entries), 1)
+        self.assertEqual(pool.entries[0].label, "first")
+
     def test_sticky_window_renews_until_idle_timeout(self):
         pool = KeyPool([("cheap", "cheap"), ("expensive", "expensive")])
         pool._current = pool.entries[1]

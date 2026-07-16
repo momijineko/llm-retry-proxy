@@ -1,13 +1,17 @@
 import asyncio
+import html
 import os
+import secrets
 import sys
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 
 import httpx
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .api import create_handlers
-from .config import log_capture, logger, settings
+from .config import admin_session_value, log_capture, logger, require_admin, settings
 from .dlp import load_policy
 from .key_pool import KEY_POOLS
 from .log_store import RetryLogStore
@@ -39,6 +43,8 @@ def _log_startup():
     logger.info(f"记录: provider={settings.provider}, 日志目录={settings.log_dir}, 保留{settings.log_retention_days}天")
     logger.info(f"DLP: 模式={settings.dlp_mode}, 规则={','.join(sorted(settings.dlp_rules)) if settings.dlp_rules else '无'}")
     logger.info(f"代理: trust_env={'是(跟随系统代理)' if settings.trust_env else '否(直连)'}")
+    logger.info(f"管理端鉴权: {'已启用' if settings.admin_password else '未配置（统计与日志端点已禁用）'}")
+    logger.info(f"号池访问鉴权: {'已启用' if settings.proxy_api_key else '未配置（兼容开放模式）'}")
     if KEY_POOLS:
         for pool_url, pool in KEY_POOLS.items():
             route_tag = "默认" if pool_url == settings.upstream_url else pool_url
@@ -84,10 +90,49 @@ async def lifespan(_app):
 app = FastAPI(title="llm-retry-proxy", lifespan=lifespan)
 service = RetryProxy(client=None, pools=KEY_POOLS, log_store=store)
 health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy = create_handlers(service, store)
+
+
+def _login_page(next_path="/stats", failed=False):
+    next_path = next_path if next_path in ("/stats", "/logs") else "/stats"
+    error = '<p class="error">密码不正确</p>' if failed else ""
+    disabled = "" if settings.admin_password else "disabled"
+    message = "" if settings.admin_password else '<p class="error">管理员密码尚未配置</p>'
+    return HTMLResponse(f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>管理端登录</title>
+<style>*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f8;color:#172033;font:14px system-ui,sans-serif}}main{{width:min(360px,calc(100% - 32px));background:#fff;border:1px solid #dfe3e8;border-radius:8px;padding:28px;box-shadow:0 8px 30px rgba(15,23,42,.08)}}h1{{margin:0 0 22px;font-size:20px;letter-spacing:0}}label{{display:block;margin-bottom:7px;color:#526071;font-size:12px}}input{{width:100%;height:42px;border:1px solid #cbd3dc;border-radius:6px;padding:0 12px;font:inherit;outline:none}}input:focus{{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}}button{{width:100%;height:42px;margin-top:16px;border:0;border-radius:6px;background:#2563eb;color:#fff;font:600 14px system-ui;cursor:pointer}}button:disabled{{background:#9ca3af;cursor:not-allowed}}.error{{margin:0 0 14px;color:#c2413b;font-size:12px}}</style></head><body><main><h1>管理端登录</h1>{message}{error}<form method="post" action="/admin/login"><input type="hidden" name="next" value="{html.escape(next_path)}"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required {disabled}><button type="submit" {disabled}>登录</button></form></main></body></html>""")
+
+
+async def admin_login_page(next: str = "/stats"):
+    return _login_page(next)
+
+
+async def admin_login(request: Request):
+    values = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+    password = values.get("password", [""])[0]
+    next_path = values.get("next", ["/stats"])[0]
+    next_path = next_path if next_path in ("/stats", "/logs") else "/stats"
+    if not settings.admin_password or not secrets.compare_digest(password, settings.admin_password):
+        return _login_page(next_path, failed=True)
+    response = RedirectResponse(next_path, status_code=303)
+    response.set_cookie("admin_session", admin_session_value(), max_age=30 * 86400,
+                        httponly=True, samesite="strict", secure=settings.admin_cookie_secure, path="/")
+    return response
+
+
+async def admin_logout():
+    response = RedirectResponse("/admin/login", status_code=303)
+    response.delete_cookie("admin_session", path="/")
+    return response
+
+
 app.add_api_route("/health", health, methods=["GET"])
-app.add_api_route("/stats", stats_page, methods=["GET"])
-app.add_api_route("/stats/api", stats_api, methods=["GET"])
-app.add_api_route("/logs", logs_page, methods=["GET"])
-app.add_api_route("/logs/history", logs_history, methods=["GET"])
-app.add_api_route("/logs/stream", logs_stream, methods=["GET"])
+app.add_api_route("/admin/login", admin_login_page, methods=["GET"])
+app.add_api_route("/admin/login", admin_login, methods=["POST"])
+app.add_api_route("/admin/logout", admin_logout, methods=["POST"])
+admin_dependencies = [Depends(require_admin)]
+app.add_api_route("/stats", stats_page, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/stats/api", stats_api, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/logs", logs_page, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/logs/history", logs_history, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/logs/stream", logs_stream, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/{path:path}", proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])

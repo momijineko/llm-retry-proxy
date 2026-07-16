@@ -1,5 +1,6 @@
 import csv
 import fnmatch
+import hashlib
 import os
 import time
 from typing import Optional
@@ -24,6 +25,27 @@ class KeyPool:
         self.entries = [KeyEntry(k[0], k[1] if len(k) > 1 else "") if isinstance(k, tuple) else KeyEntry(k) for k in keys]
         self.provider, self._current, self._sticky_until = provider, None, 0.0
         self._views = {}
+        self.finalize_entries()
+
+    def finalize_entries(self):
+        unique = []
+        seen_keys = set()
+        for entry in self.entries:
+            if entry.key in seen_keys:
+                logger.warning(f"号池包含重复 key={entry.label or entry.key[:8]}，已去重")
+                continue
+            seen_keys.add(entry.key)
+            unique.append(entry)
+        self.entries = unique
+        counts = {}
+        for entry in self.entries:
+            base = entry.label or entry.key[:8]
+            counts[base] = counts.get(base, 0) + 1
+        for entry in self.entries:
+            base = entry.label or entry.key[:8]
+            if counts[base] > 1:
+                fingerprint = hashlib.sha256(entry.key.encode("utf-8")).hexdigest()[:8]
+                entry.key_id = f"{base}#{fingerprint}"
 
     def for_request(self, model="", path=""):
         model = (model or "").lower()
@@ -110,6 +132,8 @@ def load_key_pools_csv(path):
             logger.warning(f"号池 key={label or key[:8]} 的 provider={provider!r} 与池现有={pools[url].provider!r} 不一致，已忽略")
         pools.setdefault(url, KeyPool([], provider)).entries.append(KeyEntry(key, label, models, paths))
     if pools:
+        for pool in pools.values():
+            pool.finalize_entries()
         total = sum(len(p.entries) for p in pools.values())
         logger.info(f"号池CSV已加载: {fpath} ({len(pools)}个上游, 共{total}个key)")
     return pools
