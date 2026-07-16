@@ -10,6 +10,7 @@ services:
       LISTEN_HOST: 0.0.0.0
       KEY_POOL_FILE: /app/key_pool.csv
       LOG_DIR: /app/logs
+      TZ: "${TZ:-Asia/Shanghai}"
     ports:
       - "${LISTEN_PORT:-8080}:${LISTEN_PORT:-8080}"
     volumes:

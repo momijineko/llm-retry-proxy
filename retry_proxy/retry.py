@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import random
 import time
@@ -10,6 +11,17 @@ import httpx
 
 from .config import logger, settings
 from .key_pool import headers_with_key
+
+
+_client_ip = contextvars.ContextVar("client_ip", default="")
+
+
+def set_client_ip(value):
+    return _client_ip.set(value)
+
+
+def reset_client_ip(token):
+    _client_ip.reset(token)
 
 
 def parse_model(body):
@@ -47,9 +59,11 @@ def _should_retry(status):
     return status >= 500 or status in (429, 401, 403) if settings.retry_broad else status in settings.retry_status_codes
 
 
-def _tag(method, path, provider, model):
+def _tag(method, path, provider, model, client_ip=""):
     name = f"{provider}/{model}" if model else (provider or "?")
-    return f"[{method} /{path}] [\033[36m{name}\033[0m]"
+    ip = client_ip or _client_ip.get()
+    ip_tag = f"[{ip}] " if ip else ""
+    return f"{ip_tag}[{method} /{path}] [\033[36m{name}\033[0m]"
 
 
 def _sc(status):

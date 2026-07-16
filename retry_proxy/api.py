@@ -11,7 +11,7 @@ from fastapi.responses import Response, StreamingResponse
 from .config import log_capture, logger, settings
 from .routes import ROUTES, is_excluded_path, match_route
 from .key_pool import KEY_POOLS
-from .retry import filter_headers, parse_model, _tag
+from .retry import filter_headers, parse_model, reset_client_ip, set_client_ip, _tag
 from .stats import _req_succeeded, _upstream_window_stats, compute_stats
 
 SKIP_REQUEST_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade"}
@@ -40,6 +40,14 @@ def _cumulative(summary):
             "by_key": _summary_view(summary.get("by_key", {})),
             "by_status": [{"status": k, "count": v} for k, v in sorted(summary["by_status"].items(), key=lambda x: -x[1])],
             "first_ts": summary.get("first_ts"), "last_ts": summary.get("last_ts")}
+
+
+def _request_ip(request):
+    for header in ("cf-connecting-ip", "x-forwarded-for", "x-real-ip"):
+        value = request.headers.get(header, "").strip()
+        if value:
+            return value.split(",", 1)[0].strip()
+    return request.client.host if request.client else ""
 
 
 def create_handlers(service, store):
@@ -124,11 +132,16 @@ def create_handlers(service, store):
 
     async def proxy(path: str, request: Request):
         if is_excluded_path(path): return Response(status_code=404)
+        client_ip = _request_ip(request)
         upstream, provider, remaining = match_route(path); url = f"{upstream}/{remaining}" if remaining else upstream
         if request.url.query: url += f"?{request.url.query}"
         body = await request.body() if request.method not in ("GET", "HEAD") else b""
         model_name = parse_model(body)
-        result = await service.request(request.method, url, filter_headers(request.headers, SKIP_REQUEST_HEADERS), body, path, provider, model_name, KEY_POOLS.get(upstream))
+        ip_token = set_client_ip(client_ip)
+        try:
+            result = await service.request(request.method, url, filter_headers(request.headers, SKIP_REQUEST_HEADERS), body, path, provider, model_name, KEY_POOLS.get(upstream))
+        finally:
+            reset_client_ip(ip_token)
         response = result.response
         winner_attempt = result.winner_attempt
         total_sent = result.total_sent
@@ -142,9 +155,10 @@ def create_handlers(service, store):
                            "upstream_status": last_status, "final_status": response.status_code if response else 503,
                            "attempts": total_sent, "retries": max(total_sent - 1, 0),
                            "duration_s": round(time.time() - start, 3), "succeeded": bool(response and response.status_code < 400),
-                            "retry_codes": retry_codes, "mode": settings.hedge_mode, "first_ok": first_ok, "key_id": key_id})
+                           "retry_codes": retry_codes, "mode": settings.hedge_mode, "first_ok": first_ok,
+                           "key_id": key_id, "client_ip": client_ip})
         if response is None:
-            logger.error(f"{_tag(request.method, path, provider, model_name)} 放弃({total_sent}发) {time.time() - start:.1f}s")
+            logger.error(f"{_tag(request.method, path, provider, model_name, client_ip)} 放弃({total_sent}发) {time.time() - start:.1f}s")
             return Response(f'{{"error":{{"message":"upstream overloaded after {total_sent} attempts","type":"upstream_error","code":"503"}}}}', status_code=503, media_type="application/json", headers={"X-Forward-Attempts": str(total_sent)})
         headers = filter_headers(response.headers, SKIP_RESPONSE_HEADERS); headers["X-Forward-Attempts"] = str(winner_attempt)
         # 流式响应禁用反向代理缓冲，否则 nginx/群晖反代会攒批 flush 导致远程访问"一顿一顿"
@@ -154,7 +168,7 @@ def create_handlers(service, store):
             try:
                 async for chunk in response.aiter_bytes(): yield chunk
             except httpx.TransportError as e:
-                logger.warning(f"{_tag(request.method, path, provider, model_name)} 流式中断 #{winner_attempt} {e!r} 总{time.time() - start:.2f}s")
+                logger.warning(f"{_tag(request.method, path, provider, model_name, client_ip)} 流式中断 #{winner_attempt} {e!r} 总{time.time() - start:.2f}s")
             finally:
                 await response.aclose()
         return StreamingResponse(body_gen(), status_code=response.status_code, headers=headers, media_type=response.headers.get("content-type"))
