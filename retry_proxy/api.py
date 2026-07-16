@@ -111,12 +111,13 @@ def create_handlers(service, store):
             entries = [e for e in entries if e.get("seq", 0) > since]
         return entries
 
-    async def logs_stream(request: Request):
+    async def logs_stream(request: Request, since: int = 0):
         async def event_gen():
             q = log_capture.subscribe()
             try:
                 for entry in log_capture.history():
-                    yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
+                    if entry.get("seq", 0) > since:
+                        yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
                 while True:
                     if await request.is_disconnected():
                         break

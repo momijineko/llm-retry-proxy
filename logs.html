@@ -131,12 +131,6 @@
     box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.15);
   }
 
-  header .sub .status-dot.polling {
-    background: var(--debug);
-    box-shadow: 0 0 0 3px rgba(86, 212, 221, 0.15);
-    animation: pulse 2s infinite;
-  }
-
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
@@ -518,11 +512,7 @@
   let isPaused = false;
   let isUserScrolledUp = false;
   let totalReceived = 0;
-  let lastHistoryKey = null;
   let lastSeq = 0;
-  let sseTimeout = null;
-  let pollTimer = null;
-  let mode = 'sse'; // 'sse' or 'poll'
   const MAX_DOM_LINES = 3000;
   const BATCH_SIZE = 50;
   const LEVELS = { DEBUG: 'debug', INFO: 'info', WARNING: 'warning', ERROR: 'error' };
@@ -531,10 +521,9 @@
   function setStatus(state) {
     connDot.className = 'status-dot ' + state;
     const texts = {
-      connected: 'SSE 已连接',
+      connected: '已连接',
       connecting: '连接中...',
-      disconnected: '已断开',
-      polling: '轮询中'
+      disconnected: '已断开'
     };
     connText.textContent = texts[state] || state;
   }
@@ -613,43 +602,26 @@
     }
   }
 
-  // ── Deduplication ──
-  function shouldSkip(entry) {
-    if (!lastHistoryKey) return false;
-    const key = (entry.ts || '') + '|' + (entry.message || '');
-    return key === lastHistoryKey;
-  }
-
   // ── SSE ──
   function connectStream() {
     if (es) { try { es.close(); } catch(e) {} es = null; }
-    clearSseTimeout();
-    mode = 'sse';
     setStatus('connecting');
 
-    es = new EventSource('/logs/stream');
-
-    // SSE fallback: if no event received within 8s, switch to polling
-    sseTimeout = setTimeout(() => {
-      if (mode !== 'sse') return;
-      // SSE didn't deliver — reverse proxy is buffering. Fall back to polling.
-      if (es) { try { es.close(); } catch(e) {} es = null; }
-      startPolling();
-    }, 8000);
+    // Pass lastSeq so SSE only sends entries we don't already have
+    const url = '/logs/stream' + (lastSeq > 0 ? '?since=' + lastSeq : '');
+    es = new EventSource(url);
 
     es.onopen = () => {
       setStatus('connected');
     };
 
     es.onmessage = (ev) => {
-      // First event received — SSE works, clear the fallback timer
-      if (sseTimeout) { clearTimeout(sseTimeout); sseTimeout = null; }
       if (!ev.data || ev.data.trim() === '') return;
       if (ev.data.startsWith(':')) return; // keepalive comment
       try {
         const entry = JSON.parse(ev.data);
         if (entry.seq && entry.seq > lastSeq) lastSeq = entry.seq;
-        if (shouldSkip(entry)) return;
+        else return; // skip duplicates
         queueEntry(entry);
       } catch (e) {
         // If not JSON, treat as plain text
@@ -660,7 +632,6 @@
     es.onerror = () => {
       setStatus('disconnected');
       if (es) { try { es.close(); } catch(e) {} es = null; }
-      clearSseTimeout();
       // Auto-reconnect after delay unless paused
       if (!isPaused) {
         setTimeout(() => {
@@ -668,40 +639,6 @@
         }, 3000);
       }
     };
-  }
-
-  function clearSseTimeout() {
-    if (sseTimeout) { clearTimeout(sseTimeout); sseTimeout = null; }
-  }
-
-  // ── Polling fallback ──
-  function startPolling() {
-    mode = 'poll';
-    setStatus('polling');
-    if (pollTimer) clearTimeout(pollTimer);
-
-    async function poll() {
-      if (isPaused) return;
-      try {
-        const url = '/logs/history' + (lastSeq > 0 ? '?since=' + lastSeq : '');
-        const res = await fetch(url);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
-          emptyState.style.display = 'none';
-          for (const entry of data) {
-            if (entry.seq && entry.seq > lastSeq) lastSeq = entry.seq;
-            queueEntry(entry);
-          }
-        }
-      } catch (e) {
-        console.error('Poll failed:', e);
-      }
-      if (!isPaused) {
-        pollTimer = setTimeout(poll, 3000);
-      }
-    }
-    poll();
   }
 
   // ── Load history ──
@@ -731,11 +668,7 @@
         }
       }
 
-      // Remember last history entry for dedup
-      const last = data[data.length - 1];
-      if (last) {
-        lastHistoryKey = (last.ts || '') + '|' + (last.message || '');
-      }
+      // Track lastSeq for incremental SSE
       for (const entry of data) {
         if (entry.seq && entry.seq > lastSeq) lastSeq = entry.seq;
       }
@@ -809,18 +742,12 @@
     isPaused = !isPaused;
     if (isPaused) {
       if (es) { es.close(); es = null; }
-      clearSseTimeout();
-      if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
       setStatus('disconnected');
       pauseIcon.textContent = '▶';
       pauseText.textContent = '继续';
       pauseBtn.classList.add('active');
     } else {
-      if (mode === 'poll') {
-        startPolling();
-      } else {
-        connectStream();
-      }
+      connectStream();
       pauseIcon.textContent = '⏸';
       pauseText.textContent = '暂停';
       pauseBtn.classList.remove('active');
