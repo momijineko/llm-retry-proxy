@@ -46,18 +46,21 @@
 
   .dashboard-layout{max-width:1720px;margin:0 auto;padding:24px 28px 56px;display:grid;grid-template-columns:200px minmax(0,1fr);gap:24px;align-items:start}
   main{min-width:0}
-  .side-nav{position:sticky;top:78px;max-height:calc(100vh - 98px);overflow:auto;padding:14px 10px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-xs)}
-  .side-nav .nav-label{padding:0 8px 12px;color:var(--text);font-size:13px;font-weight:700;border-bottom:1px solid var(--border);margin-bottom:10px}
-  .side-nav .nav-group{padding:9px 8px 4px;color:var(--muted-2);font-size:10px;font-weight:700;text-transform:uppercase}
+  .side-nav{position:sticky;top:78px;max-height:calc(100vh - 98px);overflow:auto;padding:20px 10px 14px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius)}
+  .side-nav .nav-label{padding:0 8px 16px;color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
+  .side-nav .nav-group{padding:18px 8px 5px;color:var(--muted-2);font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;display:flex;align-items:center;gap:8px}
+  .side-nav .nav-group::before{content:"";flex:1;height:1px;background:var(--border);opacity:.35}
+  .side-nav .nav-group::after{content:"";width:8px;height:1px;background:var(--border);opacity:.35}
   .side-nav .nav-group[hidden]{display:none}
-  .side-nav a{display:flex;align-items:center;gap:9px;min-height:36px;margin:1px 0;padding:7px 9px;border-left:3px solid transparent;border-radius:5px;color:var(--muted);font-size:12px;font-weight:500;text-decoration:none;transition:color .15s,background .15s,border-color .15s}
-  .side-nav a::before{content:"";width:5px;height:5px;background:#cbd5e1;border-radius:50%;flex:0 0 auto;transition:background .15s,transform .15s}
-  .side-nav a:hover{color:var(--text);background:var(--card-2)}
-  .side-nav a.active{color:var(--primary-d);background:var(--primary-l);border-left-color:var(--primary);font-weight:650}
-  .side-nav a.active::before{background:var(--primary);transform:scale(1.25)}
+  .side-nav a{display:flex;align-items:center;padding:7px 10px;border-radius:6px;color:var(--text-2);font-size:13px;font-weight:500;text-decoration:none;transition:color .15s,background .15s;position:relative;margin:1px 0}
+  .side-nav a:hover{background:var(--card-2);color:var(--text)}
+  .side-nav a.active{background:var(--primary-l);color:var(--primary-d);font-weight:500}
+  .side-nav a.active::before{content:"";position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:16px;background:var(--primary);border-radius:2px}
   .side-nav a[hidden]{display:none}
-  .side-nav .nav-divider{height:1px;background:var(--border);margin:12px 8px 8px}
-  .side-nav .nav-top::before{border-radius:1px;transform:rotate(45deg);border-width:1.5px 0 0 1.5px}
+  .side-nav .nav-divider{height:1px;background:linear-gradient(90deg,transparent,var(--border),transparent);margin:14px 4px 10px}
+  .side-nav .nav-top{display:flex;align-items:center;justify-content:center;gap:6px;padding:8px;margin-top:6px;color:var(--muted-2);font-size:11px;font-weight:500;text-decoration:none;border-radius:6px;transition:color .15s,background .15s}
+  .side-nav .nav-top:hover{color:var(--primary);background:var(--card-2)}
+  .side-nav .nav-top::before{content:"↑";font-size:10px}
   .sec-title{font-size:14px;font-weight:700;margin:36px 0 16px;display:flex;align-items:center;gap:10px;color:var(--text);letter-spacing:0}
   .sec-title[id]{scroll-margin-top:84px}
   .sec-title:first-of-type{margin-top:10px}
@@ -161,27 +164,43 @@
   .scroll-table{max-height:400px;overflow:auto;border-radius:var(--radius-xs)}
   .scroll-table table{min-width:680px}
   .table-note{margin:-8px 0 12px;color:var(--muted);font-size:11px}
-  .key-pool-list{display:grid;gap:14px}
-  .key-pool-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}
-  .key-pool-head h2{margin:0}
-  .key-pool-endpoint{margin-top:3px;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
-  .key-pool-size{flex:0 0 auto;color:var(--muted);font-size:11px;background:var(--card-2);border:1px solid var(--border);border-radius:99px;padding:2px 8px}
-  .key-pool-metrics{display:flex;flex-wrap:wrap;gap:8px 18px;margin:0 0 8px;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);color:var(--muted);font-size:11px}
-  .key-pool-metrics strong{margin-left:4px;color:var(--text-2);font-size:12px;font-variant-numeric:tabular-nums}
-  .key-pool-body{display:grid;grid-template-columns:minmax(300px,.7fr) minmax(520px,1.3fr);gap:20px;align-items:start;margin-top:14px}
-  .key-pool-chart-panel{min-width:0;padding-right:20px;border-right:1px solid var(--border)}
-  .key-pool-panel-title{font-size:12px;font-weight:700;color:var(--text-2);margin-bottom:4px}
-  .key-pool-panel-sub{font-size:10px;color:var(--muted);margin-bottom:6px}
-  .key-pool-chart{width:100%;min-height:190px}
-  .key-pool-table{max-height:340px}
+  .key-pool-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(560px,1fr));gap:14px;margin-top:14px}
+  .kp-card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow-xs);overflow:hidden;border:1px solid var(--border)}
+  .kp-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px 10px;border-bottom:1px solid var(--border)}
+  .kp-header-info{min-width:0}
+  .kp-header h2{margin:0;font-size:13px;font-weight:600;color:var(--text);letter-spacing:0}
+  .kp-endpoint{margin-top:2px;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
+  .kp-health{display:flex;align-items:center;gap:8px}
+  .kp-health-score{font-size:15px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}
+  .kp-health-score.ok{color:var(--ok)}
+  .kp-health-score.warn{color:var(--warn)}
+  .kp-health-score.danger{color:var(--danger)}
+  .kp-keys-count{color:var(--muted);font-size:11px;font-weight:500;text-align:right}
+  .kp-body{padding:12px 16px 14px;display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:18px;align-items:start}
+  .kp-attention{min-width:0}
+  .kp-attention-title{font-size:11px;font-weight:600;color:var(--text);display:flex;align-items:center;gap:6px;margin-bottom:2px}
+  .kp-attention-title::before{content:"";width:3px;height:12px;border-radius:2px;background:var(--warn)}
+  .kp-attention-sub{font-size:10px;color:var(--muted);margin-bottom:8px;padding-left:9px}
+  .kp-chart{width:100%}
+  .kp-table-wrap{max-height:300px;overflow:auto}
+  .kp-table{width:100%;border-collapse:separate;border-spacing:0;font-size:12px}
+  .kp-table th{padding:6px 8px;border-bottom:1px solid var(--border);color:var(--muted);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;text-align:left;background:transparent}
+  .kp-table td{padding:8px;border-bottom:1px solid var(--border);vertical-align:middle}
+  .kp-table tbody tr{transition:background .12s}
+  .kp-table tbody tr:hover{background:#f8fafc}
+  .kp-table tbody tr:last-child td{border-bottom:none}
+  .kp-table td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .kp-table th.num{text-align:right}
+  .kp-table td:first-child,.kp-table th:first-child{padding-left:0}
+  .kp-table td:last-child,.kp-table th:last-child{padding-right:0}
   .scroll-table::-webkit-scrollbar{width:6px;height:6px}
   .scroll-table::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:3px}
   .scroll-table::-webkit-scrollbar-track{background:transparent}
 
   .duration-overview{grid-template-columns:repeat(5,1fr)}
-  @media(max-width:1180px){.dashboard-layout{grid-template-columns:156px minmax(0,1fr);gap:16px;padding-inline:20px}.overview{grid-template-columns:repeat(3,1fr)}.mini-cards{grid-template-columns:1fr}.grid2,.grid3{grid-template-columns:1fr}.duration-overview{grid-template-columns:repeat(3,1fr)}.key-pool-body{grid-template-columns:1fr}.key-pool-chart-panel{padding-right:0;border-right:0;border-bottom:1px solid var(--border);padding-bottom:12px}}
-  @media(max-width:820px){header{flex-wrap:wrap}.dashboard-layout{display:block;padding:0 16px 40px}.side-nav{position:relative;top:auto;z-index:1;display:flex;gap:2px;max-height:none;margin:0 -16px 16px;padding:9px 16px;overflow-x:auto;background:#edf1f6;border:0;border-bottom:1px solid var(--border);border-radius:0;box-shadow:none}.side-nav .nav-label,.side-nav .nav-group,.side-nav .nav-divider,.side-nav .nav-top{display:none}.side-nav a{flex:0 0 auto;min-height:32px;margin:0;padding:5px 9px;border:1px solid transparent;border-radius:6px;white-space:nowrap}.side-nav a::before{display:none}.side-nav a.active{border-color:#bfdbfe}.sec-title[id]{scroll-margin-top:84px}}
-  @media(max-width:640px){header{gap:8px;padding:10px 16px}.range-switch{order:3;width:100%;overflow-x:auto}.range-switch .rs{flex:1;white-space:nowrap}.filter-group{order:4;width:100%}.filter-group .model-filter{flex:1}.filter-group .btn{width:100%;justify-content:center}.model-dropdown{left:0;right:auto;max-width:calc(100vw - 32px)}.switch{display:none}.overview,.duration-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-card{padding:14px}.card{padding:16px}.stat-card .value{font-size:22px}.chart{height:270px}.chart.sm{height:240px}}
+  @media(max-width:1180px){.dashboard-layout{grid-template-columns:156px minmax(0,1fr);gap:16px;padding-inline:20px}.overview{grid-template-columns:repeat(3,1fr)}.mini-cards{grid-template-columns:1fr}.grid2,.grid3{grid-template-columns:1fr}.duration-overview{grid-template-columns:repeat(3,1fr)}.key-pool-grid{grid-template-columns:1fr}}
+  @media(max-width:820px){header{flex-wrap:wrap}.dashboard-layout{display:block;padding:0 16px 40px}.side-nav{position:relative;top:auto;z-index:1;display:flex;gap:6px;max-height:none;margin:0 -16px 16px;padding:10px 14px;overflow-x:auto;background:var(--card);border:0;border-bottom:1px solid var(--border);border-radius:0;box-shadow:none}.side-nav .nav-label,.side-nav .nav-group,.side-nav .nav-divider,.side-nav .nav-top{display:none}.side-nav a{flex:0 0 auto;min-height:32px;margin:0;padding:6px 10px;border:1px solid transparent;border-radius:6px;white-space:nowrap;font-size:12px}.side-nav a::before{display:none}.side-nav a.active{background:var(--primary-l);color:var(--primary-d);border-color:rgba(37,99,235,.12)}.sec-title[id]{scroll-margin-top:84px}}
+  @media(max-width:640px){header{gap:8px;padding:10px 16px}.range-switch{order:3;width:100%;overflow-x:auto}.range-switch .rs{flex:1;white-space:nowrap}.filter-group{order:4;width:100%}.filter-group .model-filter{flex:1}.filter-group .btn{width:100%;justify-content:center}.model-dropdown{left:0;right:auto;max-width:calc(100vw - 32px)}.switch{display:none}.overview,.duration-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.stat-card{padding:14px}.card{padding:16px}.stat-card .value{font-size:22px}.chart{height:270px}.chart.sm{height:240px}.kp-body{grid-template-columns:1fr}}
 </style>
 </head>
 <body id="top">
@@ -298,7 +317,12 @@
 
   <div id="keyPoolSection" class="section-wrap" style="display:none">
     <div class="sec-title" id="key-pools">号池 Key 可用率 <span class="count" id="keyPoolCount"></span></div>
-    <div class="key-pool-list" id="keyPoolList"></div>
+    <div class="overview" id="keyPoolOverview"></div>
+    <div class="grid2" style="margin:14px 0">
+      <div class="card"><h2>各号池可用率对比</h2><div id="poolCompareChart" class="chart sm"></div></div>
+      <div class="card"><h2>Key 健康度分布</h2><div id="keyHealthChart" class="chart sm"></div></div>
+    </div>
+    <div class="key-pool-grid" id="keyPoolList"></div>
   </div>
 
   <div id="noDetail" class="empty" style="display:none">本时段范围内无明细记录（累计数据见上方）。</div>
@@ -613,8 +637,8 @@ function renderAggTable(id,data,key){
 }
 function renderKeyRows(data){
   return data.map(d=>`<tr>
-    <td class="mono">${esc(d.key_id)}</td>
-    <td>${d.cooled?`<span class="pill warn">冷却 ${Math.ceil(d.cooldown_remaining||0)}s</span>`:'<span class="pill ok">可用</span>'}</td>
+    <td class="mono" style="max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(d.key_id)}</td>
+    <td style="text-align:center">${d.cooled?`<span class="pill warn">冷却 ${Math.ceil(d.cooldown_remaining||0)}s</span>`:'<span class="pill ok">可用</span>'}</td>
     <td class="num">${Math.max(d.attempts-d.ignored_attempts,0)}</td>
     <td class="num">${d.failed_attempts}</td>
     <td class="num">${d.availability_pct===null?'—':pctPill(d.availability_pct)}</td>
@@ -631,33 +655,74 @@ function keyPoolMetrics(keys){
   const ignored=keys.reduce((sum,key)=>sum+key.ignored_attempts,0);
   const failed=keys.reduce((sum,key)=>sum+key.failed_attempts,0);
   const measured=Math.max(attempts-ignored,0);
-  const availability=measured?((measured-failed)/measured*100).toFixed(1)+'%':'—';
+  const availability=measured?((measured-failed)/measured*100):0;
   const ready=keys.filter(key=>!key.cooled).length;
-  return `<span>当前可用<strong>${ready}/${keys.length}</strong></span><span>有效样本<strong>${measured}</strong></span><span>失败尝试<strong>${failed}</strong></span><span>加权可用率<strong>${availability}</strong></span>`;
+  const cooled=keys.filter(key=>key.cooled).length;
+  const noSample=keys.filter(key=>key.availability_pct===null).length;
+  const requests=keys.reduce((sum,key)=>sum+(key.requests||0),0);
+  return {attempts,ignored,failed,measured,availability,ready,cooled,noSample,requests,total:keys.length};
+}
+function renderKeyPoolOverview(pools){
+  const allKeys=pools.flatMap(p=>p.keys);
+  const m=keyPoolMetrics(allKeys);
+  const availStr=m.availability?m.availability.toFixed(1)+'%':'—';
+  const availColorStr=availColor(m.availability||0);
+  const html=`<div class="stat-card"><div class="label">号池数</div><div class="value">${pools.length}</div></div>
+    <div class="stat-card"><div class="label">总 Key 数</div><div class="value">${m.total}</div></div>
+    <div class="stat-card"><div class="label">可用 Key</div><div class="value" style="color:var(--ok)">${m.ready}</div></div>
+    <div class="stat-card"><div class="label">冷却中</div><div class="value" style="color:${m.cooled>0?'var(--warn)':'var(--muted-2)'}">${m.cooled}</div></div>
+    <div class="stat-card"><div class="label">整体可用率</div><div class="value" style="color:${availColorStr}">${availStr}</div></div>
+    <div class="stat-card"><div class="label">区间请求</div><div class="value">${m.requests}</div></div>`;
+  document.getElementById('keyPoolOverview').innerHTML=html;
+}
+function renderPoolCompareChart(pools){
+  const c=C('poolCompareChart');if(!c)return;
+  if(!pools.length){c.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});return}
+  const data=pools.map(pool=>{const m=keyPoolMetrics(pool.keys);return{provider:esc(pool.provider||'未命名'),availability:m.availability||0}});
+  c.setOption({tooltip:{trigger:'axis',axisPointer:{type:'shadow'},formatter:p=>{const d=data[p[0].dataIndex];return `${d.provider}<br>加权可用率: ${d.availability.toFixed(1)}%`}},grid:{left:50,right:20,top:16,bottom:20},xAxis:{type:'category',data:data.map(d=>d.provider),axisLabel:{color:'#9ca3af',fontSize:11},axisLine:{lineStyle:{color:'#e6e8ef'}},axisTick:{show:false}},yAxis:{type:'value',max:100,name:'%',nameTextStyle:{color:'#9ca3af',fontSize:11},axisLabel:{color:'#9ca3af',fontSize:11},splitLine:{lineStyle:{color:'#f1f3f8',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},series:[{type:'bar',data:data.map(d=>({value:d.availability,itemStyle:{color:availColor(d.availability),borderRadius:[4,4,0,0]}})),label:{show:true,position:'top',formatter:'{c}%',fontSize:10,color:'#6b7280'},barWidth:'55%'}]});
+}
+function renderKeyHealthChart(pools){
+  const c=C('keyHealthChart');if(!c)return;
+  const allKeys=pools.flatMap(p=>p.keys);
+  const ready=allKeys.filter(k=>!k.cooled&&k.availability_pct!==null).length;
+  const cooled=allKeys.filter(k=>k.cooled).length;
+  const noSample=allKeys.filter(k=>k.availability_pct===null).length;
+  if(!allKeys.length){c.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});return}
+  c.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{bottom:0,type:'scroll',textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:12},series:[{type:'pie',radius:['38%','62%'],center:['50%','44%'],data:[{name:'可用',value:ready,itemStyle:{color:COL.ok,borderColor:'#fff',borderWidth:2}},{name:'冷却中',value:cooled,itemStyle:{color:COL.warn,borderColor:'#fff',borderWidth:2}},{name:'暂无样本',value:noSample,itemStyle:{color:COL.gray,borderColor:'#fff',borderWidth:2}}],label:{formatter:'{b}\n{d}%',fontSize:11,color:'#334155'},emphasis:{scaleSize:6}}]});
 }
 function renderKeyPoolChart(id,data){
   const chart=C(id);if(!chart)return;
   const measured=data.filter(row=>row.availability_pct!==null).sort((a,b)=>a.availability_pct-b.availability_pct);
+  const problemKeys=measured.filter(row=>row.availability_pct<95);
+  const cooledKeys=data.filter(row=>row.cooled);
+  if(!measured.length&&!cooledKeys.length){
+    chart.setOption({title:{text:'暂无足够样本数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});
+    return;
+  }
+  if(!problemKeys.length&&!cooledKeys.length){
+    chart.setOption({title:{text:'所有 Key 运行正常',left:'center',top:'center',textStyle:{color:COL.ok,fontSize:13}}});
+    return;
+  }
   const attention=[];const seen=new Set();
   const add=row=>{if(row&&!seen.has(row.key_id)){seen.add(row.key_id);attention.push(row)}};
-  measured.filter(row=>row.availability_pct<95).forEach(add);
-  data.filter(row=>row.cooled).forEach(add);
+  problemKeys.forEach(add);
+  cooledKeys.forEach(add);
   data.filter(row=>row.availability_pct===null).forEach(add);
   measured.forEach(add);
   const rows=attention.slice(0,8);
   chart.setOption({
-    animationDuration:350,
+    animationDuration:400,
     tooltip:{trigger:'axis',axisPointer:{type:'shadow'},backgroundColor:'rgba(15,23,42,.94)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12},formatter:params=>{
       const row=params[0].data.raw;const sampleCount=Math.max(row.attempts-row.ignored_attempts,0);
       return `<strong>${esc(row.key_id)}</strong><br>Key 可用率：${row.availability_pct===null?'暂无样本':row.availability_pct.toFixed(1)+'%'}<br>有效样本：${sampleCount}<br>失败尝试：${row.failed_attempts}<br>忽略连接故障：${row.ignored_attempts}`;
     }},
-    grid:{left:82,right:48,top:8,bottom:24,containLabel:false},
-    xAxis:{type:'value',min:0,max:100,axisLabel:{formatter:'{value}%',color:'#9ca3af',fontSize:9},splitLine:{lineStyle:{color:'#eef1f5',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},
-    yAxis:{type:'category',inverse:true,data:rows.map(row=>row.key_id),axisLabel:{color:'#334155',fontSize:10,width:70,overflow:'truncate'},axisLine:{show:false},axisTick:{show:false}},
-    series:[{type:'bar',barWidth:12,showBackground:true,backgroundStyle:{color:'#eef1f5',borderRadius:3},data:rows.map(row=>{
+    grid:{left:100,right:32,top:4,bottom:8,containLabel:false},
+    xAxis:{type:'value',min:0,max:100,axisLabel:{formatter:'{value}%',color:'#9ca3af',fontSize:10},splitLine:{lineStyle:{color:'#f1f5f9',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},
+    yAxis:{type:'category',inverse:true,data:rows.map(row=>row.key_id),axisLabel:{color:'#334155',fontSize:11,width:90,overflow:'truncate'},axisLine:{show:false},axisTick:{show:false}},
+    series:[{type:'bar',barWidth:16,showBackground:true,backgroundStyle:{color:'#f1f5f9',borderRadius:4},data:rows.map(row=>{
       const value=row.availability_pct===null?0:row.availability_pct;
       const color=row.availability_pct===null?COL.gray:availColor(value);
-      return {value,raw:row,itemStyle:{color,borderRadius:3},label:{show:true,position:value>=22?'insideRight':'right',color:value>=22?'#fff':color,fontSize:9,formatter:row.availability_pct===null?'暂无':value.toFixed(1)+'%'}};
+      return {value,raw:row,itemStyle:{color,borderRadius:4},label:{show:true,position:value>=25?'insideRight':'right',color:value>=25?'#fff':color,fontSize:10,formatter:row.availability_pct===null?'暂无':value.toFixed(1)+'%'}};
     })}]
   });
 }
@@ -665,17 +730,31 @@ function renderKeyPools(pools){
   pools=pools||[];
   const section=document.getElementById('keyPoolSection');
   section.style.display=pools.length?'block':'none';
+  ['poolCompareChart','keyHealthChart'].forEach(id=>{if(charts[id]){charts[id].dispose();delete charts[id];if(chartObservers[id]){chartObservers[id].disconnect();delete chartObservers[id]}}});
   Object.keys(charts).filter(id=>id.startsWith('keyPoolChart')).forEach(id=>{charts[id].dispose();delete charts[id];if(chartObservers[id]){chartObservers[id].disconnect();delete chartObservers[id]}});
-  if(!pools.length){document.getElementById('keyPoolList').innerHTML='';return;}
+  if(!pools.length){document.getElementById('keyPoolOverview').innerHTML='';document.getElementById('keyPoolList').innerHTML='';return;}
   document.getElementById('keyPoolCount').textContent=pools.length+' 个号池';
-  document.getElementById('keyPoolList').innerHTML=pools.map((pool,index)=>`<div class="card">
-    <div class="key-pool-head"><div><h2>${esc(pool.provider||'未命名号池')}</h2><div class="key-pool-endpoint mono">${esc(keyPoolEndpoint(pool))}</div></div><span class="key-pool-size">${pool.keys.length} Keys</span></div>
-    <div class="key-pool-metrics">${keyPoolMetrics(pool.keys)}</div>
-    <div class="key-pool-body">
-      <div class="key-pool-chart-panel"><div class="key-pool-panel-title">需关注 Key</div><div class="key-pool-panel-sub">低于 95%、冷却中或暂无样本</div><div class="key-pool-chart" id="keyPoolChart${index}" style="height:${Math.max(190,Math.min(pool.keys.length,8)*28+42)}px"></div></div>
-      <div class="scroll-table key-pool-table"><table><thead><tr><th>Key</th><th>当前状态</th><th class="num">有效样本</th><th class="num">失败尝试</th><th class="num">Key 可用率</th><th class="num">请求成功率</th></tr></thead><tbody>${renderKeyRows(pool.keys)}</tbody></table></div>
-    </div>
-  </div>`).join('');
+  renderKeyPoolOverview(pools);
+  renderPoolCompareChart(pools);
+  renderKeyHealthChart(pools);
+  document.getElementById('keyPoolList').innerHTML=pools.map((pool,index)=>{
+    const ready=pool.keys.filter(k=>!k.cooled).length;
+    const healthClass=ready===pool.keys.length?'ok':ready>0?'warn':'danger';
+    const chartHeight=Math.max(160,Math.min(pool.keys.length,8)*28+32);
+    return `<div class="kp-card">
+      <div class="kp-header">
+        <div class="kp-header-info">
+          <h2>${esc(pool.provider||'未命名号池')}</h2>
+          <div class="kp-endpoint mono">${esc(keyPoolEndpoint(pool))}</div>
+        </div>
+        <div class="kp-health"><span class="pill ${healthClass}">${ready}/${pool.keys.length}</span></div>
+      </div>
+      <div class="kp-body">
+        <div class="kp-attention"><div class="kp-attention-title">需关注 Key</div><div class="kp-attention-sub">低于 95%、冷却中或暂无样本</div><div class="kp-chart" id="keyPoolChart${index}" style="height:${chartHeight}px"></div></div>
+        <div class="scroll-table kp-table-wrap"><table class="kp-table"><thead><tr><th>Key</th><th style="text-align:center">当前状态</th><th class="num">有效样本</th><th class="num">失败尝试</th><th class="num">Key 可用率</th><th class="num">请求成功率</th></tr></thead><tbody>${renderKeyRows(pool.keys)}</tbody></table></div>
+      </div>
+    </div>`;
+  }).join('');
   pools.forEach((pool,index)=>renderKeyPoolChart('keyPoolChart'+index,pool.keys));
 }
 function renderPathTable(data){
