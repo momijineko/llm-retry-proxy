@@ -194,6 +194,37 @@ def inspect_json_body(body, enabled_rules, start_marker, end_marker, strip_marke
             return output
         return value
 
-    cleaned = visit(payload)
+    def visit_latest_user(items):
+        output = list(items)
+        user_indexes = [index for index, item in enumerate(items)
+                        if isinstance(item, dict) and item.get("role") == "user"]
+        if user_indexes:
+            index = user_indexes[-1]
+            output[index] = visit(items[index])
+        else:
+            output = [visit(item) if isinstance(item, str) else item for item in items]
+        return output
+
+    if isinstance(payload, dict):
+        cleaned = dict(payload)
+        recognized = False
+        if isinstance(payload.get("messages"), list):
+            cleaned["messages"] = visit_latest_user(payload["messages"])
+            recognized = True
+        if "input" in payload:
+            value = payload["input"]
+            if isinstance(value, list):
+                cleaned["input"] = visit_latest_user(value)
+            elif isinstance(value, (str, dict)):
+                cleaned["input"] = visit(value)
+            recognized = True
+        for key in ("prompt", "query"):
+            if isinstance(payload.get(key), str):
+                cleaned[key] = visit(payload[key])
+                recognized = True
+        if not recognized:
+            cleaned = visit(payload)
+    else:
+        cleaned = visit(payload)
     encoded = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return DlpResult(encoded, tuple(sorted(matched)), exemptions, malformed, redactions)

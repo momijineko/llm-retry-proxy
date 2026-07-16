@@ -509,6 +509,8 @@
 
   // ── State ──
   let es = null;
+  let streamWatchdog = null;
+  let pollTimer = null;
   let isPaused = false;
   let isUserScrolledUp = false;
   let totalReceived = 0;
@@ -523,6 +525,7 @@
     const texts = {
       connected: '已连接',
       connecting: '连接中...',
+      polling: '轮询模式',
       disconnected: '已断开'
     };
     connText.textContent = texts[state] || state;
@@ -602,16 +605,52 @@
     }
   }
 
-  // ── SSE ──
-  function connectStream() {
+  function stopTransports() {
     if (es) { try { es.close(); } catch(e) {} es = null; }
+    if (streamWatchdog) { clearTimeout(streamWatchdog); streamWatchdog = null; }
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function acceptEntry(entry) {
+    if (!entry || !entry.seq || entry.seq <= lastSeq) return;
+    lastSeq = entry.seq;
+    queueEntry(entry);
+  }
+
+  async function pollIncremental() {
+    if (isPaused) return;
+    try {
+      const res = await fetch('/logs/history?since=' + lastSeq, { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const entries = await res.json();
+      if (Array.isArray(entries)) entries.forEach(acceptEntry);
+      setStatus('polling');
+    } catch (e) {
+      setStatus('disconnected');
+      console.error('Log polling failed:', e);
+    }
+  }
+
+  function startPolling() {
+    stopTransports();
+    if (isPaused) return;
+    setStatus('polling');
+    pollIncremental();
+    pollTimer = setInterval(pollIncremental, 2000);
+  }
+
+  // ── SSE with polling fallback ──
+  function connectStream() {
+    stopTransports();
     setStatus('connecting');
 
     // Pass lastSeq so SSE only sends entries we don't already have
     const url = '/logs/stream' + (lastSeq > 0 ? '?since=' + lastSeq : '');
     es = new EventSource(url);
+    streamWatchdog = setTimeout(startPolling, 5000);
 
     es.onopen = () => {
+      if (streamWatchdog) { clearTimeout(streamWatchdog); streamWatchdog = null; }
       setStatus('connected');
     };
 
@@ -620,9 +659,7 @@
       if (ev.data.startsWith(':')) return; // keepalive comment
       try {
         const entry = JSON.parse(ev.data);
-        if (entry.seq && entry.seq > lastSeq) lastSeq = entry.seq;
-        else return; // skip duplicates
-        queueEntry(entry);
+        acceptEntry(entry);
       } catch (e) {
         // If not JSON, treat as plain text
         queueEntry({ ts: new Date().toISOString().replace('T',' ').slice(0,19), level: 'INFO', message: String(ev.data) });
@@ -630,14 +667,7 @@
     };
 
     es.onerror = () => {
-      setStatus('disconnected');
-      if (es) { try { es.close(); } catch(e) {} es = null; }
-      // Auto-reconnect after delay unless paused
-      if (!isPaused) {
-        setTimeout(() => {
-          if (!isPaused) connectStream();
-        }, 3000);
-      }
+      startPolling();
     };
   }
 
@@ -741,7 +771,7 @@
   pauseBtn.addEventListener('click', () => {
     isPaused = !isPaused;
     if (isPaused) {
-      if (es) { es.close(); es = null; }
+      stopTransports();
       setStatus('disconnected');
       pauseIcon.textContent = '▶';
       pauseText.textContent = '继续';

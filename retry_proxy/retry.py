@@ -243,9 +243,9 @@ class RetryProxy:
 
     async def request(self, method, url, headers, body, path, provider, model, pool=None):
         start = time.time()
-        if self.config.hedge_mode == "race":
+        if model and self.config.hedge_mode == "race":
             return await self._race(method, url, headers, body, path, start, provider, model, pool)
-        if self.config.hedge_mode == "stagger":
+        if model and self.config.hedge_mode == "stagger":
             return await self._stagger(method, url, headers, body, path, start, provider, model, pool)
         attempt = 0; last_status = 0; retry_codes = []; c429 = cother = 0; last_key_id = ""
         while True:
@@ -260,6 +260,9 @@ class RetryProxy:
             except (httpx.RequestError, httpx.HTTPError) as exc:
                 last_status = 0; retry_codes.append(0); elapsed = time.time() - cycle
                 key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
+                if not model:
+                    self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #1({elapsed:.2f}s) 不重试")
+                    return RetryResult(None, 0, 1, 0, retry_codes, False, last_key_id, start)
                 sleep_for = max(self.config.retry_interval - elapsed, 0)
                 self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt}({elapsed:.2f}s) {exc!r} {sleep_for:.2f}s后重试")
                 if pool and entry and not is_host_level_error(exc):
@@ -268,7 +271,7 @@ class RetryProxy:
                         self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt} 换key 总{time.time() - start:.1f}s")
                         continue
                 await asyncio.sleep(sleep_for); continue
-            if _should_retry(response.status_code):
+            if model and _should_retry(response.status_code):
                 last_status = response.status_code; retry_codes.append(response.status_code)
                 ra = parse_retry_after(response.headers.get("retry-after")) if response.status_code == 429 else None
                 if pool and entry: pool.mark_cooldown(entry, self.config.key_cooldown, ra)
