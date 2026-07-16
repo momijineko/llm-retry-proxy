@@ -1,4 +1,5 @@
 import csv
+import fnmatch
 import os
 import time
 from typing import Optional
@@ -7,10 +8,12 @@ from .config import logger, settings
 
 
 class KeyEntry:
-    __slots__ = ("key", "key_id", "label", "cooldown_until", "total_fail", "last_fail_ts")
-    def __init__(self, key: str, label: str = ""):
+    __slots__ = ("key", "key_id", "label", "models", "paths", "cooldown_until", "total_fail", "last_fail_ts")
+    def __init__(self, key: str, label: str = "", models=(), paths=()):
         self.key, self.label = key, label
         self.key_id = label if label else key[:8]
+        self.models = tuple(pattern.lower() for pattern in models)
+        self.paths = tuple(pattern.lstrip("/").lower() for pattern in paths)
         self.cooldown_until = 0.0
         self.total_fail = 0
         self.last_fail_ts = 0.0
@@ -20,6 +23,23 @@ class KeyPool:
     def __init__(self, keys, provider: str = ""):
         self.entries = [KeyEntry(k[0], k[1] if len(k) > 1 else "") if isinstance(k, tuple) else KeyEntry(k) for k in keys]
         self.provider, self._current, self._sticky_until = provider, None, 0.0
+        self._views = {}
+
+    def for_request(self, model="", path=""):
+        model = (model or "").lower()
+        path = (path or "").lstrip("/").lower()
+        matched = [entry for entry in self.entries if
+                   (model and any(fnmatch.fnmatchcase(model, pattern) for pattern in entry.models)) or
+                   (path and any(fnmatch.fnmatchcase(path, pattern) for pattern in entry.paths))]
+        selected = matched or [entry for entry in self.entries if not entry.models and not entry.paths]
+        if not selected:
+            return None
+        signature = tuple(id(entry) for entry in selected)
+        if signature not in self._views:
+            view = KeyPool([], self.provider)
+            view.entries = selected
+            self._views[signature] = view
+        return self._views[signature]
 
     def pick(self):
         now = time.time()
@@ -47,7 +67,8 @@ class KeyPool:
     def status(self):
         now = time.time()
         return [{"key_id": e.key_id, "label": e.label, "cooled": e.cooldown_until > now,
-                 "cooldown_remaining": round(max(e.cooldown_until - now, 0), 1), "total_fail": e.total_fail} for e in self.entries]
+                 "cooldown_remaining": round(max(e.cooldown_until - now, 0), 1), "total_fail": e.total_fail,
+                 "models": list(e.models), "paths": list(e.paths)} for e in self.entries]
 
 
 def _resolve_path(path):
@@ -83,9 +104,11 @@ def load_key_pools_csv(path):
         url = (row.get("url") or "").strip().rstrip("/") or settings.upstream_url
         provider = (row.get("provider") or "").strip() or settings.provider
         label = (row.get("label") or "").strip()
+        models = tuple(pattern.strip() for pattern in (row.get("models") or "").split(";") if pattern.strip())
+        paths = tuple(pattern.strip() for pattern in (row.get("paths") or "").split(";") if pattern.strip())
         if url in pools and provider and pools[url].provider != provider:
             logger.warning(f"号池 key={label or key[:8]} 的 provider={provider!r} 与池现有={pools[url].provider!r} 不一致，已忽略")
-        pools.setdefault(url, KeyPool([], provider)).entries.append(KeyEntry(key, label))
+        pools.setdefault(url, KeyPool([], provider)).entries.append(KeyEntry(key, label, models, paths))
     if pools:
         total = sum(len(p.entries) for p in pools.values())
         logger.info(f"号池CSV已加载: {fpath} ({len(pools)}个上游, 共{total}个key)")

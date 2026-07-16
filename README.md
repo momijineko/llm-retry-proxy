@@ -87,7 +87,7 @@ curl http://127.0.0.1:8080/chat/completions \
 | `PROVIDER` | `xfyun` | 供应商标签，写入每条重试记录，用于区分不同上游/账号 |
 | `EXTRA_UPSTREAMS` | （空） | 额外上游路由，按路径前缀分流。格式 `prefix\|url\|provider`，多组逗号分隔。匹配前缀的请求去掉前缀后转发到对应 `url`，未匹配的走默认 `UPSTREAM_URL`。详见下方[多上游路由](#多上游路由) |
 | `KEY_POOLS` | （空） | 号池配置（环境变量方式），启用后代理注入 key 并按倍率从低到高降级。格式 `key1;key2;key3`（用于默认上游）或 `url\|provider\|key1;key2`（多上游）。留空则保持透传客户端 key 的原有行为。详见下方[号池](#号池key-pool) |
-| `KEY_POOL_FILE` | （空） | 号池 CSV 文件路径，**优先于 `KEY_POOLS`**。格式 `key,url,provider`，行序即优先级（上=便宜，下=贵）。详见下方[号池](#号池key-pool) |
+| `KEY_POOL_FILE` | （空） | 号池 CSV 文件路径，**优先于 `KEY_POOLS`**。支持用 `models`/`paths` 将同一 URL 的专用 key 隔离分流。详见下方[号池](#号池key-pool) |
 | `KEY_COOLDOWN` | `30` | 单个 key 遇到 429/5xx 后的冷却时间（秒）。冷却期间优先跳过该 key，用更贵但可用的 key 降级 |
 | `KEY_STICKY` | `120` | key 粘性空闲超时（秒）。每次请求都会续期；持续空闲超过该时间后，下一次从号池开头重新选择。`0` = 禁用。 |
 | `KEY_AUTH_HEADER` | `authorization` | 号池注入鉴权头的 header 名 |
@@ -166,7 +166,17 @@ sk-other-key,https://other.com,other,备用站
 - `url`（可选）：上游地址，留空 = `UPSTREAM_URL`
 - `provider`（可选）：供应商标签，留空 = `PROVIDER`
 - `label`（可选）：key 标签/备注，用于日志显示和统计面板分组。留空则用 key 前 8 位
+- `models`（可选）：该行 key 匹配的模型 glob，多个用分号分隔，例如 `gpt-image-*;imagen-*`
+- `paths`（可选）：该行 key 匹配的路径 glob，多个用分号分隔，例如 `images/*;v1/images/*`
 - **行序即优先级**：上面的 = 低倍率（便宜），下面的 = 高倍率（贵）
+
+当任一专用行命中模型或路径时，请求只在这些命中行之间选 key；未命中时只使用 `models` 和 `paths` 都为空的普通行。专用池与普通池分别维护粘性状态，专用 key 冷却时不会泄漏回普通分组。
+
+```csv
+key,url,provider,label,models,paths
+sk-normal,https://aihub.top,aihub,普通组,,
+sk-image,https://aihub.top,aihub,生图组,gpt-image-*;imagen-*,images/*;v1/images/*
+```
 
 > 项目附带 `key_pool.csv.example` 模板，复制为 `key_pool.csv` 即可使用。
 

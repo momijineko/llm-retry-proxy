@@ -168,9 +168,11 @@ def create_handlers(service, store):
                 if dlp.exemptions:
                     logger.info(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免 count={dlp.exemptions}")
         model_name = parse_model(body)
+        base_pool = KEY_POOLS.get(upstream)
+        request_pool = base_pool.for_request(model_name, remaining) if base_pool else None
         ip_token = set_client_ip(client_ip)
         try:
-            result = await service.request(request.method, url, filter_headers(request.headers, SKIP_REQUEST_HEADERS), body, path, provider, model_name, KEY_POOLS.get(upstream))
+            result = await service.request(request.method, url, filter_headers(request.headers, SKIP_REQUEST_HEADERS), body, path, provider, model_name, request_pool)
         finally:
             reset_client_ip(ip_token)
         response = result.response
