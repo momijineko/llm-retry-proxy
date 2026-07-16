@@ -62,15 +62,20 @@ class LogCaptureHandler(logging.Handler):
         self._subscribers: set[asyncio.Queue] = set()
         self._lock = threading.Lock()
         self._loop = None
+        self._seq = 0
 
     def set_loop(self, loop):
         self._loop = loop
 
     def emit(self, record):
+        with self._lock:
+            self._seq += 1
+            seq = self._seq
         entry = {
             "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created)),
             "level": record.levelname,
             "message": self._ANSI_RE.sub("", record.getMessage()),
+            "seq": seq,
         }
         with self._lock:
             self._buffer.append(entry)

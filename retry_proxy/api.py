@@ -97,8 +97,11 @@ def create_handlers(service, store):
                 return Response(f.read(), media_type="text/html; charset=utf-8")
         return Response("logs.html not found", status_code=404)
 
-    async def logs_history():
-        return log_capture.history()
+    async def logs_history(since: int = 0):
+        entries = log_capture.history()
+        if since > 0:
+            entries = [e for e in entries if e.get("seq", 0) > since]
+        return entries
 
     async def logs_stream(request: Request):
         async def event_gen():
