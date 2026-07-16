@@ -142,6 +142,13 @@ class Settings:
     key_sticky: float = float(os.getenv("KEY_STICKY", "60"))
     key_auth_header: str = os.getenv("KEY_AUTH_HEADER", "authorization").lower()
     key_auth_scheme: str = os.getenv("KEY_AUTH_SCHEME", "Bearer")
+    dlp_mode: str = os.getenv("DLP_MODE", "off").lower()
+    dlp_rules: frozenset = frozenset(x.strip() for x in os.getenv("DLP_RULES", "credentials,private_key,jwt,connection_string,id_card,bank_card,structured_secret").split(",") if x.strip())
+    dlp_rule_file: str = os.getenv("DLP_RULE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "dlp_rules.yaml"))
+    dlp_exempt_start: str = os.getenv("DLP_EXEMPT_START", "[[ALLOW_SENSITIVE]]")
+    dlp_exempt_end: str = os.getenv("DLP_EXEMPT_END", "[[/ALLOW_SENSITIVE]]")
+    dlp_strip_exempt_markers: bool = _bool("DLP_STRIP_EXEMPT_MARKERS", "true")
+    dlp_max_body_bytes: int = int(os.getenv("DLP_MAX_BODY_BYTES", "1048576"))
 
     @property
     def stats_html_path(self):

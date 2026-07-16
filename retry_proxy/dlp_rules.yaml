@@ -1,0 +1,47 @@
+# DLP 规则文件。修改后需要重启服务，启动时会校验格式和正则。
+version: 1
+
+# 每条规则包含：
+#   pattern: Python 正则表达式，建议使用单引号避免反斜杠转义。
+#   flags: 可选，支持 IGNORECASE、MULTILINE、DOTALL。
+#   validator: 可选，支持 cn_id_checksum（中国身份证）和 luhn（银行卡）。
+# 新增普通正则规则后，还需将规则名加入 .env 的 DLP_RULES 才会启用。
+rules:
+  private_key:
+    # 完整替换 PEM / PGP 私钥块，避免只隐藏头部而泄漏正文。
+    pattern: '-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----.*?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----.*?-----END PGP PRIVATE KEY BLOCK-----'
+    flags: [IGNORECASE, DOTALL]
+
+  credentials:
+    # 常见 API Key、GitHub/AWS/Slack Token，以及 key=value 形式的凭据。
+    pattern: '(?:\bsk-[A-Za-z0-9_-]{16,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[A-Z0-9]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}|\b(?:api[_ -]?key|access[_ -]?token|secret|password)\s*[:=]\s*[^\s,;]{8,})'
+    flags: [IGNORECASE]
+
+  jwt:
+    pattern: '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b'
+
+  connection_string:
+    # 仅匹配含 user:password@host 的常见数据库连接串。
+    pattern: '\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s:/@]+:[^\s@/]+@[^\s]+'
+    flags: [IGNORECASE]
+
+  id_card:
+    pattern: '(?<!\d)\d{17}[\dXx](?!\d)'
+    validator: cn_id_checksum
+
+  bank_card:
+    pattern: '(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)'
+    validator: luhn
+
+# 当 JSON 对象的字段名命中此列表时，整个字符串值按 structured_secret 处理。
+# structured_secret 同样需要出现在 DLP_RULES 中。字段名匹配不区分大小写。
+sensitive_json_keys:
+  - password
+  - passwd
+  - secret
+  - client_secret
+  - api_key
+  - apikey
+  - access_token
+  - refresh_token
+  - private_key

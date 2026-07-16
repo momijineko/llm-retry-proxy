@@ -9,6 +9,7 @@ from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
 from .config import log_capture, logger, settings
+from .dlp import inspect_json_body
 from .routes import ROUTES, is_excluded_path, match_route
 from .key_pool import KEY_POOLS
 from .retry import filter_headers, parse_model, reset_client_ip, set_client_ip, _tag
@@ -137,6 +138,34 @@ def create_handlers(service, store):
         upstream, provider, remaining = match_route(path); url = f"{upstream}/{remaining}" if remaining else upstream
         if request.url.query: url += f"?{request.url.query}"
         body = await request.body() if request.method not in ("GET", "HEAD") else b""
+        if settings.dlp_mode in ("audit", "block", "redact"):
+            if len(body) > settings.dlp_max_body_bytes:
+                logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP请求体超限 bytes={len(body)}")
+                if settings.dlp_mode in ("block", "redact"):
+                    return Response('{"error":{"type":"dlp_body_too_large","message":"Request body exceeds DLP inspection limit"}}', status_code=413, media_type="application/json")
+            else:
+                dlp = inspect_json_body(body, settings.dlp_rules, settings.dlp_exempt_start,
+                                        settings.dlp_exempt_end, settings.dlp_strip_exempt_markers,
+                                        redact=settings.dlp_mode == "redact",
+                                        rule_file=settings.dlp_rule_file)
+                if dlp.malformed_exemption:
+                    logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免标记不完整")
+                    if settings.dlp_mode in ("block", "redact"):
+                        return Response('{"error":{"type":"dlp_malformed_exemption","message":"Malformed DLP exemption markers"}}', status_code=422, media_type="application/json")
+                else:
+                    body = dlp.body
+                if dlp.matched_rules:
+                    rules = ",".join(dlp.matched_rules)
+                    action = {"block": "拦截", "redact": "脱敏"}.get(settings.dlp_mode, "告警")
+                    count = f" count={dlp.redactions}" if dlp.redactions else ""
+                    logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP{action} rules={rules}{count}")
+                    if settings.dlp_mode == "block":
+                        payload = json.dumps({"error": {"type": "sensitive_data_blocked",
+                                             "message": "Request blocked by sensitive data policy",
+                                             "rules": list(dlp.matched_rules)}}, ensure_ascii=False)
+                        return Response(payload, status_code=422, media_type="application/json")
+                if dlp.exemptions:
+                    logger.info(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免 count={dlp.exemptions}")
         model_name = parse_model(body)
         ip_token = set_client_ip(client_ip)
         try:

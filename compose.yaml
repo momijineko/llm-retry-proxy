@@ -2,6 +2,8 @@ services:
   llm-retry-proxy:
     build:
       context: .
+      args:
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
     container_name: llm-retry-proxy
     restart: unless-stopped
     env_file:

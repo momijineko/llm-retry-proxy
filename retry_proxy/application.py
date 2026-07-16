@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from .api import create_handlers
 from .config import log_capture, logger, settings
+from .dlp import load_policy
 from .key_pool import KEY_POOLS
 from .log_store import RetryLogStore
 from .retry import RetryProxy
@@ -36,6 +37,7 @@ def _log_startup():
     logger.info(f"重试: 间隔={settings.retry_interval}s+{backoff}, 429={settings.retry_interval_429}s+{backoff_429}(优先Retry-After), 最大次数={retry_desc}, 状态码={sorted(settings.retry_status_codes)}, 宽松={'开(5xx/429/401/403)' if settings.retry_broad else '关'}")
     logger.info(f"模式: {mode_desc}" + (f", 最大并发={settings.max_concurrent}" if settings.hedge_mode != "off" else ""))
     logger.info(f"记录: provider={settings.provider}, 日志目录={settings.log_dir}, 保留{settings.log_retention_days}天")
+    logger.info(f"DLP: 模式={settings.dlp_mode}, 规则={','.join(sorted(settings.dlp_rules)) if settings.dlp_rules else '无'}")
     logger.info(f"代理: trust_env={'是(跟随系统代理)' if settings.trust_env else '否(直连)'}")
     if KEY_POOLS:
         for pool_url, pool in KEY_POOLS.items():
@@ -52,6 +54,18 @@ def _log_startup():
 @asynccontextmanager
 async def lifespan(_app):
     global client
+    if settings.dlp_mode not in ("off", "audit", "redact", "block"):
+        raise ValueError(f"未知 DLP_MODE: {settings.dlp_mode!r}")
+    if settings.dlp_mode != "off":
+        policy = load_policy(settings.dlp_rule_file)
+        unknown_rules = settings.dlp_rules - (policy.rules.keys() | {"structured_secret"})
+        if unknown_rules:
+            raise ValueError(f"DLP_RULES 包含未知规则: {','.join(sorted(unknown_rules))}")
+        if (not settings.dlp_exempt_start or not settings.dlp_exempt_end
+                or settings.dlp_exempt_start == settings.dlp_exempt_end):
+            raise ValueError("DLP 豁免起止标记不能为空或相同")
+        if settings.dlp_max_body_bytes <= 0:
+            raise ValueError("DLP_MAX_BODY_BYTES 必须大于 0")
     store.initialize()
     client = httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout, connect=settings.connect_timeout),
                                limits=httpx.Limits(max_connections=200, max_keepalive_connections=50), trust_env=settings.trust_env)
