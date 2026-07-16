@@ -139,7 +139,7 @@ class Settings:
     key_pools_raw: str = os.getenv("KEY_POOLS", "").strip()
     key_pool_file: str = os.getenv("KEY_POOL_FILE", "").strip()
     key_cooldown: float = float(os.getenv("KEY_COOLDOWN", "30"))
-    key_sticky: float = float(os.getenv("KEY_STICKY", "60"))
+    key_sticky: float = float(os.getenv("KEY_STICKY", "120"))
     key_auth_header: str = os.getenv("KEY_AUTH_HEADER", "authorization").lower()
     key_auth_scheme: str = os.getenv("KEY_AUTH_SCHEME", "Bearer")
     dlp_mode: str = os.getenv("DLP_MODE", "off").lower()

@@ -24,6 +24,7 @@ class KeyPool:
     def pick(self):
         now = time.time()
         if self._current is not None and now < self._sticky_until and self._current.cooldown_until <= now:
+            self._sticky_until = now + settings.key_sticky
             return self._current
         for entry in self.entries:
             if entry.cooldown_until <= now:
