@@ -7,9 +7,13 @@ from typing import Optional
 
 from .config import logger, settings
 
+_FAILURE_KIND_PRIORITY = {"transport": 1, "upstream": 2, "rate_limit": 3, "auth": 4}
+
 
 class KeyEntry:
-    __slots__ = ("key", "key_id", "label", "models", "paths", "cooldown_until", "total_fail", "last_fail_ts")
+    __slots__ = ("key", "key_id", "label", "models", "paths", "cooldown_until", "total_fail",
+                 "last_fail_ts", "consecutive_failures", "last_failure_kind", "last_failure_status",
+                 "last_cooldown_s")
     def __init__(self, key: str, label: str = "", models=(), paths=()):
         self.key, self.label = key, label
         self.key_id = label if label else key[:8]
@@ -18,6 +22,10 @@ class KeyEntry:
         self.cooldown_until = 0.0
         self.total_fail = 0
         self.last_fail_ts = 0.0
+        self.consecutive_failures = 0
+        self.last_failure_kind = ""
+        self.last_failure_status = None
+        self.last_cooldown_s = 0.0
 
 
 class KeyPool:
@@ -80,16 +88,53 @@ class KeyPool:
     def has_fresh(self):
         return any(e.cooldown_until <= time.time() for e in self.entries)
 
-    def mark_cooldown(self, entry, seconds, ra_wait=None):
-        now = time.time(); already = entry.cooldown_until > now
-        entry.cooldown_until = now + max(seconds, ra_wait or 0.0)
-        if not already: entry.total_fail += 1
+    def next_available_in(self):
+        if not self.entries:
+            return 0.0
+        return max(min(e.cooldown_until for e in self.entries) - time.time(), 0.0)
+
+    def mark_cooldown(self, entry, seconds, ra_wait=None, failure_kind="upstream", backoff=False,
+                      max_seconds=None, status=None):
+        now = time.time()
+        already = entry.cooldown_until > now
+        if not already:
+            entry.consecutive_failures = (entry.consecutive_failures + 1
+                                          if entry.last_failure_kind == failure_kind else 1)
+            entry.last_failure_kind = failure_kind
+            entry.last_failure_status = status
+            entry.total_fail += 1
+        cooldown = seconds
+        if backoff:
+            for _ in range(min(max(entry.consecutive_failures - 1, 0), 63)):
+                cooldown *= 2
+                if max_seconds is not None and cooldown >= max_seconds:
+                    break
+        if max_seconds is not None:
+            cooldown = min(cooldown, max_seconds)
+        cooldown = max(cooldown, ra_wait or 0.0)
+        proposed_until = now + cooldown
+        more_severe = (_FAILURE_KIND_PRIORITY.get(failure_kind, 0)
+                       > _FAILURE_KIND_PRIORITY.get(entry.last_failure_kind, 0))
+        if already and (more_severe or proposed_until > entry.cooldown_until):
+            entry.last_failure_kind = failure_kind
+            entry.last_failure_status = status
+        entry.cooldown_until = max(entry.cooldown_until, proposed_until)
+        entry.last_cooldown_s = max(entry.last_cooldown_s, cooldown) if already else cooldown
         entry.last_fail_ts = now
+
+    def mark_success(self, entry):
+        entry.cooldown_until = 0.0
+        entry.consecutive_failures = 0
+        entry.last_failure_kind = ""
+        entry.last_failure_status = None
+        entry.last_cooldown_s = 0.0
 
     def status(self):
         now = time.time()
         return [{"key_id": e.key_id, "label": e.label, "cooled": e.cooldown_until > now,
                  "cooldown_remaining": round(max(e.cooldown_until - now, 0), 1), "total_fail": e.total_fail,
+                 "consecutive_failures": e.consecutive_failures, "last_failure_kind": e.last_failure_kind,
+                 "last_failure_status": e.last_failure_status, "last_cooldown_s": round(e.last_cooldown_s, 1),
                  "models": list(e.models), "paths": list(e.paths)} for e in self.entries]
 
 

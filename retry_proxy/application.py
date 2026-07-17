@@ -49,7 +49,10 @@ def _log_startup():
         for pool_url, pool in KEY_POOLS.items():
             route_tag = "默认" if pool_url == settings.upstream_url else pool_url
             labels = ", ".join(e.key_id for e in pool.entries)
-            logger.info(f"号池: {route_tag} provider={pool.provider or settings.provider} keys={len(pool.entries)}个 冷却={settings.key_cooldown:.0f}s 粘性={settings.key_sticky:.0f}s 鉴权={settings.key_auth_header}({'有' if settings.key_auth_scheme else '无'}scheme)")
+            cooldown_desc = (f"5xx={settings.key_cooldown_5xx:.0f}s/429={settings.key_cooldown_429:.0f}s/"
+                             f"鉴权={settings.key_cooldown_auth:.0f}s/上限={settings.key_cooldown_max:.0f}s/"
+                             f"指数={'开' if settings.key_cooldown_backoff else '关'}")
+            logger.info(f"号池: {route_tag} provider={pool.provider or settings.provider} keys={len(pool.entries)}个 熔断={cooldown_desc} 粘性={settings.key_sticky:.0f}s 鉴权头={settings.key_auth_header}({'有' if settings.key_auth_scheme else '无'}scheme)")
     else:
         logger.info("号池: 未配置(透传客户端key)")
     logger.info(f"统计面板: http://127.0.0.1:{settings.listen_port}/stats")

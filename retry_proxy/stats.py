@@ -103,20 +103,26 @@ def _agg_by(records: list, key: str, label: str, key_fn=None):
 
 
 def _agg_by_key(records: list) -> list:
-    attempts = defaultdict(lambda: {"attempts": 0, "available": 0, "failed": 0, "ignored": 0, "legacy": 0})
+    attempts = defaultdict(lambda: {
+        "attempts": 0, "available": 0, "failed": 0, "ignored": 0, "legacy": 0,
+        "events": [],
+    })
     requests = {item["key_id"]: item for item in _agg_by(records, "key_id", "key_id") if item["key_id"] != "(unknown)"}
-    for record in records:
+    for record_index, record in enumerate(records):
+        ts = record.get("ts", "") or ""
         trace = record.get("key_attempts")
         if isinstance(trace, list) and trace:
-            for item in trace:
+            for attempt_index, item in enumerate(trace):
                 if not isinstance(item, dict) or not item.get("key_id"):
                     continue
                 bucket = attempts[item["key_id"]]
                 bucket["attempts"] += 1
                 if item.get("available") is True:
                     bucket["available"] += 1
+                    bucket["events"].append((ts, record_index, attempt_index, True))
                 elif item.get("available") is False:
                     bucket["failed"] += 1
+                    bucket["events"].append((ts, record_index, attempt_index, False))
                 else:
                     bucket["ignored"] += 1
             continue
@@ -125,13 +131,25 @@ def _agg_by_key(records: list) -> list:
             bucket = attempts[key_id]
             bucket["attempts"] += 1
             bucket["legacy"] += 1
-            bucket["available" if _req_succeeded(record) else "failed"] += 1
+            available = _req_succeeded(record)
+            bucket["available" if available else "failed"] += 1
+            bucket["events"].append((ts, record_index, 0, available))
 
     out = []
     for key_id in attempts.keys() | requests.keys():
         attempt = attempts[key_id]
         request = requests.get(key_id, {})
         measured = attempt["available"] + attempt["failed"]
+        events = sorted(attempt["events"], key=lambda event: (event[0], event[1], event[2]))
+        latest_available = events[-1][3] if events else None
+        previous_available = events[-2][3] if len(events) > 1 else None
+        consecutive_failures = 0
+        for event in reversed(events):
+            if event[3]:
+                break
+            consecutive_failures += 1
+        success_events = [event for event in events if event[3]]
+        failure_events = [event for event in events if not event[3]]
         out.append({
             "key_id": key_id,
             "attempts": attempt["attempts"],
@@ -139,6 +157,12 @@ def _agg_by_key(records: list) -> list:
             "ignored_attempts": attempt["ignored"],
             "legacy_attempts": attempt["legacy"],
             "availability_pct": round(attempt["available"] / measured * 100, 2) if measured else None,
+            "latest_available": latest_available,
+            "previous_available": previous_available,
+            "consecutive_failures": consecutive_failures,
+            "last_attempt_at": events[-1][0] if events else None,
+            "last_success_at": success_events[-1][0] if success_events else None,
+            "last_failure_at": failure_events[-1][0] if failure_events else None,
             "requests": request.get("requests", 0),
             "request_availability_pct": request.get("availability_pct") if request else None,
             "avg_retries": request.get("avg_retries", 0),
@@ -147,15 +171,8 @@ def _agg_by_key(records: list) -> list:
     return sorted(out, key=lambda item: item["attempts"], reverse=True)
 
 
-def compute_key_pool_stats(records: list, pool_configs: list) -> list:
-    pools = []
-    for config in pool_configs:
-        raw_keys = config.get("keys", ())
-        key_ids = tuple(dict.fromkeys(item.get("key_id") if isinstance(item, dict) else item for item in raw_keys))
-        key_ids = tuple(key_id for key_id in key_ids if key_id)
-        key_meta = {item["key_id"]: item for item in raw_keys if isinstance(item, dict) and item.get("key_id")}
-        pools.append({**config, "keys": key_ids, "key_meta": key_meta, "key_set": set(key_ids), "records": []})
-
+def _assign_key_pool_records(records: list, pools: list, target: str) -> None:
+    """Assign records only when their pool identity is unambiguous."""
     for record in records:
         explicit_pool = record.get("key_pool", "")
         if explicit_pool:
@@ -170,11 +187,38 @@ def compute_key_pool_stats(records: list, pool_configs: list) -> list:
             matches = [pool for pool in pools if _normalize_provider(pool.get("provider", "")) == provider
                        and record_keys & pool["key_set"]]
         if len(matches) == 1:
-            matches[0]["records"].append(record)
+            matches[0][target].append(record)
+
+
+def _key_health_status(stats: dict, meta: dict) -> str:
+    if meta.get("cooled"):
+        return "circuit_open"
+    if meta.get("consecutive_failures", 0) > 0:
+        return "unavailable"
+    if stats.get("latest_available") is False:
+        return "unavailable"
+    if stats.get("latest_available") is True:
+        return "available"
+    return "unknown"
+
+
+def compute_key_pool_stats(records: list, pool_configs: list, health_records: list = None) -> list:
+    pools = []
+    for config in pool_configs:
+        raw_keys = config.get("keys", ())
+        key_ids = tuple(dict.fromkeys(item.get("key_id") if isinstance(item, dict) else item for item in raw_keys))
+        key_ids = tuple(key_id for key_id in key_ids if key_id)
+        key_meta = {item["key_id"]: item for item in raw_keys if isinstance(item, dict) and item.get("key_id")}
+        pools.append({**config, "keys": key_ids, "key_meta": key_meta, "key_set": set(key_ids),
+                      "records": [], "health_records": []})
+
+    _assign_key_pool_records(records, pools, "records")
+    _assign_key_pool_records(health_records if health_records is not None else records, pools, "health_records")
 
     result = []
     for pool in pools:
         stats_by_key = {item["key_id"]: item for item in _agg_by_key(pool["records"])}
+        health_by_key = {item["key_id"]: item for item in _agg_by_key(pool["health_records"])}
         key_stats = []
         for key_id in pool["keys"]:
             stats = stats_by_key.get(key_id, {
@@ -182,7 +226,12 @@ def compute_key_pool_stats(records: list, pool_configs: list) -> list:
                 "legacy_attempts": 0, "availability_pct": None, "requests": 0,
                 "request_availability_pct": None, "avg_retries": 0, "max_retries": 0,
             })
-            key_stats.append({**stats, **pool["key_meta"].get(key_id, {})})
+            health = health_by_key.get(key_id, {})
+            for field in ("latest_available", "previous_available", "consecutive_failures",
+                          "last_attempt_at", "last_success_at", "last_failure_at"):
+                stats[field] = health.get(field)
+            meta = pool["key_meta"].get(key_id, {})
+            key_stats.append({**stats, **meta, "health_status": _key_health_status(stats, meta)})
         result.append({"id": pool["id"], "provider": pool.get("provider", ""),
                        "upstream": pool.get("upstream", pool["id"]), "keys": key_stats})
     return result

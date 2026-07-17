@@ -99,6 +99,67 @@ class KeyAvailabilityStatsTests(unittest.TestCase):
 
         self.assertTrue(all(pool["keys"][0]["attempts"] == 0 for pool in pools))
 
+    def test_latest_failure_marks_key_unavailable_despite_good_history(self):
+        configs = [{"id": "pool", "provider": "p", "keys": ["key-1"]}]
+        records = [
+            {"ts": "2026-07-17T10:00:00", "provider": "p", "key_pool": "pool", "key_id": "key-1",
+             "final_status": 200, "key_attempts": [{"key_id": "key-1", "available": True}]},
+            {"ts": "2026-07-17T10:01:00", "provider": "p", "key_pool": "pool", "key_id": "key-1",
+             "final_status": 200, "key_attempts": [{"key_id": "key-1", "available": True}]},
+            {"ts": "2026-07-17T10:02:00", "provider": "p", "key_pool": "pool", "key_id": "key-1",
+             "final_status": 401, "key_attempts": [{"key_id": "key-1", "available": False}]},
+        ]
+
+        key = compute_key_pool_stats(records, configs)[0]["keys"][0]
+
+        self.assertEqual(key["availability_pct"], 66.67)
+        self.assertEqual(key["health_status"], "unavailable")
+        self.assertFalse(key["latest_available"])
+        self.assertEqual(key["consecutive_failures"], 1)
+
+    def test_recent_health_is_independent_from_selected_stats_range(self):
+        configs = [{"id": "pool", "provider": "p", "keys": ["key-1"]}]
+        selected_records = [
+            {"ts": "2026-07-01T10:00:00", "provider": "p", "key_pool": "pool", "key_id": "key-1",
+             "final_status": 200, "key_attempts": [{"key_id": "key-1", "available": True}]},
+        ]
+        health_records = [
+            {"ts": "2026-07-17T10:00:00", "provider": "p", "key_pool": "pool", "key_id": "key-1",
+             "final_status": 503, "key_attempts": [{"key_id": "key-1", "available": False}]},
+            {"ts": "2026-07-17T10:01:00", "provider": "p", "key_pool": "pool", "key_id": "key-1",
+             "final_status": 503, "key_attempts": [{"key_id": "key-1", "available": False}]},
+        ]
+
+        key = compute_key_pool_stats(selected_records, configs, health_records=health_records)[0]["keys"][0]
+
+        self.assertEqual(key["availability_pct"], 100)
+        self.assertEqual(key["health_status"], "unavailable")
+        self.assertEqual(key["consecutive_failures"], 2)
+
+    def test_active_cooldown_is_reported_as_open_circuit(self):
+        configs = [{"id": "pool", "provider": "p", "keys": [
+            {"key_id": "key-1", "cooled": True, "cooldown_remaining": 12},
+        ]}]
+        records = [
+            {"ts": "2026-07-17T10:00:00", "provider": "p", "key_pool": "pool", "key_id": "key-1",
+             "final_status": 200, "key_attempts": [{"key_id": "key-1", "available": True}]},
+        ]
+
+        key = compute_key_pool_stats(records, configs)[0]["keys"][0]
+
+        self.assertEqual(key["health_status"], "circuit_open")
+
+    def test_runtime_failure_state_remains_unavailable_after_cooldown(self):
+        configs = [{"id": "pool", "provider": "p", "keys": [
+            {"key_id": "key-1", "cooled": False, "consecutive_failures": 2,
+             "last_failure_status": 401, "last_cooldown_s": 3600},
+        ]}]
+
+        key = compute_key_pool_stats([], configs, health_records=[])[0]["keys"][0]
+
+        self.assertEqual(key["health_status"], "unavailable")
+        self.assertEqual(key["consecutive_failures"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

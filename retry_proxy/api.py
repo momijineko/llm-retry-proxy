@@ -134,7 +134,7 @@ def create_handlers(service, store):
         return {"detail": compute_stats(records, range, cfg), "cumulative": _cumulative(store.summary), "range": range,
                 "record_count": len(records), "available_models": available_models,
                 "available_providers": available_providers, "upstream_windows": _upstream_window_stats(window),
-                "key_pools": compute_key_pool_stats(records, pool_configs),
+                "key_pools": compute_key_pool_stats(records, pool_configs, health_records=window),
                 "rate_counts": {"5h": c5h, "week": c_week, "month": c_month}}
 
     async def logs_page():

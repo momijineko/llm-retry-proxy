@@ -124,10 +124,12 @@
   .pill.ok{background:var(--ok-l);color:var(--ok-d)}
   .pill.warn{background:var(--warn-l);color:var(--warn-d)}
   .pill.danger{background:var(--danger-l);color:var(--danger-d)}
+  .pill.muted{background:#f1f5f9;color:var(--muted)}
   .pill::before{content:"";width:5px;height:5px;border-radius:50%;margin-right:5px}
   .pill.ok::before{background:var(--ok)}
   .pill.warn::before{background:var(--warn)}
   .pill.danger::before{background:var(--danger)}
+  .pill.muted::before{background:var(--muted-2)}
   .badge{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;background:var(--warn-l);color:var(--warn-d);border:1px solid rgba(245,158,11,.2)}
   .tag{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:600}
   .empty{text-align:center;padding:56px 16px;color:var(--muted);font-size:14px}
@@ -635,10 +637,25 @@ function renderAggTable(id,data,key){
     <td>${d.dominant_fail_status!==null?`<span class="tag" style="background:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}1a;color:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}">${d.dominant_fail_status===0?'异常':d.dominant_fail_status}×${d.fail_status_count}</span>`:'-'}</td>
   </tr>`).join('');
 }
+function keyHealthMeta(key){
+  const status=key.health_status||(key.cooled?'circuit_open':key.availability_pct===null?'unknown':'available');
+  if(status==='circuit_open')return{status,label:`熔断 ${Math.ceil(key.cooldown_remaining||0)}s`,cls:'warn',color:COL.warn};
+  if(status==='unavailable')return{status,label:'不可用',cls:'danger',color:COL.danger};
+  if(status==='available')return{status,label:'可用',cls:'ok',color:COL.ok};
+  return{status,label:'待检测',cls:'muted',color:COL.gray};
+}
+function keyHealthDetail(key){
+  const meta=keyHealthMeta(key);const parts=[meta.label];
+  if(key.last_failure_status!==null&&key.last_failure_status!==undefined)parts.push(`最近错误 ${key.last_failure_status===0?'异常':key.last_failure_status}`);
+  if(key.consecutive_failures>0)parts.push(`连续失败 ${key.consecutive_failures} 次`);
+  if(key.last_cooldown_s>0)parts.push(`熔断时长 ${Math.ceil(key.last_cooldown_s)}s`);
+  if(key.last_attempt_at)parts.push(`最近检测 ${fmtTs(key.last_attempt_at)}`);
+  return parts.join('；');
+}
 function renderKeyRows(data){
   return data.map(d=>`<tr>
     <td class="mono" style="max-width:160px;overflow:hidden;text-overflow:ellipsis">${esc(d.key_id)}</td>
-    <td style="text-align:center">${d.cooled?`<span class="pill warn">冷却 ${Math.ceil(d.cooldown_remaining||0)}s</span>`:'<span class="pill ok">可用</span>'}</td>
+    <td style="text-align:center"><span class="pill ${keyHealthMeta(d).cls}" title="${esc(keyHealthDetail(d))}">${keyHealthMeta(d).label}</span></td>
     <td class="num">${Math.max(d.attempts-d.ignored_attempts,0)}</td>
     <td class="num">${d.failed_attempts}</td>
     <td class="num">${d.availability_pct===null?'—':pctPill(d.availability_pct)}</td>
@@ -656,11 +673,12 @@ function keyPoolMetrics(keys){
   const failed=keys.reduce((sum,key)=>sum+key.failed_attempts,0);
   const measured=Math.max(attempts-ignored,0);
   const availability=measured?((measured-failed)/measured*100):0;
-  const ready=keys.filter(key=>!key.cooled).length;
-  const cooled=keys.filter(key=>key.cooled).length;
-  const noSample=keys.filter(key=>key.availability_pct===null).length;
+  const ready=keys.filter(key=>keyHealthMeta(key).status==='available').length;
+  const cooled=keys.filter(key=>keyHealthMeta(key).status==='circuit_open').length;
+  const unavailable=keys.filter(key=>keyHealthMeta(key).status==='unavailable').length;
+  const noSample=keys.filter(key=>keyHealthMeta(key).status==='unknown').length;
   const requests=keys.reduce((sum,key)=>sum+(key.requests||0),0);
-  return {attempts,ignored,failed,measured,availability,ready,cooled,noSample,requests,total:keys.length};
+  return {attempts,ignored,failed,measured,availability,ready,cooled,unavailable,noSample,requests,total:keys.length};
 }
 function renderKeyPoolOverview(pools){
   const allKeys=pools.flatMap(p=>p.keys);
@@ -670,7 +688,7 @@ function renderKeyPoolOverview(pools){
   const html=`<div class="stat-card"><div class="label">号池数</div><div class="value">${pools.length}</div></div>
     <div class="stat-card"><div class="label">总 Key 数</div><div class="value">${m.total}</div></div>
     <div class="stat-card"><div class="label">可用 Key</div><div class="value" style="color:var(--ok)">${m.ready}</div></div>
-    <div class="stat-card"><div class="label">冷却中</div><div class="value" style="color:${m.cooled>0?'var(--warn)':'var(--muted-2)'}">${m.cooled}</div></div>
+    <div class="stat-card"><div class="label">熔断 / 不可用</div><div class="value" style="color:${m.cooled+m.unavailable>0?'var(--danger)':'var(--muted-2)'}">${m.cooled} / ${m.unavailable}</div></div>
     <div class="stat-card"><div class="label">整体可用率</div><div class="value" style="color:${availColorStr}">${availStr}</div></div>
     <div class="stat-card"><div class="label">区间请求</div><div class="value">${m.requests}</div></div>`;
   document.getElementById('keyPoolOverview').innerHTML=html;
@@ -684,29 +702,27 @@ function renderPoolCompareChart(pools){
 function renderKeyHealthChart(pools){
   const c=C('keyHealthChart');if(!c)return;
   const allKeys=pools.flatMap(p=>p.keys);
-  const ready=allKeys.filter(k=>!k.cooled&&k.availability_pct!==null).length;
-  const cooled=allKeys.filter(k=>k.cooled).length;
-  const noSample=allKeys.filter(k=>!k.cooled&&k.availability_pct===null).length;
+  const metrics=keyPoolMetrics(allKeys);
   if(!allKeys.length){c.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});return}
-  c.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{bottom:0,type:'scroll',textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:12},series:[{type:'pie',radius:['38%','62%'],center:['50%','44%'],data:[{name:'可用',value:ready,itemStyle:{color:COL.ok,borderColor:'#fff',borderWidth:2}},{name:'冷却中',value:cooled,itemStyle:{color:COL.warn,borderColor:'#fff',borderWidth:2}},{name:'暂无样本',value:noSample,itemStyle:{color:COL.gray,borderColor:'#fff',borderWidth:2}}],label:{formatter:'{b}\n{d}%',fontSize:11,color:'#334155'},emphasis:{scaleSize:6}}]});
+  c.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{bottom:0,type:'scroll',textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:12},series:[{type:'pie',radius:['38%','62%'],center:['50%','44%'],data:[{name:'可用',value:metrics.ready,itemStyle:{color:COL.ok,borderColor:'#fff',borderWidth:2}},{name:'熔断',value:metrics.cooled,itemStyle:{color:COL.warn,borderColor:'#fff',borderWidth:2}},{name:'不可用',value:metrics.unavailable,itemStyle:{color:COL.danger,borderColor:'#fff',borderWidth:2}},{name:'待检测',value:metrics.noSample,itemStyle:{color:COL.gray,borderColor:'#fff',borderWidth:2}}],label:{formatter:'{b}\n{d}%',fontSize:11,color:'#334155'},emphasis:{scaleSize:6}}]});
 }
 function renderKeyPoolChart(id,data){
   const chart=C(id);if(!chart)return;
   const measured=data.filter(row=>row.availability_pct!==null).sort((a,b)=>a.availability_pct-b.availability_pct);
   const problemKeys=measured.filter(row=>row.availability_pct<95);
-  const cooledKeys=data.filter(row=>row.cooled);
-  if(!measured.length&&!cooledKeys.length){
+  const unhealthyKeys=data.filter(row=>keyHealthMeta(row).status!=='available');
+  if(!measured.length&&!unhealthyKeys.length){
     chart.setOption({title:{text:'暂无足够样本数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}});
     return;
   }
-  if(!problemKeys.length&&!cooledKeys.length){
+  if(!problemKeys.length&&!unhealthyKeys.length){
     chart.setOption({title:{text:'所有 Key 运行正常',left:'center',top:'center',textStyle:{color:COL.ok,fontSize:13}}});
     return;
   }
   const attention=[];const seen=new Set();
   const add=row=>{if(row&&!seen.has(row.key_id)){seen.add(row.key_id);attention.push(row)}};
   problemKeys.forEach(add);
-  cooledKeys.forEach(add);
+  unhealthyKeys.forEach(add);
   data.filter(row=>row.availability_pct===null).forEach(add);
   measured.forEach(add);
   const rows=attention.slice(0,8);
@@ -714,14 +730,14 @@ function renderKeyPoolChart(id,data){
     animationDuration:400,
     tooltip:{trigger:'axis',axisPointer:{type:'shadow'},backgroundColor:'rgba(15,23,42,.94)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12},formatter:params=>{
       const row=params[0].data.raw;const sampleCount=Math.max(row.attempts-row.ignored_attempts,0);
-      return `<strong>${esc(row.key_id)}</strong><br>Key 可用率：${row.availability_pct===null?'暂无样本':row.availability_pct.toFixed(1)+'%'}<br>有效样本：${sampleCount}<br>失败尝试：${row.failed_attempts}<br>忽略连接故障：${row.ignored_attempts}`;
+      return `<strong>${esc(row.key_id)}</strong><br>当前状态：${keyHealthMeta(row).label}<br>Key 可用率：${row.availability_pct===null?'暂无样本':row.availability_pct.toFixed(1)+'%'}<br>连续失败：${row.consecutive_failures||0}<br>有效样本：${sampleCount}<br>失败尝试：${row.failed_attempts}<br>忽略连接故障：${row.ignored_attempts}`;
     }},
     grid:{left:100,right:32,top:4,bottom:8,containLabel:false},
     xAxis:{type:'value',min:0,max:100,axisLabel:{formatter:'{value}%',color:'#9ca3af',fontSize:10},splitLine:{lineStyle:{color:'#f1f5f9',type:'dashed'}},axisLine:{show:false},axisTick:{show:false}},
     yAxis:{type:'category',inverse:true,data:rows.map(row=>row.key_id),axisLabel:{color:'#334155',fontSize:11,width:90,overflow:'truncate'},axisLine:{show:false},axisTick:{show:false}},
     series:[{type:'bar',barWidth:16,showBackground:true,backgroundStyle:{color:'#f1f5f9',borderRadius:4},data:rows.map(row=>{
       const value=row.availability_pct===null?0:row.availability_pct;
-      const color=row.availability_pct===null?COL.gray:availColor(value);
+      const health=keyHealthMeta(row);const color=health.status==='available'?availColor(value):health.color;
       return {value,raw:row,itemStyle:{color,borderRadius:4},label:{show:true,position:value>=25?'insideRight':'right',color:value>=25?'#fff':color,fontSize:10,formatter:row.availability_pct===null?'暂无':value.toFixed(1)+'%'}};
     })}]
   });
@@ -738,7 +754,7 @@ function renderKeyPools(pools){
   renderPoolCompareChart(pools);
   renderKeyHealthChart(pools);
   document.getElementById('keyPoolList').innerHTML=pools.map((pool,index)=>{
-    const ready=pool.keys.filter(k=>!k.cooled).length;
+    const ready=pool.keys.filter(k=>keyHealthMeta(k).status==='available').length;
     const healthClass=ready===pool.keys.length?'ok':ready>0?'warn':'danger';
     const chartHeight=Math.max(160,Math.min(pool.keys.length,8)*28+32);
     return `<div class="kp-card">
@@ -750,7 +766,7 @@ function renderKeyPools(pools){
         <div class="kp-health"><span class="pill ${healthClass}">${ready}/${pool.keys.length}</span></div>
       </div>
       <div class="kp-body">
-        <div class="kp-attention"><div class="kp-attention-title">需关注 Key</div><div class="kp-attention-sub">低于 95%、冷却中或暂无样本</div><div class="kp-chart" id="keyPoolChart${index}" style="height:${chartHeight}px"></div></div>
+        <div class="kp-attention"><div class="kp-attention-title">需关注 Key</div><div class="kp-attention-sub">低于 95%、熔断、不可用或待检测</div><div class="kp-chart" id="keyPoolChart${index}" style="height:${chartHeight}px"></div></div>
         <div class="scroll-table kp-table-wrap"><table class="kp-table"><thead><tr><th>Key</th><th style="text-align:center">当前状态</th><th class="num">有效样本</th><th class="num">失败尝试</th><th class="num">Key 可用率</th><th class="num">请求成功率</th></tr></thead><tbody>${renderKeyRows(pool.keys)}</tbody></table></div>
       </div>
     </div>`;
