@@ -234,6 +234,24 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create_call[2]["name"], "Empty")
         self.assertTrue(create_call[3]["Idempotency-Key"].startswith("pool-sync-key-"))
 
+    async def test_group_rules_apply_to_synced_keys(self):
+        client = FakeClient()
+        pools = {"https://upstream.test": KeyPool([])}
+        manager = PoolSyncManager(pools, self.config, client, {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+
+        status = await manager.set_group_rules(source_id, {
+            "2": {"models": "image2-*", "paths": "v1/images/*"},
+        })
+
+        key = next(item for item in status["sources"][0]["keys"] if item["group_name"] == "Team")
+        self.assertEqual(key["models"], ["image2-*"])
+        self.assertEqual(key["paths"], ["v1/images/*"])
+        self.assertEqual(pools["https://upstream.test"].entries[0].models, ("image2-*",))
+
     async def test_clear_selected_groups_deletes_remote_keys_and_resyncs(self):
         client = FakeClient()
         pools = {"https://upstream.test": KeyPool([])}

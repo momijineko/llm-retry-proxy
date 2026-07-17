@@ -89,6 +89,7 @@ class PoolSyncManager:
                 if adapter not in self.adapters or not source.get("base_url"):
                     continue
                 source["base_url"] = source["base_url"].rstrip("/")
+                source.setdefault("group_rules", {})
                 self.sources[source["id"]] = source
                 # A successful sync with zero keys is authoritative too. Retain
                 # the entries check for state files written by older versions.
@@ -126,9 +127,34 @@ class PoolSyncManager:
             rules.update({entry.key: (list(entry.models), list(entry.paths)) for entry in current.entries})
         for item in source.get("entries") or []:
             rules[item.get("key", "")] = (item.get("models", []), item.get("paths", []))
+        group_rules = source.get("group_rules") or {}
         for item in entries:
-            item["models"], item["paths"] = rules.get(item.get("key", ""), ([], []))
+            group_rule = group_rules.get(str(item.get("group_id")))
+            if group_rule is not None:
+                item["models"] = list(group_rule.get("models") or [])
+                item["paths"] = list(group_rule.get("paths") or [])
+            else:
+                item["models"], item["paths"] = rules.get(item.get("key", ""), ([], []))
         return entries
+
+    @staticmethod
+    def _normalize_group_rules(raw):
+        if not isinstance(raw, dict):
+            raise PoolSyncError("分组映射规则必须是对象")
+        normalized = {}
+        for group_id, rule in raw.items():
+            if not isinstance(rule, dict):
+                raise PoolSyncError("分组映射规则格式无效")
+            def patterns(value):
+                values = value.split(";") if isinstance(value, str) else value
+                if not isinstance(values, (list, tuple)):
+                    raise PoolSyncError("models/paths 必须是数组或分号分隔文本")
+                return [str(item).strip().lstrip("/") for item in values if str(item).strip()]
+            normalized[str(group_id)] = {
+                "models": patterns(rule.get("models", [])),
+                "paths": patterns(rule.get("paths", [])),
+            }
+        return normalized
 
     async def connect(self, adapter_name, base_url, provider, credentials):
         adapter_name = (adapter_name or self.config.key_pool_sync_default_adapter).strip().lower()
@@ -224,6 +250,10 @@ class PoolSyncManager:
                     self.client, source, source.get("session") or {},
                 )
                 source["session"] = session
+                for group in groups or []:
+                    rule = (source.get("group_rules") or {}).get(str(group.get("id")))
+                    group["models"] = list((rule or {}).get("models") or [])
+                    group["paths"] = list((rule or {}).get("paths") or [])
                 self._save_state()
                 return {"source_id": source_id, "groups": groups}
             except PoolSyncError:
@@ -231,7 +261,19 @@ class PoolSyncManager:
                 raise
             except Exception as exc:
                 self._save_state()
-                raise PoolSyncError(f"读取分组失败: {exc}") from exc
+            raise PoolSyncError(f"读取分组失败: {exc}") from exc
+
+    async def set_group_rules(self, source_id, rules):
+        normalized = self._normalize_group_rules(rules)
+        async with self._lock:
+            source = self.sources.get(source_id)
+            if source is None:
+                raise PoolSyncError("号池同步连接不存在")
+            source["group_rules"] = normalized
+            source["entries"] = self._merge_local_rules(source, [dict(item) for item in source.get("entries") or []])
+            self._activate(source)
+            self._save_state()
+            return self.status()
 
     async def create_keys(self, source_id, group_ids=None, only_missing=False, options=None):
         async with self._lock:

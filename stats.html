@@ -841,7 +841,7 @@ async function load(){
     if(ps)url+='&plan_start='+encodeURIComponent(ps);
     const mode=getRateMode();
     if(mode)url+='&rate_mode='+encodeURIComponent(mode);
-    const r=await fetch(url);const d=await r.json();
+    const r=await fetch(new URL(url,window.location.origin).toString());const d=await r.json();
     const detail=d.detail||{};const cum=d.cumulative||{};
     renderKeyPools(d.key_pools||[]);
     if(d.available_providers){

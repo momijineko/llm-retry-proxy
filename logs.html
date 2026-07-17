@@ -625,7 +625,7 @@
   async function pollIncremental() {
     if (isPaused) return;
     try {
-      const res = await fetch('/logs/history?since=' + lastSeq, { cache: 'no-store' });
+      const res = await fetch(new URL('/logs/history?since=' + lastSeq, window.location.origin).toString(), { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const entries = await res.json();
       if (Array.isArray(entries)) entries.forEach(acceptEntry);
@@ -650,7 +650,7 @@
     setStatus('connecting');
 
     // Pass lastSeq so SSE only sends entries we don't already have
-    const url = '/logs/stream' + (lastSeq > 0 ? '?since=' + lastSeq : '');
+    const url = new URL('/logs/stream' + (lastSeq > 0 ? '?since=' + lastSeq : ''), window.location.origin).toString();
     es = new EventSource(url);
     streamWatchdog = setTimeout(startPolling, 5000);
 
@@ -680,7 +680,7 @@
   async function loadHistory() {
     try {
       setStatus('connecting');
-      const res = await fetch('/logs/history');
+      const res = await fetch(new URL('/logs/history', window.location.origin).toString());
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       if (!Array.isArray(data) || data.length === 0) return;

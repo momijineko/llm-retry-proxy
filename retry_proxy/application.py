@@ -210,6 +210,14 @@ async def key_pools_create_keys(request: Request):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+async def key_pools_group_rules(request: Request):
+    try:
+        body = await _json_object(request)
+        return await pool_sync.set_group_rules(body.get("source_id"), body.get("rules") or {})
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 async def key_pools_clear_keys(request: Request):
     try:
         body = await _json_object(request)
@@ -241,6 +249,7 @@ app.add_api_route("/admin/key-pools/api/sync", key_pools_sync, methods=["POST"],
 app.add_api_route("/admin/key-pools/api/disconnect", key_pools_disconnect, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/catalog", key_pools_catalog, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/create-keys", key_pools_create_keys, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/group-rules", key_pools_group_rules, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/clear-keys", key_pools_clear_keys, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/settings", key_pools_settings, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/stats", stats_page, methods=["GET"], dependencies=admin_dependencies)
