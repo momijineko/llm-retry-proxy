@@ -252,6 +252,26 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key["paths"], ["v1/images/*"])
         self.assertEqual(pools["https://upstream.test"].entries[0].models, ("image2-*",))
 
+    async def test_reset_key_clears_runtime_circuit_breaker(self):
+        pools = {"https://upstream.test": KeyPool([])}
+        manager = PoolSyncManager(pools, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        pool = pools["https://upstream.test"]
+        entry = pool.entries[0]
+        pool.mark_cooldown(entry, 1800, failure_kind="auth", status=403)
+
+        status = await manager.reset_key(source_id, 11)
+
+        visible = next(item for item in status["sources"][0]["keys"] if item["source_key_id"] == 11)
+        self.assertFalse(visible["cooled"])
+        self.assertEqual(visible["cooldown_remaining"], 0)
+        self.assertEqual(entry.cooldown_until, 0)
+        self.assertEqual(entry.consecutive_failures, 0)
+        self.assertEqual(entry.total_fail, 1)
+
     async def test_clear_selected_groups_deletes_remote_keys_and_resyncs(self):
         client = FakeClient()
         pools = {"https://upstream.test": KeyPool([])}

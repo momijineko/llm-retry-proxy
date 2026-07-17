@@ -161,6 +161,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
                 "source_key_id": item.get("id"), "key": item["key"], "label": label,
                 "sort": _number_text(rate), "key_name": key_name, "group_id": group_id,
                 "group_name": group_name, "platform": group.get("platform", ""),
+                "allow_image_generation": bool(group.get("allow_image_generation")),
             })
         return session, entries
 
@@ -188,6 +189,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
             catalog.append({
                 "id": group_id, "name": group.get("name", ""),
                 "platform": group.get("platform", ""),
+                "allow_image_generation": bool(group.get("allow_image_generation")),
                 "rate_multiplier": _number_text(rates.get(key, group.get("rate_multiplier"))),
                 "key_count": counts.get(key, 0), "active_key_count": active_counts.get(key, 0),
             })

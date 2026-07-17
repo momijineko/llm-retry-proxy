@@ -46,8 +46,13 @@ class _ColorFmt(logging.Formatter):
 
 _h = logging.StreamHandler()
 _h.setFormatter(_ColorFmt())
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), handlers=[_h])
+_console_level = os.getenv("LOG_LEVEL", "INFO").upper()
+_h.setLevel(_console_level)
+logging.basicConfig(level=_console_level, handlers=[_h])
 logger = logging.getLogger("forward")
+# Keep request tracing available to the in-memory log page without making the
+# console verbose. The console handler still honors LOG_LEVEL.
+logger.setLevel(logging.DEBUG)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
@@ -159,6 +164,8 @@ class Settings:
     ).strip().rstrip("/")
     key_pool_sync_interval: int = int(os.getenv("KEY_POOL_SYNC_INTERVAL", "300"))
     key_pool_create_delay: float = float(os.getenv("KEY_POOL_CREATE_DELAY", "1.5"))
+    image_upstream_user_agent: str = os.getenv("IMAGE_UPSTREAM_USER_AGENT", "").strip()
+    image_upstream_originator: str = os.getenv("IMAGE_UPSTREAM_ORIGINATOR", "").strip()
     key_pool_sync_state_file: str = os.getenv("KEY_POOL_SYNC_STATE_FILE", "").strip() or os.path.join(
         os.getenv("LOG_DIR", "logs"), ".key_pool_sync.json"
     )
@@ -168,7 +175,7 @@ class Settings:
     dlp_exempt_start: str = os.getenv("DLP_EXEMPT_START", "[[ALLOW_SENSITIVE]]")
     dlp_exempt_end: str = os.getenv("DLP_EXEMPT_END", "[[/ALLOW_SENSITIVE]]")
     dlp_strip_exempt_markers: bool = _bool("DLP_STRIP_EXEMPT_MARKERS", "true")
-    dlp_max_body_bytes: int = int(os.getenv("DLP_MAX_BODY_BYTES", "1048576"))
+    dlp_max_body_bytes: int = int(os.getenv("DLP_MAX_BODY_BYTES", "16777216"))
 
     @property
     def stats_html_path(self):

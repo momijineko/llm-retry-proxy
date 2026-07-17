@@ -2,6 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from retry_proxy.key_pool import KeyEntry, KeyPool, replace_key_pool
 from retry_proxy.retry import (RetryProxy, _key_available_for_status, _key_failure_policy,
                                _mark_key_failure, _pick_key, _select_key_failure_status)
@@ -230,6 +232,34 @@ class KeyPoolCooldownWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.response)
         self.assertTrue(pool.entries[0].cooldown_until > 0)
         self.assertEqual(pool.entries[0].last_failure_status, 503)
+
+    async def test_auth_failure_returns_immediately_when_scoped_pool_is_exhausted(self):
+        pool = KeyPool([("key", "image")])
+        config = SimpleNamespace(
+            hedge_mode="off", max_retries=60, retry_interval=1,
+            retry_interval_429=5, retry_backoff=False, retry_backoff_max=60,
+            retry_backoff_429=True, retry_backoff_max_429=60,
+            key_cooldown=30, key_cooldown_5xx=30, key_cooldown_429=60,
+            key_cooldown_auth=1800, key_cooldown_max=3600, key_cooldown_backoff=True,
+        )
+        response = httpx.Response(
+            403, json={"error": {"message": "image option is not allowed"}},
+            request=httpx.Request("POST", "https://upstream.test/images/generations"),
+        )
+        proxy = RetryProxy(config=config, client=object())
+        proxy._send = AsyncMock(return_value=response)
+
+        with patch("retry_proxy.retry.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await proxy.request(
+                "POST", "https://upstream.test/images/generations", {},
+                b'{"model":"gpt-image-2"}', "images/generations", "test", "gpt-image-2", pool,
+            )
+
+        self.assertIs(result.response, response)
+        self.assertEqual(result.last_status, 403)
+        self.assertEqual(result.total_sent, 1)
+        self.assertEqual(pool.entries[0].last_failure_status, 403)
+        sleep.assert_not_awaited()
 
 
 if __name__ == "__main__":

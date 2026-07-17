@@ -19,6 +19,17 @@ SKIP_REQUEST_HEADERS = {"host", "content-length", "transfer-encoding", "connecti
 SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "keep-alive", "content-encoding"}
 
 
+def outbound_request_headers(request_headers, path, model, config=settings):
+    headers = filter_headers(request_headers, SKIP_REQUEST_HEADERS)
+    image_request = ("/images/" in f"/{(path or '').lower()}"
+                     or (model or "").lower().startswith(("gpt-image-", "image")))
+    if image_request and config.image_upstream_user_agent:
+        headers["user-agent"] = config.image_upstream_user_agent
+    if image_request and config.image_upstream_originator:
+        headers["originator"] = config.image_upstream_originator
+    return headers
+
+
 async def _run_until_disconnect(request, awaitable):
     work = asyncio.create_task(awaitable)
     async def watch_disconnect():
@@ -174,6 +185,7 @@ def create_handlers(service, store):
         client_ip = _request_ip(request)
         upstream, provider, remaining = match_route(path); url = f"{upstream}/{remaining}" if remaining else upstream
         if request.url.query: url += f"?{request.url.query}"
+        logger.debug(f"{_tag(request.method, path, provider, '', client_ip)} 收到下游请求")
         body = await request.body() if request.method not in ("GET", "HEAD") else b""
         if settings.dlp_mode in ("audit", "block", "redact"):
             if len(body) > settings.dlp_max_body_bytes:
@@ -205,6 +217,7 @@ def create_handlers(service, store):
                 if dlp.exemptions:
                     logger.info(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免 count={dlp.exemptions}")
         model_name = parse_model(body)
+        outbound_headers = outbound_request_headers(request.headers, remaining, model_name)
         base_pool = KEY_POOLS.get(upstream)
         pool_access = bool(base_pool and can_use_key_pool(request.headers))
         request_pool = base_pool.for_request(model_name, remaining) if pool_access else None
@@ -216,7 +229,7 @@ def create_handlers(service, store):
         try:
             result = await _run_until_disconnect(
                 request,
-                service.request(request.method, url, filter_headers(request.headers, SKIP_REQUEST_HEADERS),
+                service.request(request.method, url, outbound_headers,
                                 body, path, provider, model_name, request_pool),
             )
         finally:

@@ -358,6 +358,26 @@ class PoolSyncManager:
                 self._task = asyncio.create_task(self._run(), name="key-pool-sync")
             return self.status()
 
+    async def reset_key(self, source_id, source_key_id):
+        async with self._lock:
+            source = self.sources.get(source_id)
+            if source is None:
+                raise PoolSyncError("号池同步连接不存在")
+            item = next((entry for entry in source.get("entries") or []
+                         if str(entry.get("source_key_id")) == str(source_key_id)), None)
+            if item is None:
+                raise PoolSyncError("Key 不存在或已被上游删除")
+            pool = self.pools.get(source["base_url"])
+            runtime = next((entry for entry in pool.entries if entry.key == item.get("key")), None) if pool else None
+            if runtime is None:
+                raise PoolSyncError("Key 尚未加载到运行时号池")
+            pool.mark_success(runtime)
+            logger.info(
+                f"号池 Key 已手动解除熔断: upstream={source['base_url']} "
+                f"key={runtime.key_id}"
+            )
+            return self.status()
+
     async def disconnect(self, source_id):
         async with self._lock:
             source = self.sources.get(source_id)
@@ -393,9 +413,14 @@ class PoolSyncManager:
                     "key_masked": raw_key[:7] + "..." + raw_key[-4:],
                     "label": item.get("label", ""), "sort": item.get("sort", ""),
                     "key_name": item.get("key_name", ""), "group_name": item.get("group_name", ""),
-                    "platform": item.get("platform", ""), "models": item.get("models", []),
+                    "platform": item.get("platform", ""),
+                    "allow_image_generation": bool(item.get("allow_image_generation")),
+                    "models": item.get("models", []),
                     "paths": item.get("paths", []),
                     "cooled": bool(entry and entry.cooldown_until > now),
+                    "cooldown_remaining": round(max(entry.cooldown_until - now, 0), 1) if entry else 0,
+                    "last_failure_status": entry.last_failure_status if entry else None,
+                    "last_failure_kind": entry.last_failure_kind if entry else "",
                 })
             public_sources.append({
                 "id": source["id"], "adapter": source["adapter"], "adapter_label": adapter.label,

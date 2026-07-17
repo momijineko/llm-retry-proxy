@@ -166,6 +166,28 @@ def _record_key_attempt(attempts, entry, available):
         attempts.append({"key_id": entry.key_id, "available": available})
 
 
+def _response_error_message(response):
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        raw = getattr(response, "content", b"") or b""
+        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        lower = text.lower()
+        title_start = lower.find("<title>")
+        title_end = lower.find("</title>", title_start + 7)
+        if title_start >= 0 and title_end > title_start:
+            text = text[title_start + 7:title_end]
+        return " ".join(text.split())[:300]
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    value = error.get("message") if isinstance(error, dict) else None
+    value = value or payload.get("message") or payload.get("detail")
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:300]
+
+
 @dataclass
 class RetryResult:
     response: object
@@ -195,11 +217,19 @@ class RetryProxy:
             round_num += 1
             to_fire = min(self.config.max_concurrent, self.config.max_retries - total_sent) if self.config.max_retries > 0 else self.config.max_concurrent
             if to_fire <= 0: break
+            self.logger.debug(f"{_tag(method, path, provider, model)} R{round_num} 选号 总{time.time() - t0:.2f}s")
             entry = await _pick_key(pool)
             hdrs = headers_with_key(req_headers, entry.key) if entry else req_headers
             if entry: last_key_id = entry.key_id
             async def send(n):
-                try: return "ok", await self._send(method, url, hdrs, body), n
+                sent_at = time.time()
+                key_tag = f"[{entry.key_id}]" if pool and entry else ""
+                self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{n} 发出上游 总{sent_at - t0:.2f}s")
+                try:
+                    response = await self._send(method, url, hdrs, body)
+                    now = time.time()
+                    self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{n} 收到响应头 {response.status_code} 本次{now - sent_at:.2f}s 总{now - t0:.2f}s")
+                    return "ok", response, n
                 except asyncio.CancelledError: raise
                 except Exception as exc:
                     return "error", exc, n
@@ -272,9 +302,17 @@ class RetryProxy:
         total_sent = last_status = 0; retry_codes = []; key_attempts = []; in_flight = {}; winner = None; winner_attempt = 0
         next_allowed = 0.0; c429 = cother = 0; last_key_id = ""; all_tasks = set()
         async def send(n):
+            self.logger.debug(f"{_tag(method, path, provider, model)} #{n} 选号 总{time.time() - t0:.2f}s")
             entry = await _pick_key(pool); hdrs = headers_with_key(req_headers, entry.key) if entry else req_headers
             if entry: nonlocal last_key_id; last_key_id = entry.key_id
-            try: return "ok", await self._send(method, url, hdrs, body), n, entry
+            sent_at = time.time()
+            key_tag = f"[{entry.key_id}]" if pool and entry else ""
+            self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{n} 发出上游 总{sent_at - t0:.2f}s")
+            try:
+                response = await self._send(method, url, hdrs, body)
+                now = time.time()
+                self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{n} 收到响应头 {response.status_code} 本次{now - sent_at:.2f}s 总{now - t0:.2f}s")
+                return "ok", response, n, entry
             except asyncio.CancelledError: raise
             except Exception as exc: return "error", exc, n, entry
         def can_fire(now): return winner is None and (self.config.max_retries == 0 or total_sent < self.config.max_retries) and len(in_flight) < self.config.max_concurrent and now >= next_allowed
@@ -357,6 +395,7 @@ class RetryProxy:
 
     async def request(self, method, url, headers, body, path, provider, model, pool=None):
         start = time.time()
+        self.logger.debug(f"{_tag(method, path, provider, model)} 开始转发")
         spawned = set()
         spawned_token = _spawned_tasks.set(spawned)
         try:
@@ -375,14 +414,20 @@ class RetryProxy:
             return await self._stagger(method, url, headers, body, path, start, provider, model, pool)
         attempt = 0; last_status = 0; retry_codes = []; key_attempts = []; c429 = cother = 0; last_key_id = ""
         while True:
-            attempt += 1; entry = await _pick_key(pool); send_headers = headers_with_key(headers, entry.key) if entry else headers
+            attempt += 1
+            self.logger.debug(f"{_tag(method, path, provider, model)} #{attempt} 选号 总{time.time() - start:.2f}s")
+            entry = await _pick_key(pool); send_headers = headers_with_key(headers, entry.key) if entry else headers
             if entry: last_key_id = entry.key_id
             key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
             if self.config.max_retries > 0 and attempt > self.config.max_retries:
                 self.logger.error(f"{_tag(method, path, provider, model)}{key_tag} 放弃({self.config.max_retries}次) {time.time() - start:.1f}s")
                 break
             cycle = time.time()
-            try: response = await self._send(method, url, send_headers, body)
+            self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{attempt} 发出上游 总{cycle - start:.2f}s")
+            try:
+                response = await self._send(method, url, send_headers, body)
+                now = time.time()
+                self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{attempt} 收到响应头 {response.status_code} 本次{now - cycle:.2f}s 总{now - start:.2f}s")
             except (httpx.RequestError, httpx.HTTPError) as exc:
                 _record_key_attempt(key_attempts, entry, None if is_host_level_error(exc) else False)
                 last_status = 0; retry_codes.append(0); elapsed = time.time() - cycle
@@ -406,11 +451,18 @@ class RetryProxy:
                 _mark_key_failure(pool, entry, self.config, response.status_code, ra)
                 try: await response.aread()
                 except Exception: pass
-                await response.aclose()
+                detail = _response_error_message(response)
+                detail_tag = f" 上游={detail}" if detail else ""
                 key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
                 if pool and pool.has_fresh():
-                    self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(response.status_code)} #{attempt} 换key 总{time.time() - start:.1f}s")
+                    await response.aclose()
+                    self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(response.status_code)} #{attempt} 换key{detail_tag} 总{time.time() - start:.1f}s")
                     continue
+                if pool and response.status_code in (401, 403):
+                    self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(response.status_code)} #{attempt} 无其它可用Key，立即返回{detail_tag} 总{time.time() - start:.1f}s")
+                    return RetryResult(response, attempt, attempt, response.status_code, retry_codes,
+                                       False, last_key_id, start, key_attempts)
+                await response.aclose()
                 if response.status_code == 429: c429 += 1; cother = 0; wait, src = calc_backoff_wait(c429, self.config.retry_interval_429, self.config.retry_backoff_max_429, self.config.retry_backoff_429, ra)
                 else: cother += 1; c429 = 0; wait, src = calc_backoff_wait(cother, self.config.retry_interval, self.config.retry_backoff_max, self.config.retry_backoff)
                 sleep_for = wait if src.startswith("RA") else max(wait - (time.time() - cycle), 0)
