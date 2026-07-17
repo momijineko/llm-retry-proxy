@@ -1,22 +1,23 @@
 # 号池 CSV 配置模板
-# 格式: key,url,provider,label,models,paths（首行为表头，不区分大小写）
+# 格式: key,url,provider,label,sort,models,paths（首行为表头，不区分大小写）
 #   key      - API key（必填）
 #   url      - 上游地址，留空=用 UPSTREAM_URL（可选）
 #   provider - 供应商标签，留空=用 PROVIDER（可选）
 #   label    - key 标签/备注，用于日志显示和分组统计（可选，留空=用 key 前8位）
+#   sort     - 数值顺序/倍率，按数值从小到大选 key，并显示为 label|sort（可选）
 #   models   - 仅供匹配模型使用，多个 glob 用分号分隔（可选）
 #   paths    - 仅供匹配请求路径使用，多个 glob 用分号分隔（可选）
-# 行序即优先级：上面的=低倍率(便宜)，下面的=高倍率(贵)
+# sort 相同时保持行序；未填写 sort 时保持原行序并排在有效 sort 之后
 # # 开头的行为注释，不会被加载
 #
 # 配置后在 .env 中设置: KEY_POOL_FILE=key_pool.csv
 # 然后把此文件复制为 key_pool.csv 开始使用
 
-key,url,provider,label,models,paths
-sk-your-cheap-group1,,,低倍率组,,
-sk-your-normal-group2,,,中倍率组,,
-sk-your-premium-group3,,,高倍率组,,
+key,url,provider,label,sort,models,paths
+sk-your-cheap-group1,,,低倍率组,0.02,,
+sk-your-normal-group2,,,中倍率组,0.1,,
+sk-your-premium-group3,,,高倍率组,0.2,,
 # 生图专用分组示例：模型或路径命中时只使用这些行
-# sk-image-group,https://example.com,example,生图组,gpt-image-*;imagen-*,images/*;v1/images/*
+# sk-image-group,https://example.com,example,生图组,1,gpt-image-*;imagen-*,images/*;v1/images/*
 # 多上游示例（取消注释后生效）:
-# sk-other-upstream-key,https://other.com,other,备用站,,
+# sk-other-upstream-key,https://other.com,other,备用站,0.1,,

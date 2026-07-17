@@ -160,6 +160,24 @@ class KeyAvailabilityStatsTests(unittest.TestCase):
         self.assertEqual(key["health_status"], "unavailable")
         self.assertEqual(key["consecutive_failures"], 2)
 
+    def test_legacy_key_id_is_merged_into_sorted_key_stats(self):
+        configs = [{"id": "pool", "provider": "p", "keys": [
+            {"key_id": "cheap|0.02", "legacy_key_id": "cheap", "sort": "0.02", "cooled": False},
+        ]}]
+        records = [
+            {"ts": "2026-07-17T09:00:00", "provider": "p", "key_pool": "pool", "key_id": "cheap",
+             "final_status": 200, "key_attempts": [{"key_id": "cheap", "available": True}]},
+            {"ts": "2026-07-17T10:00:00", "provider": "p", "key_pool": "pool", "key_id": "cheap|0.02",
+             "final_status": 503, "key_attempts": [{"key_id": "cheap|0.02", "available": False}]},
+        ]
+
+        key = compute_key_pool_stats(records, configs)[0]["keys"][0]
+
+        self.assertEqual(key["key_id"], "cheap|0.02")
+        self.assertEqual(key["attempts"], 2)
+        self.assertEqual(key["availability_pct"], 50)
+        self.assertEqual(key["health_status"], "unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()

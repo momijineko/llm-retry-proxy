@@ -102,12 +102,15 @@ def _agg_by(records: list, key: str, label: str, key_fn=None):
     return out
 
 
-def _agg_by_key(records: list) -> list:
+def _agg_by_key(records: list, key_aliases: dict = None) -> list:
+    key_aliases = key_aliases or {}
     attempts = defaultdict(lambda: {
         "attempts": 0, "available": 0, "failed": 0, "ignored": 0, "legacy": 0,
         "events": [],
     })
-    requests = {item["key_id"]: item for item in _agg_by(records, "key_id", "key_id") if item["key_id"] != "(unknown)"}
+    requests = {item["key_id"]: item for item in _agg_by(
+        records, "key_id", "key_id", key_fn=lambda record: key_aliases.get(record.get("key_id", ""), record.get("key_id", ""))
+    ) if item["key_id"] != "(unknown)"}
     for record_index, record in enumerate(records):
         ts = record.get("ts", "") or ""
         trace = record.get("key_attempts")
@@ -115,7 +118,8 @@ def _agg_by_key(records: list) -> list:
             for attempt_index, item in enumerate(trace):
                 if not isinstance(item, dict) or not item.get("key_id"):
                     continue
-                bucket = attempts[item["key_id"]]
+                key_id = key_aliases.get(item["key_id"], item["key_id"])
+                bucket = attempts[key_id]
                 bucket["attempts"] += 1
                 if item.get("available") is True:
                     bucket["available"] += 1
@@ -126,7 +130,8 @@ def _agg_by_key(records: list) -> list:
                 else:
                     bucket["ignored"] += 1
             continue
-        key_id = record.get("key_id", "")
+        raw_key_id = record.get("key_id", "")
+        key_id = key_aliases.get(raw_key_id, raw_key_id)
         if key_id:
             bucket = attempts[key_id]
             bucket["attempts"] += 1
@@ -209,7 +214,15 @@ def compute_key_pool_stats(records: list, pool_configs: list, health_records: li
         key_ids = tuple(dict.fromkeys(item.get("key_id") if isinstance(item, dict) else item for item in raw_keys))
         key_ids = tuple(key_id for key_id in key_ids if key_id)
         key_meta = {item["key_id"]: item for item in raw_keys if isinstance(item, dict) and item.get("key_id")}
-        pools.append({**config, "keys": key_ids, "key_meta": key_meta, "key_set": set(key_ids),
+        alias_targets = defaultdict(set)
+        for key_id, meta in key_meta.items():
+            legacy_key_id = meta.get("legacy_key_id")
+            if legacy_key_id and legacy_key_id != key_id:
+                alias_targets[legacy_key_id].add(key_id)
+        key_aliases = {alias: next(iter(targets)) for alias, targets in alias_targets.items()
+                       if len(targets) == 1 and alias not in key_ids}
+        pools.append({**config, "keys": key_ids, "key_meta": key_meta,
+                      "key_set": set(key_ids) | set(key_aliases), "key_aliases": key_aliases,
                       "records": [], "health_records": []})
 
     _assign_key_pool_records(records, pools, "records")
@@ -217,8 +230,8 @@ def compute_key_pool_stats(records: list, pool_configs: list, health_records: li
 
     result = []
     for pool in pools:
-        stats_by_key = {item["key_id"]: item for item in _agg_by_key(pool["records"])}
-        health_by_key = {item["key_id"]: item for item in _agg_by_key(pool["health_records"])}
+        stats_by_key = {item["key_id"]: item for item in _agg_by_key(pool["records"], pool["key_aliases"])}
+        health_by_key = {item["key_id"]: item for item in _agg_by_key(pool["health_records"], pool["key_aliases"])}
         key_stats = []
         for key_id in pool["keys"]:
             stats = stats_by_key.get(key_id, {

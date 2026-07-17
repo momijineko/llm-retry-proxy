@@ -8,6 +8,25 @@ from retry_proxy.retry import (RetryProxy, _key_available_for_status, _key_failu
 
 
 class KeyPoolStickyTests(unittest.TestCase):
+    def test_sort_orders_entries_numerically_and_formats_log_id(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("high", "high", sort="0.2"),
+            KeyEntry("equal-first", "equal-first", sort="0.03"),
+            KeyEntry("low", "low", sort="0.02"),
+            KeyEntry("equal-second", "equal-second", sort="0.03"),
+            KeyEntry("legacy", "legacy"),
+        ]
+
+        pool.finalize_entries()
+
+        self.assertEqual([entry.key_id for entry in pool.entries], [
+            "low|0.02", "equal-first|0.03", "equal-second|0.03", "high|0.2", "legacy",
+        ])
+        self.assertEqual([entry.legacy_key_id for entry in pool.entries], [
+            "low", "equal-first", "equal-second", "high", "legacy",
+        ])
+
     def test_auth_failures_are_not_recorded_as_available_keys(self):
         self.assertFalse(_key_available_for_status(401))
         self.assertFalse(_key_available_for_status(403))

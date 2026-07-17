@@ -174,28 +174,29 @@ KEY_POOL_FILE=key_pool.csv
 CSV 格式（首行表头，`#` 开头为注释）：
 
 ```csv
-key,url,provider,label
-sk-cheap-group,,,低倍率组
-sk-normal-group,,,中倍率组
-sk-premium-group,,,高倍率组
-# 多上游示例（同一 url 的 key 自动归入同一池，按行序排列）
-sk-other-key,https://other.com,other,备用站
+key,url,provider,label,sort
+sk-cheap-group,,,低倍率组,0.02
+sk-normal-group,,,中倍率组,0.1
+sk-premium-group,,,高倍率组,0.2
+# 多上游示例（同一 url 的 key 自动归入同一池，按 sort 排列）
+sk-other-key,https://other.com,other,备用站,0.1
 ```
 
 - `key`（必填）：API key
 - `url`（可选）：上游地址，留空 = `UPSTREAM_URL`
 - `provider`（可选）：供应商标签，留空 = `PROVIDER`
 - `label`（可选）：key 标签/备注，用于日志显示和统计面板分组。留空则用 key 前 8 位
+- `sort`（可选）：数值顺序或倍率。每个号池按数值从小到大选择 key；相同值保持 CSV 行序。日志和统计标识显示为 `label|sort`，例如 `[低倍率组|0.02]`
 - `models`（可选）：该行 key 匹配的模型 glob，多个用分号分隔，例如 `gpt-image-*;imagen-*`
 - `paths`（可选）：该行 key 匹配的路径 glob，多个用分号分隔，例如 `images/*;v1/images/*`
-- **行序即优先级**：上面的 = 低倍率（便宜），下面的 = 高倍率（贵）
+- 未配置 `sort` 时保持原行序并排在已配置有效 `sort` 的 key 之后，兼容旧 CSV
 
 当任一专用行命中模型或路径时，请求只在这些命中行之间选 key；未命中时只使用 `models` 和 `paths` 都为空的普通行。专用池与普通池分别维护粘性状态，专用 key 冷却时不会泄漏回普通分组。
 
 ```csv
-key,url,provider,label,models,paths
-sk-normal,https://aihub.top,aihub,普通组,,
-sk-image,https://aihub.top,aihub,生图组,gpt-image-*;imagen-*,images/*;v1/images/*
+key,url,provider,label,sort,models,paths
+sk-normal,https://aihub.top,aihub,普通组,0.1,,
+sk-image,https://aihub.top,aihub,生图组,1,gpt-image-*;imagen-*,images/*;v1/images/*
 ```
 
 > 项目附带 `key_pool.csv.example` 模板，复制为 `key_pool.csv` 即可使用。
@@ -335,14 +336,14 @@ python -m retry_proxy.dlp validate
 | `duration_s` | 总耗时（秒） |
 | `succeeded` | 是否最终拿到 2xx/3xx 响应（`final_status < 400`，4xx/5xx 视为失败） |
 | `retry_codes` | 重试过程中上游返回的错误码列表，如 `[503, 503, 429]`。无重试时为空数组 `[]`。用于统计面板的错误码分析 |
-| `key_id` | 号池模式下使用的 key 标签（CSV 中 `label` 列，未设则用 key 前 8 字符），未启用号池时为空字符串。统计面板「按 key」表格按此字段分组 |
+| `key_id` | 号池模式下使用的 key 标识。配置 `sort` 时为 `label|sort`（如 `premium|0.2`），否则为 `label`；未设 label 时使用 key 前 8 字符。统计面板按此字段分组 |
 | `key_pool` | 号池模式下实际使用的号池标识（当前为对应上游 URL），未启用号池时为空字符串。用于隔离多号池中的同名 key |
 | `key_attempts` | 号池模式下逐次完成的 key 尝试及可用性判定。触发换 key 的响应记为 `false`，正常响应记为 `true`，主机级连接故障记为 `null` 并从 key 可用率中排除 |
 
 示例：
 
 ```json
-{"ts":"2026-07-07T11:52:35.123","method":"POST","path":"/chat/completions","provider":"xfyun","model":"spark-v4","upstream_status":200,"final_status":200,"attempts":3,"retries":2,"duration_s":0.852,"succeeded":true,"retry_codes":[503,503],"key_pool":"https://example.com/v2","key_id":"premium","key_attempts":[{"key_id":"cheap","available":false},{"key_id":"normal","available":false},{"key_id":"premium","available":true}]}
+{"ts":"2026-07-07T11:52:35.123","method":"POST","path":"/chat/completions","provider":"xfyun","model":"spark-v4","upstream_status":200,"final_status":200,"attempts":3,"retries":2,"duration_s":0.852,"succeeded":true,"retry_codes":[503,503],"key_pool":"https://example.com/v2","key_id":"premium|0.2","key_attempts":[{"key_id":"cheap|0.02","available":false},{"key_id":"normal|0.1","available":false},{"key_id":"premium|0.2","available":true}]}
 ```
 
 快速分析示例：

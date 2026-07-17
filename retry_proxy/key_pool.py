@@ -3,6 +3,7 @@ import fnmatch
 import hashlib
 import os
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from .config import logger, settings
@@ -11,12 +12,13 @@ _FAILURE_KIND_PRIORITY = {"transport": 1, "upstream": 2, "rate_limit": 3, "auth"
 
 
 class KeyEntry:
-    __slots__ = ("key", "key_id", "label", "models", "paths", "cooldown_until", "total_fail",
+    __slots__ = ("key", "key_id", "legacy_key_id", "label", "sort", "models", "paths", "cooldown_until", "total_fail",
                  "last_fail_ts", "consecutive_failures", "last_failure_kind", "last_failure_status",
                  "last_cooldown_s")
-    def __init__(self, key: str, label: str = "", models=(), paths=()):
-        self.key, self.label = key, label
-        self.key_id = label if label else key[:8]
+    def __init__(self, key: str, label: str = "", models=(), paths=(), sort: str = ""):
+        self.key, self.label, self.sort = key, label, sort.strip()
+        self.legacy_key_id = label if label else key[:8]
+        self.key_id = f"{self.legacy_key_id}|{self.sort}" if self.sort else self.legacy_key_id
         self.models = tuple(pattern.lower() for pattern in models)
         self.paths = tuple(pattern.lstrip("/").lower() for pattern in paths)
         self.cooldown_until = 0.0
@@ -45,12 +47,29 @@ class KeyPool:
             seen_keys.add(entry.key)
             unique.append(entry)
         self.entries = unique
+        invalid_sorts = set()
+        def sort_key(entry):
+            if not entry.sort:
+                return 1, Decimal(0)
+            try:
+                value = Decimal(entry.sort)
+                if value.is_finite():
+                    return 0, value
+            except InvalidOperation:
+                pass
+            invalid_sorts.add(entry.sort)
+            return 1, Decimal(0)
+        if any(entry.sort for entry in self.entries):
+            self.entries.sort(key=sort_key)
+        for value in sorted(invalid_sorts):
+            logger.warning(f"号池 sort={value!r} 不是有效数字，已保持在有效 sort 之后")
         counts = {}
         for entry in self.entries:
-            base = entry.label or entry.key[:8]
+            base = f"{entry.legacy_key_id}|{entry.sort}" if entry.sort else entry.legacy_key_id
             counts[base] = counts.get(base, 0) + 1
         for entry in self.entries:
-            base = entry.label or entry.key[:8]
+            base = f"{entry.legacy_key_id}|{entry.sort}" if entry.sort else entry.legacy_key_id
+            entry.key_id = base
             if counts[base] > 1:
                 fingerprint = hashlib.sha256(entry.key.encode("utf-8")).hexdigest()[:8]
                 entry.key_id = f"{base}#{fingerprint}"
@@ -131,7 +150,8 @@ class KeyPool:
 
     def status(self):
         now = time.time()
-        return [{"key_id": e.key_id, "label": e.label, "cooled": e.cooldown_until > now,
+        return [{"key_id": e.key_id, "legacy_key_id": e.legacy_key_id, "label": e.label, "sort": e.sort,
+                 "cooled": e.cooldown_until > now,
                  "cooldown_remaining": round(max(e.cooldown_until - now, 0), 1), "total_fail": e.total_fail,
                  "consecutive_failures": e.consecutive_failures, "last_failure_kind": e.last_failure_kind,
                  "last_failure_status": e.last_failure_status, "last_cooldown_s": round(e.last_cooldown_s, 1),
@@ -171,11 +191,12 @@ def load_key_pools_csv(path):
         url = (row.get("url") or "").strip().rstrip("/") or settings.upstream_url
         provider = (row.get("provider") or "").strip() or settings.provider
         label = (row.get("label") or "").strip()
+        sort = (row.get("sort") or "").strip()
         models = tuple(pattern.strip() for pattern in (row.get("models") or "").split(";") if pattern.strip())
         paths = tuple(pattern.strip() for pattern in (row.get("paths") or "").split(";") if pattern.strip())
         if url in pools and provider and pools[url].provider != provider:
             logger.warning(f"号池 key={label or key[:8]} 的 provider={provider!r} 与池现有={pools[url].provider!r} 不一致，已忽略")
-        pools.setdefault(url, KeyPool([], provider)).entries.append(KeyEntry(key, label, models, paths))
+        pools.setdefault(url, KeyPool([], provider)).entries.append(KeyEntry(key, label, models, paths, sort))
     if pools:
         for pool in pools.values():
             pool.finalize_entries()
