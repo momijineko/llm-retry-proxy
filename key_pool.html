@@ -3,32 +3,150 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>号池管理</title>
+  <title>号池管理 · llm-retry-proxy</title>
   <style>
-    :root{--bg:#f5f7fa;--panel:#fff;--text:#172033;--muted:#667085;--border:#dfe3e8;--primary:#2563eb;--primary-bg:#eff6ff;--ok:#15803d;--ok-bg:#f0fdf4;--warn:#a16207;--warn-bg:#fffbeb;--danger:#b42318;--danger-bg:#fff1f0}
-    *{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:var(--text);font:14px system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;letter-spacing:0;-webkit-font-smoothing:antialiased}
-    button,input,select{font:inherit;letter-spacing:0}button{cursor:pointer}button:disabled{cursor:not-allowed;opacity:.55}
-    header{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.94);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:12px max(20px,calc((100% - 1240px)/2));display:flex;align-items:center;gap:14px;min-height:58px}
-    .brand{display:flex;align-items:center;gap:10px}.logo{width:30px;height:30px;border-radius:7px;background:var(--primary);display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;font-weight:700;box-shadow:0 2px 6px rgba(37,99,235,.24)}.brand-text h1{font-size:16px;margin:0;font-weight:700;letter-spacing:0}.brand-text .sub{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}.brand-text .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(21,128,61,.12)}nav{display:flex;gap:4px;margin-left:12px}nav a{color:var(--muted);text-decoration:none;padding:7px 10px;border-radius:6px;font-size:13px;font-weight:500}nav a:hover{background:#f8fafc;color:var(--text)}nav a.active{background:var(--primary-bg);color:var(--primary)}
-    main{max-width:1240px;margin:0 auto;padding:28px 20px 56px}.page-head{display:flex;align-items:center;gap:12px;margin-bottom:18px}.page-head h1{font-size:22px;margin:0;font-weight:700}.page-head .actions{margin-left:auto;display:flex;align-items:center;gap:8px}.interval-control{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}.interval-control input{width:72px;height:36px;border:1px solid var(--border);border-radius:6px;padding:0 8px;color:var(--text);background:#fff}
-    .btn{min-height:36px;padding:0 13px;border:1px solid var(--border);border-radius:5px;background:#fff;color:var(--text)}.btn:hover{border-color:#aeb7c2}.btn.primary{border-color:var(--primary);background:var(--primary);color:#fff}.btn.danger{color:var(--danger)}
-    .notice{display:none;margin-bottom:14px;padding:10px 12px;border-radius:5px;border:1px solid}.notice.show{display:block}.notice.ok{color:var(--ok);background:var(--ok-bg);border-color:#bbf7d0}.notice.error{color:var(--danger);background:var(--danger-bg);border-color:#fecaca}
-    .connect{display:none;background:var(--panel);border-block:1px solid var(--border);margin:0 0 20px;padding:18px}.connect.open{display:block}.connect h2{font-size:15px;margin:0 0 15px}.form-grid{display:grid;grid-template-columns:180px minmax(260px,1fr) 180px;gap:12px}.field label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}.field input,.field select{width:100%;height:38px;border:1px solid #cbd3dc;border-radius:5px;background:#fff;padding:0 10px;outline:none}.field input:focus,.field select:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.1)}.credentials{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:12px;margin-top:12px}.form-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
-    .empty{padding:70px 20px;text-align:center;color:var(--muted);border-block:1px solid var(--border);background:#fff}.source-list{display:grid;gap:14px}.source{background:var(--panel);border:1px solid var(--border);border-radius:7px;overflow:hidden}.source-head{display:flex;align-items:center;gap:10px;padding:15px 16px;border-bottom:1px solid var(--border)}.source-title{min-width:0}.source-title strong{display:block;font-size:15px}.source-title span{display:block;color:var(--muted);font-size:12px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.source-actions{margin-left:auto;display:flex;gap:7px;flex:0 0 auto}
-    .pill{display:inline-flex;align-items:center;height:24px;padding:0 8px;border-radius:12px;font-size:11px}.pill.ok{background:var(--ok-bg);color:var(--ok)}.pill.muted{background:#f2f4f7;color:var(--muted)}.pill.warn{background:var(--warn-bg);color:var(--warn)}
-    .source-meta{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);border-bottom:1px solid var(--border)}.metric{background:#fff;padding:12px 16px}.metric label{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.metric span{font-weight:600;font-size:13px}.source-error{color:var(--danger);background:var(--danger-bg);padding:10px 16px;border-bottom:1px solid #fecaca}
-    .table-wrap{overflow:auto;max-height:520px}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:10px 14px;border-bottom:1px solid #edf0f3;white-space:nowrap}th{position:sticky;top:0;background:#fafbfc;color:var(--muted);font-size:11px;font-weight:600;z-index:1}th .sort-head{border:0;background:transparent;padding:0;color:inherit;font:inherit;cursor:pointer}th .sort-head:hover,th .sort-head.active{color:var(--primary)}th .sort-icon{margin-left:4px;color:var(--primary)}td.num,th.num{text-align:right}tbody tr:last-child td{border-bottom:0}.rules{color:var(--muted);font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis}.cooled{color:var(--warn)}.operation-progress{color:var(--primary);font-size:12px;margin-right:auto}.dialog-actions .operation-progress+.btn{margin-left:0}.rule-input{width:190px;height:32px;border:1px solid #cbd3dc;border-radius:5px;padding:0 8px;font-size:12px}.rule-input:focus{border-color:var(--primary);outline:0;box-shadow:0 0 0 3px rgba(37,99,235,.1)}
-    .modal{display:none;position:fixed;inset:0;z-index:20;background:rgba(15,23,42,.42);padding:24px;align-items:center;justify-content:center}.modal.open{display:flex}.dialog{width:min(820px,100%);max-height:min(760px,calc(100vh - 48px));display:flex;flex-direction:column;background:#fff;border-radius:7px;box-shadow:0 20px 50px rgba(15,23,42,.2);overflow:hidden}.dialog-head{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--border)}.dialog-head h2{font-size:16px;margin:0}.dialog-head button{margin-left:auto}.group-tools{display:flex;align-items:end;gap:8px;padding:12px 18px;border-bottom:1px solid var(--border)}.group-tools .field{width:min(280px,100%)}.group-table{overflow:auto;min-height:220px}.group-table table{min-width:620px}.group-table input[type=checkbox]{width:16px;height:16px}.dialog-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:14px 18px;border-top:1px solid var(--border)}.dialog-actions .summary{margin-right:auto;color:var(--muted);font-size:12px}
-    @media(max-width:760px){header{padding:0 14px}.form-grid,.credentials{grid-template-columns:1fr}.page-head{align-items:flex-start;flex-wrap:wrap}.page-head .actions{width:100%;margin-left:0}.source-head{align-items:flex-start;flex-wrap:wrap}.source-actions{width:100%;margin-left:0;flex-wrap:wrap}.source-meta{grid-template-columns:repeat(2,1fr)}main{padding-inline:14px}.modal{padding:10px}.group-tools{align-items:stretch;flex-direction:column}.group-tools .field{width:100%}.dialog-actions{flex-wrap:wrap}.dialog-actions .summary{width:100%;margin:0}}
+    :root{
+      --bg:#f4f6f8;
+      --card:#fff; --card-2:#f8fafc; --border:#e2e7ee; --border-strong:#cbd3df;
+      --text:#0f172a; --text-2:#334155; --muted:#6b7280; --muted-2:#9ca3af;
+      --primary:#2563eb; --primary-d:#1d4ed8; --primary-l:#eff6ff;
+      --ok:#10b981; --ok-l:#ecfdf5; --ok-d:#047857;
+      --warn:#f59e0b; --warn-l:#fffbeb; --warn-d:#b45309;
+      --danger:#ef4444; --danger-l:#fef2f2; --danger-d:#b91c1c;
+      --radius:8px; --radius-sm:8px; --radius-xs:6px;
+      --shadow-xs:0 1px 2px rgba(15,23,42,.04);
+      --shadow:0 1px 3px rgba(15,23,42,.05),0 1px 2px rgba(15,23,42,.03);
+      --shadow-md:0 4px 12px -2px rgba(15,23,42,.08),0 2px 6px -2px rgba(15,23,42,.04);
+      --shadow-lg:0 12px 32px -8px rgba(15,23,42,.12),0 4px 12px -4px rgba(15,23,42,.06);
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;font-size:14px}
+    button,input,select{font:inherit;color:inherit}button{cursor:pointer}button:disabled{cursor:not-allowed;opacity:.55}
+
+    header{background:rgba(255,255,255,.94);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:12px 28px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:50;flex-wrap:wrap}
+    header .brand{display:flex;align-items:center;gap:10px}
+    header .logo{width:30px;height:30px;border-radius:7px;background:var(--primary);display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;font-weight:700;box-shadow:0 2px 6px rgba(37,99,235,.24)}
+    header h1{font-size:16px;margin:0;font-weight:700;letter-spacing:0}
+    header .sub{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px}
+    header .sub .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.15);animation:pulse 2s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    header .spacer{flex:1}
+    .app-nav{display:flex;align-items:center;gap:4px;margin-left:12px}
+    .app-nav a{color:var(--muted);text-decoration:none;padding:7px 10px;border-radius:6px;font-size:13px;font-weight:500;transition:color .15s,background .15s}
+    .app-nav a:hover{background:var(--card-2);color:var(--text)}
+    .app-nav a.active{background:var(--primary-l);color:var(--primary-d)}
+    .header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .interval-control{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}
+    .interval-control input{width:72px;height:34px;border:1px solid var(--border);border-radius:var(--radius-xs);padding:0 8px;color:var(--text);background:var(--card);outline:none;transition:border-color .15s,box-shadow .15s}
+    .interval-control input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+
+    main{max-width:1240px;margin:0 auto;padding:24px 28px 56px}
+
+    .btn{min-height:34px;padding:0 13px;border:1px solid var(--border);border-radius:var(--radius-xs);background:var(--card);color:var(--text-2);font-size:13px;font-weight:500;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
+    .btn:hover{border-color:var(--primary);color:var(--primary);background:var(--primary-l);box-shadow:var(--shadow-xs)}
+    .btn:active{transform:translateY(1px)}
+    .btn:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+    .btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+    .btn.primary:hover{background:var(--primary-d);border-color:var(--primary-d);color:#fff;box-shadow:0 2px 8px rgba(37,99,235,.3)}
+    .btn.danger{color:var(--danger-d)}
+    .btn.danger:hover{border-color:var(--danger);color:var(--danger);background:var(--danger-l)}
+
+    .notice{display:none;margin-bottom:14px;padding:10px 14px;border-radius:var(--radius-xs);border:1px solid;font-size:13px}
+    .notice.show{display:block}
+    .notice.ok{color:var(--ok-d);background:var(--ok-l);border-color:#a7f3d0}
+    .notice.error{color:var(--danger-d);background:var(--danger-l);border-color:#fecaca}
+
+    .connect{display:none;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:20px;padding:20px;box-shadow:var(--shadow)}
+    .connect.open{display:block}
+    .connect h2{font-size:13px;margin:0 0 16px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:8px;letter-spacing:0}
+    .connect h2::before{content:"";width:3px;height:14px;border-radius:2px;background:var(--primary);flex-shrink:0}
+    .form-grid{display:grid;grid-template-columns:180px minmax(260px,1fr) 180px;gap:12px}
+    .field label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px;font-weight:500}
+    .field input,.field select{width:100%;height:38px;border:1px solid var(--border-strong);border-radius:var(--radius-xs);background:var(--card);padding:0 10px;color:var(--text);outline:none;transition:border-color .15s,box-shadow .15s}
+    .field input:focus,.field select:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+    .credentials{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:12px;margin-top:12px}
+    .form-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+
+    .empty{padding:70px 20px;text-align:center;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:var(--radius);font-size:13px}
+    .source-list{display:grid;gap:14px}
+    .source{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);transition:box-shadow .2s}
+    .source:hover{box-shadow:var(--shadow-md)}
+    .source-head{display:flex;align-items:center;gap:12px;padding:16px 18px;border-bottom:1px solid var(--border)}
+    .source-title{min-width:0}
+    .source-title strong{display:block;font-size:15px;font-weight:700;color:var(--text)}
+    .source-title span{display:block;color:var(--muted);font-size:12px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .source-actions{margin-left:auto;display:flex;gap:8px;flex:0 0 auto;flex-wrap:wrap}
+
+    .pill{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:99px;font-size:11px;font-weight:600;letter-spacing:.02em}
+    .pill.ok{background:var(--ok-l);color:var(--ok-d)}
+    .pill.muted{background:var(--card-2);color:var(--muted)}
+    .pill.warn{background:var(--warn-l);color:var(--warn-d)}
+
+    .source-meta{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);border-bottom:1px solid var(--border)}
+    .metric{background:var(--card);padding:14px 18px}
+    .metric label{display:block;color:var(--muted);font-size:11px;margin-bottom:5px;font-weight:500;text-transform:uppercase;letter-spacing:.03em}
+    .metric span{font-weight:700;font-size:14px;color:var(--text);font-variant-numeric:tabular-nums}
+    .source-error{color:var(--danger-d);background:var(--danger-l);padding:10px 18px;border-bottom:1px solid #fecaca;font-size:12px}
+
+    .table-wrap{overflow:auto;max-height:520px}
+    table{width:100%;border-collapse:collapse;font-size:12px;min-width:760px}
+    th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--border);white-space:nowrap}
+    th{position:sticky;top:0;background:var(--card-2);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;z-index:1}
+    th .sort-head{border:0;background:transparent;padding:0;color:inherit;font:inherit;cursor:pointer}
+    th .sort-head:hover,th .sort-head.active{color:var(--primary)}
+    th .sort-icon{margin-left:4px;color:var(--primary)}
+    td.num,th.num{text-align:right}
+    tbody tr{transition:background .12s}
+    tbody tr:hover{background:var(--primary-l)}
+    tbody tr:last-child td{border-bottom:0}
+    .rules{color:var(--muted);font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+    .cooled{color:var(--warn-d);font-weight:600}
+    .rule-input{width:190px;max-width:100%;height:32px;border:1px solid var(--border-strong);border-radius:var(--radius-xs);padding:0 10px;font-size:12px;color:var(--text);background:var(--card);outline:none;transition:border-color .15s,box-shadow .15s}
+    .rule-input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+    .rule-input::placeholder{color:var(--muted-2)}
+
+    .modal{display:none;position:fixed;inset:0;z-index:100;background:rgba(15,23,42,.42);padding:24px;align-items:center;justify-content:center}
+    .modal.open{display:flex}
+    .dialog{width:min(820px,100%);max-height:min(760px,calc(100vh - 48px));display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-lg);overflow:hidden}
+    .dialog-head{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--border)}
+    .dialog-head h2{font-size:15px;margin:0;font-weight:700}
+    .dialog-head button{margin-left:auto}
+    .group-tools{display:flex;align-items:center;gap:8px;padding:12px 18px;border-bottom:1px solid var(--border);background:var(--card-2)}
+    .group-tools .field{width:min(280px,100%)}
+    .group-table{overflow:auto;min-height:220px}
+    .group-table table{min-width:620px}
+    .group-table input[type=checkbox]{width:16px;height:16px;accent-color:var(--primary)}
+    .dialog-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:14px 18px;border-top:1px solid var(--border);background:var(--card)}
+    .dialog-actions .summary{margin-right:auto;color:var(--muted);font-size:12px}
+    .operation-progress{color:var(--primary);font-size:12px;margin-right:auto}
+    .dialog-actions .operation-progress+.btn{margin-left:0}
+
+    @media(max-width:820px){header{padding:10px 16px;gap:8px}.header-actions{width:100%}main{padding:16px 16px 40px}}
+    @media(max-width:760px){.form-grid,.credentials{grid-template-columns:1fr}.header-actions{flex-wrap:wrap}.source-head{align-items:flex-start;flex-wrap:wrap}.source-actions{width:100%;margin-left:0;flex-wrap:wrap}.source-meta{grid-template-columns:repeat(2,1fr)}.modal{padding:10px}.group-tools{flex-direction:column;align-items:stretch}.group-tools .field{width:100%}.dialog-actions{flex-wrap:wrap}.dialog-actions .summary{width:100%;margin:0}}
   </style>
 </head>
 <body>
-<header><strong>LLM Retry Proxy</strong><nav class="app-nav" aria-label="主导航"><a href="/stats">统计</a><a href="/logs">日志</a><a class="active" href="/admin/key-pools">号池</a></nav></header>
+<header>
+  <div class="brand">
+    <div class="logo">R</div>
+    <div>
+      <h1>号池管理</h1>
+      <span class="sub"><span class="dot"></span>上游号池连接与 Key 管理</span>
+    </div>
+  </div>
+  <nav class="app-nav" aria-label="主导航"><a href="/stats">统计</a><a href="/logs">日志</a><a class="active" href="/admin/key-pools">号池</a></nav>
+  <div class="spacer"></div>
+  <div class="header-actions">
+    <label class="interval-control">同步周期 <input id="syncInterval" type="number" min="0" max="86400" step="1"> 秒</label>
+    <button class="btn" id="saveInterval">保存周期</button>
+    <button class="btn" id="syncAll">立即同步</button>
+    <button class="btn primary" id="addSource">添加上游</button>
+  </div>
+</header>
 <main>
-  <div class="page-head"><h1>号池管理</h1><div class="actions"><label class="interval-control">自动同步 <input id="syncInterval" type="number" min="0" max="86400" step="1"> 秒</label><button class="btn" id="saveInterval">保存周期</button><button class="btn" id="syncAll">立即同步</button><button class="btn primary" id="addSource">添加上游</button></div></div>
   <div class="notice" id="notice"></div>
   <section class="connect" id="connectPanel">
-    <h2>上游连接</h2>
+    <h2>添加上游连接</h2>
     <form id="connectForm">
       <div class="form-grid">
         <div class="field"><label for="adapter">适配器</label><select id="adapter" required></select></div>
@@ -56,7 +174,7 @@
   <section class="dialog">
     <div class="dialog-head"><h2 id="mappingDialogTitle">分组路由映射</h2><button class="btn" id="closeMapping" type="button">关闭</button></div>
     <div class="group-table" id="mappingTable"><div class="empty">正在载入</div></div>
-    <div class="dialog-actions"><span class="summary">模型和路径均为空时，该分组作为未匹配请求的默认号池</span><button class="btn" id="saveGroupRules" type="button">保存映射</button></div>
+    <div class="dialog-actions"><span class="summary">模型与路径均留空时，此分组作为未匹配请求的默认号池</span><button class="btn primary" id="saveGroupRules" type="button">保存映射</button></div>
   </section>
 </div>
 <script>
@@ -70,7 +188,7 @@ function configureForm(){const adapters=state.adapters||[];$('adapter').innerHTM
 function supports(source,capability){const adapter=state.adapters.find(a=>a.name===source.adapter);return(adapter?.capabilities||[]).includes(capability)}
 function sortHead(label,mode,num=false){const active=keySortMode===mode;const arrow=active?(keySortDirection===1?'↑':'↓'):'↕';return `<th${num?' class="num"':''}><button type="button" class="sort-head${active?' active':''}" data-sort="${mode}">${label}<span class="sort-icon">${arrow}</span></button></th>`}
 function keyRows(keys){if(!keys.length)return '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:28px">暂无 Key</td></tr>';const ordered=[...keys];ordered.sort((a,b)=>{let result=0;if(keySortMode==='group'){result=String(a.group_name||'').localeCompare(String(b.group_name||''),'zh-CN')||String(a.label||'').localeCompare(String(b.label||''),'zh-CN')}if(keySortMode==='rate'){const ar=Number.parseFloat(a.sort),br=Number.parseFloat(b.sort);const av=Number.isFinite(ar)?ar:Number.POSITIVE_INFINITY,bv=Number.isFinite(br)?br:Number.POSITIVE_INFINITY;result=av-bv||String(a.group_name||'').localeCompare(String(b.group_name||''),'zh-CN')||String(a.label||'').localeCompare(String(b.label||''),'zh-CN')}return result*keySortDirection});return ordered.map(k=>{const rules=[...(k.models||[]),...(k.paths||[])].join('; ');return `<tr><td><strong>${esc(k.label)}</strong></td><td>${esc(k.key_masked)}</td><td>${esc(k.group_name||'-')}</td><td>${esc(k.platform||'-')}</td><td class="num">${esc(k.sort||'-')}</td><td class="rules" title="${esc(rules)}">${esc(rules||'-')}</td><td class="${k.cooled?'cooled':''}">${k.cooled?'熔断':'可用'}</td></tr>`}).join('')}
-function render(){const sources=state.sources||[];if(!sources.length){$('content').innerHTML='<div class="empty">尚未配置上游连接</div>';return}$('content').innerHTML='<div class="source-list">'+sources.map(s=>`<section class="source"><div class="source-head"><div class="source-title"><strong>${esc(s.provider||s.adapter_label)}</strong><span>${esc(s.adapter_label)} · ${esc(s.base_url)}</span></div><span class="pill ${s.connected?'ok':'muted'}">${s.connected?'已连接':'已断开'}</span><div class="source-actions">${supports(s,'create_keys')?`<button class="btn" data-action="groups" data-id="${esc(s.id)}" ${s.connected?'':'disabled'}>选择分组</button><button class="btn" data-action="mapping" data-id="${esc(s.id)}" ${s.connected?'':'disabled'}>路由映射</button><button class="btn" data-action="fill-missing" data-id="${esc(s.id)}" ${s.connected?'':'disabled'}>补齐缺失</button>`:''}${s.connected?`<button class="btn" data-action="sync" data-id="${esc(s.id)}">同步</button><button class="btn danger" data-action="disconnect" data-id="${esc(s.id)}">断开</button>`:`<button class="btn primary" data-action="reconnect" data-id="${esc(s.id)}">重新连接</button>`}</div></div><div class="source-meta"><div class="metric"><label>账号</label><span>${esc(s.account?.email||'-')}</span></div><div class="metric"><label>Key 数量</label><span>${s.key_count}</span></div><div class="metric"><label>同步周期</label><span>${state.interval>0?state.interval+' 秒':'手动'}</span></div><div class="metric"><label>最近同步</label><span>${esc(fmtTime(s.last_sync_at))}</span></div></div>${s.last_error?`<div class="source-error">${esc(s.last_error)}</div>`:''}<div class="table-wrap"><table><thead><tr><th>标识</th><th>Key</th>${sortHead('分组','group') }<th>平台</th>${sortHead('倍率','rate',true)}<th>本地规则</th><th>状态</th></tr></thead><tbody>${keyRows(s.keys||[])}</tbody></table></div></section>`).join('')+'</div>'}
+function render(){const sources=state.sources||[];if(!sources.length){$('content').innerHTML='<div class="empty">尚未配置上游连接，点击“添加上游”开始</div>';return}$('content').innerHTML='<div class="source-list">'+sources.map(s=>`<section class="source"><div class="source-head"><div class="source-title"><strong>${esc(s.provider||s.adapter_label)}</strong><span>${esc(s.adapter_label)} · ${esc(s.base_url)}</span></div><span class="pill ${s.connected?'ok':'muted'}">${s.connected?'已连接':'已断开'}</span><div class="source-actions">${supports(s,'create_keys')?`<button class="btn" data-action="groups" data-id="${esc(s.id)}" ${s.connected?'':'disabled'}>选择分组</button><button class="btn" data-action="mapping" data-id="${esc(s.id)}" ${s.connected?'':'disabled'}>路由映射</button>`:''}${s.connected?`<button class="btn" data-action="sync" data-id="${esc(s.id)}">同步</button><button class="btn danger" data-action="disconnect" data-id="${esc(s.id)}">断开</button>`:`<button class="btn primary" data-action="reconnect" data-id="${esc(s.id)}">重新连接</button>`}</div></div><div class="source-meta"><div class="metric"><label>账号</label><span>${esc(s.account?.email||'-')}</span></div><div class="metric"><label>Key 数量</label><span>${s.key_count}</span></div><div class="metric"><label>同步周期</label><span>${state.interval>0?state.interval+' 秒':'手动'}</span></div><div class="metric"><label>最近同步</label><span>${esc(fmtTime(s.last_sync_at))}</span></div></div>${s.last_error?`<div class="source-error">${esc(s.last_error)}</div>`:''}<div class="table-wrap"><table><thead><tr><th>标识</th><th>Key</th>${sortHead('分组','group') }<th>平台</th>${sortHead('倍率','rate',true)}<th>本地规则</th><th>状态</th></tr></thead><tbody>${keyRows(s.keys||[])}</tbody></table></div></section>`).join('')+'</div>'}
 function renderGroups(){const missing=groupCatalog.filter(g=>g.key_count===0).length;$('groupSummary').textContent=`${groupCatalog.length} 个分组，${missing} 个缺少 Key`;$('groupTable').innerHTML=groupCatalog.length?`<table><thead><tr><th style="width:44px"></th><th>分组</th><th>平台</th><th class="num">倍率</th><th class="num">Key</th><th class="num">有效</th></tr></thead><tbody>${groupCatalog.map(g=>`<tr><td><input type="checkbox" data-group-id="${esc(g.id)}" data-missing="${g.key_count===0?'1':'0'}" aria-label="选择 ${esc(g.name)}"></td><td><strong>${esc(g.name)}</strong>${g.key_count===0?' <span class="pill warn">缺失</span>':''}</td><td>${esc(g.platform||'-')}</td><td class="num">${esc(g.rate_multiplier||'-')}</td><td class="num">${g.key_count}</td><td class="num">${g.active_key_count}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">没有可用分组</div>'}
 function renderMapping(){const table=$('mappingTable');table.innerHTML=groupCatalog.length?`<table><thead><tr><th>分组</th><th>平台</th><th class="num">倍率</th><th>模型匹配</th><th>路径匹配</th></tr></thead><tbody>${groupCatalog.map(g=>`<tr><td><strong>${esc(g.name)}</strong></td><td>${esc(g.platform||'-')}</td><td class="num">${esc(g.rate_multiplier||'-')}</td><td><input class="rule-input" data-rule-models="${esc(g.id)}" value="${esc((g.models||[]).join('; '))}" placeholder="例如 image2-*"></td><td><input class="rule-input" data-rule-paths="${esc(g.id)}" value="${esc((g.paths||[]).join('; '))}" placeholder="例如 v1/images/*"></td></tr>`).join('')}</tbody></table>`:'<div class="empty">没有可用分组</div>'}
 async function openGroups(sourceId){activeSource=sourceId;groupCatalog=[];$('groupModal').classList.add('open');$('groupTable').innerHTML='<div class="empty">正在载入</div>';$('groupSummary').textContent='';try{const data=await api('catalog?source_id='+encodeURIComponent(sourceId));groupCatalog=data.groups||[];renderGroups()}catch(e){$('groupTable').innerHTML='<div class="empty">载入失败</div>';notice(e.message,'error')}}
@@ -85,8 +203,8 @@ async function saveInterval(){const button=$('saveInterval');const value=Number(
 async function load(){try{state=await api('status');configureForm();$('syncInterval').value=state.interval;render()}catch(e){$('content').innerHTML='<div class="empty">载入失败</div>';notice(e.message,'error')}}
 $('addSource').addEventListener('click',()=>{$('connectPanel').classList.add('open');$('baseUrl').focus()});$('cancelConnect').addEventListener('click',()=>{$('connectPanel').classList.remove('open');$('connectForm').reset();configureForm()});$('adapter').addEventListener('change',renderCredentialFields);
 $('connectForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('connectSubmit');button.disabled=true;const credentials={};document.querySelectorAll('[data-credential]').forEach(input=>credentials[input.dataset.credential]=input.value);try{state=await api('connect',{method:'POST',body:JSON.stringify({adapter:$('adapter').value,base_url:$('baseUrl').value,provider:$('provider').value,credentials})});$('connectPanel').classList.remove('open');$('connectForm').reset();configureForm();render();notice('上游已连接并同步')}catch(err){notice(err.message,'error')}finally{button.disabled=false}});
-$('syncAll').addEventListener('click',async()=>{const button=$('syncAll');button.disabled=true;try{state=await api('sync',{method:'POST',body:'{}'});render();notice('同步完成')}catch(e){notice(e.message,'error');await load()}finally{button.disabled=false}});
-$('content').addEventListener('click',async e=>{const button=e.target.closest('button[data-action]');if(!button)return;const action=button.dataset.action;if(action==='groups'){openGroups(button.dataset.id);return}if(action==='mapping'){openMapping(button.dataset.id);return}if(action==='reconnect'){reconnectSource(button.dataset.id);return}if(action==='fill-missing'){button.disabled=true;activeSource=button.dataset.id;await openGroups(activeSource);await createKeys(true);button.disabled=false;return}button.disabled=true;try{state=await api(action,{method:'POST',body:JSON.stringify({source_id:button.dataset.id})});await load();notice(action==='sync'?'同步完成':'连接已断开')}catch(err){notice(err.message,'error');button.disabled=false}});
+$('syncAll').addEventListener('click',async()=>{const button=$('syncAll');button.disabled=true;try{state=await api('sync',{method:'POST',body:'{}'});render();notice('全部同步完成')}catch(e){notice(e.message,'error');await load()}finally{button.disabled=false}});
+$('content').addEventListener('click',async e=>{const button=e.target.closest('button[data-action]');if(!button)return;const action=button.dataset.action;if(action==='groups'){openGroups(button.dataset.id);return}if(action==='mapping'){openMapping(button.dataset.id);return}if(action==='reconnect'){reconnectSource(button.dataset.id);return}button.disabled=true;try{state=await api(action,{method:'POST',body:JSON.stringify({source_id:button.dataset.id})});await load();notice(action==='sync'?'同步完成':'连接已断开')}catch(err){notice(err.message,'error');button.disabled=false}});
 $('saveInterval').addEventListener('click',saveInterval);
 $('saveGroupRules').addEventListener('click',saveGroupRules);
 $('content').addEventListener('click',e=>{const head=e.target.closest('button[data-sort]');if(!head)return;const mode=head.dataset.sort;if(keySortMode===mode)keySortDirection*=-1;else{keySortMode=mode;keySortDirection=1}render()});
