@@ -230,6 +230,32 @@ KEY_POOLS = build_key_pools()
 _AUTH_STRIP_HEADERS = {"authorization", settings.key_auth_header}
 
 
+def replace_key_pool(url: str, replacement: KeyPool, pools=None):
+    """Replace one live pool while retaining health state for unchanged keys."""
+    pools = KEY_POOLS if pools is None else pools
+    url = url.rstrip("/")
+    previous = pools.get(url)
+    if previous is not None:
+        old_entries = {entry.key: entry for entry in previous.entries}
+        runtime_fields = (
+            "cooldown_until", "total_fail", "last_fail_ts", "consecutive_failures",
+            "last_failure_kind", "last_failure_status", "last_cooldown_s",
+        )
+        for entry in replacement.entries:
+            old = old_entries.get(entry.key)
+            if old is None:
+                continue
+            for field in runtime_fields:
+                setattr(entry, field, getattr(old, field))
+        if previous._current is not None:
+            replacement._current = next(
+                (entry for entry in replacement.entries if entry.key == previous._current.key), None
+            )
+            if replacement._current is not None:
+                replacement._sticky_until = previous._sticky_until
+    pools[url] = replacement
+
+
 def headers_with_key(base_headers: dict, key: Optional[str]) -> dict:
     headers = {k: v for k, v in base_headers.items() if k.lower() not in _AUTH_STRIP_HEADERS}
     if key: headers[settings.key_auth_header] = f"{settings.key_auth_scheme} {key}" if settings.key_auth_scheme else key

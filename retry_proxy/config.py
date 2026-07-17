@@ -153,6 +153,15 @@ class Settings:
     key_sticky: float = float(os.getenv("KEY_STICKY", "120"))
     key_auth_header: str = os.getenv("KEY_AUTH_HEADER", "authorization").lower()
     key_auth_scheme: str = os.getenv("KEY_AUTH_SCHEME", "Bearer")
+    key_pool_sync_default_adapter: str = os.getenv("KEY_POOL_SYNC_DEFAULT_ADAPTER", "sub2api").strip().lower()
+    key_pool_sync_default_url: str = os.getenv(
+        "KEY_POOL_SYNC_URL", os.getenv("UPSTREAM_URL", "")
+    ).strip().rstrip("/")
+    key_pool_sync_interval: int = int(os.getenv("KEY_POOL_SYNC_INTERVAL", "300"))
+    key_pool_create_delay: float = float(os.getenv("KEY_POOL_CREATE_DELAY", "1.5"))
+    key_pool_sync_state_file: str = os.getenv("KEY_POOL_SYNC_STATE_FILE", "").strip() or os.path.join(
+        os.getenv("LOG_DIR", "logs"), ".key_pool_sync.json"
+    )
     dlp_mode: str = os.getenv("DLP_MODE", "off").lower()
     dlp_rules: frozenset = frozenset(x.strip() for x in os.getenv("DLP_RULES", "private_key,ai_tokens,code_tokens,cloud_tokens,saas_tokens,package_tokens,credentials,csv_credentials,jwt,connection_string,id_card,bank_card,structured_secret").split(",") if x.strip())
     dlp_rule_file: str = os.getenv("DLP_RULE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "dlp_rules.yaml"))
@@ -168,6 +177,10 @@ class Settings:
     @property
     def logs_html_path(self):
         return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs.html")
+
+    @property
+    def key_pool_html_path(self):
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "key_pool.html")
 
     @property
     def summary_file(self):
@@ -192,7 +205,7 @@ def require_admin(request: Request):
     cookie_ok = bool(session and secrets.compare_digest(session, admin_session_value()))
     if bearer_ok or cookie_ok:
         return
-    if request.url.path in ("/stats", "/logs"):
+    if request.url.path in ("/stats", "/logs", "/admin/key-pools"):
         raise HTTPException(status_code=303, headers={"Location": f"/admin/login?next={request.url.path}"})
     raise HTTPException(status_code=401, detail="invalid_admin_credentials",
                         headers={"WWW-Authenticate": "Bearer"})

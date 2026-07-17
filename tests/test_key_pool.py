@@ -2,12 +2,34 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from retry_proxy.key_pool import KeyEntry, KeyPool
+from retry_proxy.key_pool import KeyEntry, KeyPool, replace_key_pool
 from retry_proxy.retry import (RetryProxy, _key_available_for_status, _key_failure_policy,
                                _mark_key_failure, _pick_key, _select_key_failure_status)
 
 
 class KeyPoolStickyTests(unittest.TestCase):
+    def test_live_replacement_preserves_runtime_health_for_unchanged_keys(self):
+        previous = KeyPool([("same", "old"), ("removed", "removed")])
+        previous.entries[0].cooldown_until = 500
+        previous.entries[0].total_fail = 4
+        previous.entries[0].consecutive_failures = 2
+        previous.entries[0].last_failure_status = 429
+        previous._current = previous.entries[0]
+        previous._sticky_until = 300
+        pools = {"https://upstream.test": previous}
+
+        replacement = KeyPool([("same", "new"), ("added", "added")])
+        replace_key_pool("https://upstream.test/", replacement, pools)
+
+        current = pools["https://upstream.test"]
+        self.assertEqual(current.entries[0].label, "new")
+        self.assertEqual(current.entries[0].cooldown_until, 500)
+        self.assertEqual(current.entries[0].total_fail, 4)
+        self.assertEqual(current.entries[0].consecutive_failures, 2)
+        self.assertEqual(current.entries[0].last_failure_status, 429)
+        self.assertIs(current._current, current.entries[0])
+        self.assertEqual(current._sticky_until, 300)
+
     def test_sort_orders_entries_numerically_and_formats_log_id(self):
         pool = KeyPool([])
         pool.entries = [

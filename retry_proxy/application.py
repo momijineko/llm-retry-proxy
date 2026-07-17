@@ -7,10 +7,12 @@ from contextlib import asynccontextmanager
 from urllib.parse import parse_qs
 
 import httpx
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .api import create_handlers
+from .pool_sync import PoolSyncManager
+from .sync_adapters import PoolSyncError
 from .config import admin_session_value, log_capture, logger, require_admin, settings
 from .dlp import load_policy
 from .key_pool import KEY_POOLS
@@ -23,6 +25,7 @@ if sys.platform == "win32":
 
 store = RetryLogStore()
 client = None
+pool_sync = PoolSyncManager(KEY_POOLS)
 
 
 def _log_startup():
@@ -76,15 +79,20 @@ async def lifespan(_app):
         if settings.dlp_max_body_bytes <= 0:
             raise ValueError("DLP_MAX_BODY_BYTES 必须大于 0")
     store.initialize()
+    pool_sync.load_state()
     client = httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout, connect=settings.connect_timeout),
                                limits=httpx.Limits(max_connections=200, max_keepalive_connections=50), trust_env=settings.trust_env)
     service.client = client
+    pool_sync.client = client
     app.state.retry_proxy = service
+    app.state.pool_sync = pool_sync
     log_capture.set_loop(asyncio.get_event_loop())
     _log_startup()
+    await pool_sync.start()
     try:
         yield
     finally:
+        await pool_sync.stop()
         await client.aclose()
         if store.summary_cache:
             store._save()
@@ -96,7 +104,7 @@ health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy = cre
 
 
 def _login_page(next_path="/stats", failed=False):
-    next_path = next_path if next_path in ("/stats", "/logs") else "/stats"
+    next_path = next_path if next_path in ("/stats", "/logs", "/admin/key-pools") else "/stats"
     error = '<p class="error">密码不正确</p>' if failed else ""
     disabled = "" if settings.admin_password else "disabled"
     message = "" if settings.admin_password else '<p class="error">管理员密码尚未配置</p>'
@@ -113,7 +121,7 @@ async def admin_login(request: Request):
     values = parse_qs((await request.body()).decode("utf-8", errors="replace"))
     password = values.get("password", [""])[0]
     next_path = values.get("next", ["/stats"])[0]
-    next_path = next_path if next_path in ("/stats", "/logs") else "/stats"
+    next_path = next_path if next_path in ("/stats", "/logs", "/admin/key-pools") else "/stats"
     if not settings.admin_password or not secrets.compare_digest(password, settings.admin_password):
         return _login_page(next_path, failed=True)
     response = RedirectResponse(next_path, status_code=303)
@@ -128,11 +136,113 @@ async def admin_logout():
     return response
 
 
+async def key_pools_page():
+    path = settings.key_pool_html_path
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    return HTMLResponse("key_pool.html not found", status_code=404)
+
+
+async def key_pools_status():
+    return pool_sync.status()
+
+
+async def _json_object(request, allow_empty=False):
+    try:
+        body = await request.json()
+    except ValueError:
+        if allow_empty:
+            return {}
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+    return body
+
+
+async def key_pools_connect(request: Request):
+    try:
+        body = await _json_object(request)
+        credentials = body.get("credentials") or {
+            "email": body.get("email"), "password": body.get("password"),
+        }
+        return await pool_sync.connect(
+            body.get("adapter"), body.get("base_url"), body.get("provider"), credentials,
+        )
+    except (ValueError, TypeError, PoolSyncError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def key_pools_sync(request: Request):
+    try:
+        body = await _json_object(request, allow_empty=True)
+        return await pool_sync.sync_now(body.get("source_id"))
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def key_pools_disconnect(request: Request):
+    try:
+        body = await _json_object(request)
+        return await pool_sync.disconnect(body.get("source_id"))
+    except (ValueError, TypeError, PoolSyncError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def key_pools_catalog(source_id: str):
+    try:
+        return await pool_sync.catalog(source_id)
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def key_pools_create_keys(request: Request):
+    try:
+        body = await _json_object(request)
+        group_ids = body.get("group_ids") or []
+        if not isinstance(group_ids, list):
+            raise HTTPException(status_code=400, detail="group_ids 必须是数组")
+        return await pool_sync.create_keys(
+            body.get("source_id"), group_ids, body.get("only_missing", False),
+            {"name_prefix": body.get("name_prefix", "")},
+        )
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def key_pools_clear_keys(request: Request):
+    try:
+        body = await _json_object(request)
+        group_ids = body.get("group_ids") or []
+        if not isinstance(group_ids, list) or not group_ids:
+            raise HTTPException(status_code=400, detail="group_ids 必须是非空数组")
+        return await pool_sync.clear_keys(body.get("source_id"), group_ids)
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def key_pools_settings(request: Request):
+    try:
+        body = await _json_object(request)
+        return await pool_sync.set_interval(body.get("interval"))
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 app.add_api_route("/health", health, methods=["GET"])
 app.add_api_route("/admin/login", admin_login_page, methods=["GET"])
 app.add_api_route("/admin/login", admin_login, methods=["POST"])
 app.add_api_route("/admin/logout", admin_logout, methods=["POST"])
 admin_dependencies = [Depends(require_admin)]
+app.add_api_route("/admin/key-pools", key_pools_page, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/status", key_pools_status, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/connect", key_pools_connect, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/sync", key_pools_sync, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/disconnect", key_pools_disconnect, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/catalog", key_pools_catalog, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/create-keys", key_pools_create_keys, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/clear-keys", key_pools_clear_keys, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/settings", key_pools_settings, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/stats", stats_page, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/stats/api", stats_api, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/logs", logs_page, methods=["GET"], dependencies=admin_dependencies)

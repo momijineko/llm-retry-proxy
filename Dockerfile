@@ -14,5 +14,6 @@ COPY main.py ./
 COPY retry_proxy ./retry_proxy
 COPY stats.html ./
 COPY logs.html ./
+COPY key_pool.html ./
 
 CMD ["python", "main.py"]

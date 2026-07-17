@@ -241,6 +241,36 @@ KEY_AUTH_HEADER=x-api-key
 KEY_AUTH_SCHEME=           # 空值，直接放裸 key，不加 Bearer 前缀
 ```
 
+### 网站同步号池
+
+配置 `ADMIN_PASSWORD` 后访问 `/admin/key-pools`，可添加一个或多个上游连接。每个连接使用统一配置：
+
+| 字段 | 说明 |
+|---|---|
+| `adapter` | 上游类型；当前内置 `sub2api` |
+| `base_url` | 上游站点地址，例如 `https://aihub.top` |
+| `provider` | 本地日志与统计使用的供应商标签 |
+| `credentials` | 由适配器声明的认证字段；不会通过状态接口返回 |
+
+`sub2api` 适配器使用邮箱密码完成首次登录，随后仅保存刷新令牌，密码不会落盘。它同步完整 Key、Key 名称、分组名称、启用状态、默认倍率及用户专属倍率。已有 Key 的 `models`、`paths` 规则和运行时熔断状态会在热更新时保留。
+
+同步成功后新请求立即使用新号池，无需重启。连接状态与最后一次成功配置写入 `KEY_POOL_SYNC_STATE_FILE`，默认位于 `LOG_DIR/.key_pool_sync.json` 且权限为 `0600`；上游暂时不可用时继续使用最后一次成功配置。断开连接只清除本地登录会话，不删除上游 Key；管理页可对断开的连接重新登录。统计、日志、号池页面共用登录后的顶部导航。
+
+分组目录支持多选创建 Key、一键补齐缺失分组，以及选择分组清空远程 Key（操作前会二次确认）。新建 Key 默认直接使用分组名；适配器仍可通过显式 `name_prefix` 选项覆盖。Key 列表支持按分组或倍率排序，排序只影响展示。
+
+通用调度配置：
+
+```env
+KEY_POOL_SYNC_DEFAULT_ADAPTER=sub2api
+KEY_POOL_SYNC_URL=https://aihub.top
+KEY_POOL_SYNC_INTERVAL=300
+# 创建/补齐 Key 时相邻请求的间隔（秒）
+KEY_POOL_CREATE_DELAY=1.5
+# KEY_POOL_SYNC_STATE_FILE=/app/logs/.key_pool_sync.json
+```
+
+新增其它中转适配时，实现 `PoolSyncAdapter` 的认证与标准化接口，并在 `retry_proxy/sync_adapters/__init__.py` 注册即可；管理 API、持久化、定时任务和热替换逻辑不需要修改。
+
 ## 重试行为说明
 
 - 仅当上游返回 `RETRY_STATUS_CODES` 中的状态码时重试；其它状态码（含 200、400、401 等）原样透传。开启 `RETRY_BROAD=on` 后，触发条件改为规则：5xx + 429 + 401/403 + 网络异常均重试+换key，无需维护状态码白名单。

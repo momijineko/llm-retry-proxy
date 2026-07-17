@@ -10,7 +10,7 @@ services:
       - .env
     environment:
       LISTEN_HOST: 0.0.0.0
-      KEY_POOL_FILE: /app/key_pool.csv
+      KEY_POOL_FILE: "${KEY_POOL_FILE-/app/key_pool.csv}"
       LOG_DIR: /app/logs
       TZ: "${TZ:-Asia/Shanghai}"
     ports:

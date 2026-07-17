@@ -67,6 +67,10 @@
     gap: 10px;
     flex-shrink: 0;
   }
+  .app-nav { display:flex; align-items:center; gap:4px; margin-left:12px; }
+  .app-nav a { color:var(--text-dim); text-decoration:none; padding:7px 10px; border-radius:6px; font-size:13px; font-weight:500; }
+  .app-nav a:hover { background:var(--bg-elevated); color:var(--text-bright); }
+  .app-nav a.active { background:rgba(99,102,241,.16); color:#a5b4fc; }
 
   header .logo {
     width: 30px;
@@ -448,6 +452,7 @@
         </span>
       </div>
     </div>
+    <nav class="app-nav" aria-label="主导航"><a href="/stats">统计</a><a class="active" href="/logs">日志</a><a href="/admin/key-pools">号池</a></nav>
     <div class="spacer"></div>
     <div class="toolbar">
       <div class="toolbar-group">
