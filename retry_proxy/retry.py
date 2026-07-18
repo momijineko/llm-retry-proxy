@@ -409,12 +409,11 @@ class RetryProxy:
                 if kind == "error":
                     _record_key_attempt(key_attempts, entry, None if is_host_level_error(result) else False)
                     last_status = 0; retry_codes.append(0)
-                    self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt}({now - t0:.1f}s) {result!r} 立即补发")
+                    self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt}({now - t0:.1f}s) {result!r} 等待间隔后补发")
+                    next_allowed = max(next_allowed, now + self.config.retry_interval)
                     if not is_host_level_error(result):
                         _mark_key_failure(pool, entry, self.config, 0)
                         if pool and not pool.has_fresh(): next_allowed = max(next_allowed, now + pool.next_available_in())
-                    if can_fire(now):
-                        total_sent += 1; new_task = _spawn(send(total_sent)); in_flight[new_task] = now; all_tasks.add(new_task)
                 elif _should_retry(result.status_code):
                     _record_key_attempt(key_attempts, entry, False)
                     last_status = result.status_code; retry_codes.append(result.status_code)
@@ -428,11 +427,13 @@ class RetryProxy:
                     else:
                         cother += 1; c429 = 0
                         if self.config.retry_backoff:
-                            wait, _ = calc_backoff_wait(cother, self.config.retry_interval, self.config.retry_backoff_max, True); next_allowed = max(next_allowed, now + wait)
-                            self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(result.status_code)} #{attempt} {wait:.1f}s 在飞{len(in_flight)} {now - t0:.1f}s")
-                        elif can_fire(now):
-                            total_sent += 1; new_task = _spawn(send(total_sent)); in_flight[new_task] = now; all_tasks.add(new_task)
-                            self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(result.status_code)} #{attempt} 立即补发 在飞{len(in_flight)} {now - t0:.1f}s")
+                            wait, _ = calc_backoff_wait(cother, self.config.retry_interval, self.config.retry_backoff_max, True)
+                            wait = max(wait, self.config.retry_interval)
+                            next_allowed = max(next_allowed, now + wait)
+                            self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(result.status_code)} #{attempt} {wait:.2f}s 在飞{len(in_flight)} {now - t0:.1f}s")
+                        else:
+                            next_allowed = max(next_allowed, now + self.config.retry_interval)
+                            self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(result.status_code)} #{attempt} {self.config.retry_interval:.2f}s后补发 在飞{len(in_flight)} {now - t0:.1f}s")
                     try: await result.aread()
                     except Exception: pass
                     await result.aclose()

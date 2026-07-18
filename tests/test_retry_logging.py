@@ -1,8 +1,11 @@
 import asyncio
 import logging
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+
+import httpx
 
 from retry_proxy.config import log_capture, logger
 from retry_proxy.retry import RetryProxy
@@ -56,6 +59,33 @@ class RetryLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.response)
         self.assertEqual(result.total_sent, 1)
         self.assertIn("within 0.0s", result.failure_reason)
+
+    async def test_stagger_retries_are_spacing_gated_after_503(self):
+        config = SimpleNamespace(
+            hedge_mode="stagger", max_concurrent=10, max_retries=3,
+            retry_interval=0.03, retry_interval_429=0.05,
+            retry_backoff=False, retry_backoff_max=60,
+            retry_backoff_429=True, retry_backoff_max_429=60,
+        )
+        proxy = RetryProxy(config=config, client=object())
+        sent_at = []
+
+        async def send(*_args):
+            sent_at.append(time.monotonic())
+            return httpx.Response(
+                503, json={"error": {"message": "temporarily unavailable"}},
+                request=httpx.Request("POST", "https://upstream.test"),
+            )
+
+        proxy._send = send
+        result = await proxy.request(
+            "POST", "https://upstream.test", {}, b"{}",
+            "v1/chat", "test", "model",
+        )
+
+        self.assertIsNone(result.response)
+        self.assertEqual(len(sent_at), 3)
+        self.assertGreaterEqual(min(b - a for a, b in zip(sent_at, sent_at[1:])), 0.02)
 
 
 if __name__ == "__main__":

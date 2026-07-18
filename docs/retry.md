@@ -22,7 +22,7 @@
 
 **`HEDGE_MODE=race`（请求竞速）**：每轮一次性发 `MAX_CONCURRENT` 个请求，第一个返回 200 的胜出，其余立即取消。全部失败则等待间隔后下一轮。简单粗暴，最快命中，但对上游压力最大。
 
-**`HEDGE_MODE=stagger`（滚动竞速）**：按 `RETRY_INTERVAL` 间隔交错发请求，不一次性全打满。任意一个返回 200 → 立即取消所有在飞请求。某个返回 503（非429）→ 立即补发一个新请求（`RETRY_BACKOFF=true` 时改为按指数退避延迟补发）。429 → 按 `RETRY_INTERVAL_429` 或 `Retry-After` 退避。`MAX_CONCURRENT` 限制同时在飞的上限。
+**`HEDGE_MODE=stagger`（滚动竞速）**：按 `RETRY_INTERVAL` 间隔交错发请求，不一次性全打满。任意一个返回 200 → 立即取消所有在飞请求。某个请求失败后，补发也必须经过同一个间隔门控，每次最多补发一个；非429错误默认等待 `RETRY_INTERVAL`，`RETRY_BACKOFF=true` 时按指数退避，429 按 `RETRY_INTERVAL_429` 或 `Retry-After` 退避。`MAX_CONCURRENT` 限制同时在飞的上限。
 
 | 特性 | `off` | `race` | `stagger` |
 |---|---|---|---|
