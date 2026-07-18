@@ -186,6 +186,42 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.status()["sources"][0]["route_prefix"], "/custom")
         self.assertEqual(restored_registry.match("custom/v1/models")[0], "https://upstream.test")
 
+    async def test_delete_removes_pool_source_managed_route_and_persisted_state(self):
+        route_config = SimpleNamespace(
+            extra_upstreams="", upstream_url="https://default.test", provider="default",
+        )
+        registry = RouteRegistry(route_config)
+        client = FakeClient()
+        pools = {}
+        manager = PoolSyncManager(
+            pools, self.config, client, {"sub2api": Sub2APIAdapter()}, registry,
+        )
+        status = await manager.connect(
+            "sub2api", "https://upstream.test", "custom-provider",
+            {"email": "user@example.com", "password": "secret"}, "/custom",
+        )
+        source_id = status["sources"][0]["id"]
+        manager.operations[source_id] = {"kind": "create", "running": False}
+
+        status = await manager.delete(source_id)
+
+        self.assertEqual(status["sources"], [])
+        self.assertNotIn("https://upstream.test", pools)
+        self.assertNotIn(source_id, manager.operations)
+        self.assertEqual(registry.match("custom/v1/models")[0], "https://default.test")
+        self.assertTrue(any(call[0] == "POST" and call[1].endswith("/auth/logout")
+                            for call in client.calls))
+        with open(self.state_file, encoding="utf-8") as f:
+            persisted = json.load(f)
+        self.assertEqual(persisted["sources"], [])
+
+        restored = PoolSyncManager(
+            {}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()},
+            RouteRegistry(route_config),
+        )
+        restored.load_state()
+        self.assertEqual(restored.status()["sources"], [])
+
     async def test_managed_route_rejects_root_prefix(self):
         route_config = SimpleNamespace(
             extra_upstreams="", upstream_url="https://default.test", provider="default",

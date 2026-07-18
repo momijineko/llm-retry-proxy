@@ -410,7 +410,7 @@ class PoolSyncManager:
             )
             return self.status()
 
-    async def disconnect(self, source_id):
+    async def delete(self, source_id):
         async with self._lock:
             source = self.sources.get(source_id)
             if source is None:
@@ -419,14 +419,24 @@ class PoolSyncManager:
             try:
                 await adapter.disconnect(self.client, source, source.get("session") or {})
             except Exception as exc:
-                logger.warning(f"上游会话撤销失败，已清除本地连接: {exc}")
-            source["session"] = {}
-            source["last_error"] = ""
+                logger.warning(f"上游会话撤销失败，继续删除本地号池: {exc}")
+            self.sources.pop(source_id, None)
+            self.operations.pop(source_id, None)
+            self.pools.pop(source["base_url"], None)
+            if self.route_registry is not None:
+                self.route_registry.unregister(source_id)
             self._save_state()
             result = self.status()
+            logger.info(
+                f"号池已删除: adapter={source['adapter']} upstream={source['base_url']}"
+            )
         if not self._has_connected_sources():
             await self.stop()
         return result
+
+    async def disconnect(self, source_id):
+        """Backward-compatible name for deleting a managed pool."""
+        return await self.delete(source_id)
 
     def status(self, source_id=None):
         selected = [self.sources[source_id]] if source_id in self.sources else list(self.sources.values())
