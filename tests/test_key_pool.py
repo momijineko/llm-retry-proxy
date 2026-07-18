@@ -216,6 +216,13 @@ class KeyPoolStickyTests(unittest.TestCase):
 
 
 class KeyPoolCooldownWaitTests(unittest.IsolatedAsyncioTestCase):
+    def test_pool_requests_always_use_serial_hedge_mode(self):
+        config = SimpleNamespace(hedge_mode="stagger")
+        proxy = RetryProxy(config=config, client=object())
+
+        self.assertEqual(proxy.hedge_mode_for(None), "stagger")
+        self.assertEqual(proxy.hedge_mode_for(KeyPool([("key", "key")])), "off")
+
     async def test_pick_waits_instead_of_bypassing_an_open_circuit(self):
         pool = KeyPool([("key", "key")])
         entry = pool.entries[0]
@@ -289,23 +296,29 @@ class KeyPoolCooldownWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("wait limit 0.5s", result.failure_reason)
         sleep.assert_awaited_once_with(0.5)
 
-    async def test_race_exhaustion_still_opens_key_circuit(self):
-        pool = KeyPool([("key", "key")])
+    async def test_global_race_mode_still_uses_serial_pool_circuit(self):
+        pool = KeyPool([("key", "key"), ("backup", "backup")])
         config = SimpleNamespace(
             hedge_mode="race", max_concurrent=1, max_retries=1,
+            retry_interval=1, retry_interval_429=5,
+            retry_backoff=False, retry_backoff_max=60,
+            retry_backoff_429=True, retry_backoff_max_429=60,
             key_cooldown=30, key_cooldown_5xx=30, key_cooldown_429=60,
             key_cooldown_auth=1800, key_cooldown_max=3600, key_cooldown_backoff=True,
         )
-        response = SimpleNamespace(status_code=503, headers={})
-        response.aread = AsyncMock(return_value=b"")
-        response.aclose = AsyncMock()
+        response = httpx.Response(
+            503, json={"error": {"message": "temporarily unavailable"}},
+            request=httpx.Request("POST", "https://upstream.test"),
+        )
         proxy = RetryProxy(config=config, client=object())
         proxy._send = AsyncMock(return_value=response)
 
-        result = await proxy.request("POST", "https://upstream.test", {}, b"{}",
-                                     "v1/chat", "test", "model", pool)
+        with patch("retry_proxy.retry.asyncio.sleep", new_callable=AsyncMock):
+            result = await proxy.request("POST", "https://upstream.test", {}, b"{}",
+                                         "v1/chat", "test", "model", pool)
 
         self.assertIsNone(result.response)
+        self.assertEqual(proxy._send.await_count, 1)
         self.assertTrue(pool.entries[0].cooldown_until > 0)
         self.assertEqual(pool.entries[0].last_failure_status, 503)
 

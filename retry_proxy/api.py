@@ -282,7 +282,7 @@ def create_handlers(service, store):
                            "upstream_status": last_status, "final_status": response.status_code if response else 503,
                            "attempts": total_sent, "retries": max(total_sent - 1, 0),
                            "duration_s": round(time.time() - start, 3), "succeeded": bool(response and response.status_code < 400),
-                           "retry_codes": retry_codes, "mode": settings.hedge_mode, "first_ok": first_ok,
+                           "retry_codes": retry_codes, "mode": service.hedge_mode_for(request_pool), "first_ok": first_ok,
                            "key_id": key_id, "key_pool": key_pool, "key_attempts": key_attempts,
                            "client_ip": client_ip})
         if response is None:

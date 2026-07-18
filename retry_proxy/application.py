@@ -38,11 +38,13 @@ def _log_startup():
         else:
             logger.info(f"  路由: /* -> {upstream_url}  (provider={provider}, 默认{pool_tag})")
     retry_desc = "无限" if settings.max_retries <= 0 else str(settings.max_retries)
-    mode_desc = {"off": "串行重试", "race": "请求竞速(一次并发)", "stagger": "滚动竞速(交错补发)"}.get(settings.hedge_mode, settings.hedge_mode)
+    mode_desc = {"off": "串行重试", "race": "请求竞速(一次并发)", "stagger": "滚动竞速(交错补发)"}
     backoff_429 = f"指数退避(上限{settings.retry_backoff_max_429:.0f}s)" if settings.retry_backoff_429 else "固定间隔"
     backoff = f"指数退避(上限{settings.retry_backoff_max:.0f}s)" if settings.retry_backoff else "固定间隔"
     logger.info(f"重试: 间隔={settings.retry_interval}s+{backoff}, 429={settings.retry_interval_429}s+{backoff_429}(优先Retry-After), 最大次数={retry_desc}, 状态码={sorted(settings.retry_status_codes)}, 宽松={'开(5xx/429/401/403)' if settings.retry_broad else '关'}")
-    logger.info(f"模式: {mode_desc}" + (f", 最大并发={settings.max_concurrent}" if settings.hedge_mode != "off" else ""))
+    default_mode = mode_desc.get(settings.hedge_mode, settings.hedge_mode)
+    concurrency = f", 最大并发={settings.max_concurrent}" if settings.hedge_mode != "off" else ""
+    logger.info(f"模式: 普通请求={default_mode}, 号池请求=串行重试{concurrency}")
     logger.info(f"记录: provider={settings.provider}, 日志目录={settings.log_dir}, 保留{settings.log_retention_days}天")
     logger.info(f"DLP: 模式={settings.dlp_mode}, 规则={','.join(sorted(settings.dlp_rules)) if settings.dlp_rules else '无'}")
     logger.info(f"代理: trust_env={'是(跟随系统代理)' if settings.trust_env else '否(直连)'}")

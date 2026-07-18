@@ -251,6 +251,12 @@ class RetryProxy:
         self.config, self.client, self.logger = config, client, logger_
         self.pools, self.log_store = pools or {}, log_store
 
+    def hedge_mode_for(self, pool=None):
+        """Use serial retry for key-pool requests because pool cooldown is per key."""
+        if pool is not None:
+            return "off"
+        return getattr(self.config, "hedge_mode", "off").lower()
+
     async def _send(self, method, url, headers, body):
         assert self.client is not None
         req = self.client.build_request(method, url, headers=headers, content=body if body else None)
@@ -487,9 +493,10 @@ class RetryProxy:
             _spawned_tasks.reset(spawned_token)
 
     async def _request(self, method, url, headers, body, path, provider, model, pool, start):
-        if model and self.config.hedge_mode == "race":
+        hedge_mode = self.hedge_mode_for(pool)
+        if model and hedge_mode == "race":
             return await self._race(method, url, headers, body, path, start, provider, model, pool)
-        if model and self.config.hedge_mode == "stagger":
+        if model and hedge_mode == "stagger":
             return await self._stagger(method, url, headers, body, path, start, provider, model, pool)
         attempt = 0; last_status = 0; retry_codes = []; key_attempts = []; c429 = cother = 0; last_key_id = ""
         while True:
