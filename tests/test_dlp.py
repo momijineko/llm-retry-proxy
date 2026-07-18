@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import tempfile
@@ -20,10 +21,10 @@ class DlpTests(unittest.TestCase):
         cls.policy = load_policy(RULE_FILE)
         cls.enabled = frozenset(name for name, rule in cls.policy.rules.items() if rule.enabled)
 
-    def inspect(self, payload, mode="redact", enabled=None, rule_file=RULE_FILE):
+    def inspect(self, payload, mode="redact", enabled=None, rule_file=RULE_FILE, **kwargs):
         return inspect_json_body(
             json.dumps(payload).encode(), enabled or self.enabled, MARKER_START, MARKER_END,
-            mode=mode, rule_file=rule_file,
+            mode=mode, rule_file=rule_file, **kwargs,
         )
 
     def test_policy_validates(self):
@@ -53,9 +54,75 @@ class DlpTests(unittest.TestCase):
 
     def test_explicit_exemption_wins(self):
         text = MARKER_START + "skipped value" + MARKER_END
-        result = self.inspect({"input": text})
+        result = self.inspect({"input": text}, allow_exemptions=True)
         self.assertEqual(result.exemptions, 1)
         self.assertEqual(json.loads(result.body)["input"], "skipped value")
+
+    def test_exemption_markers_are_scanned_when_disabled(self):
+        token = "sk-A1b2C3d4E5f6G7h8J9k0LmNoPqRsTuVx"
+        text = MARKER_START + token + MARKER_END
+        result = self.inspect({"input": text}, allow_exemptions=False)
+        self.assertEqual(result.exemptions, 0)
+        self.assertIn("ai_tokens", result.matched_rules)
+        self.assertNotIn(token, result.body.decode())
+
+    def test_encoded_secrets_are_scanned_recursively(self):
+        token = "sk-A1b2C3d4E5f6G7h8J9k0LmNoPqRsTuVx"
+        encoded = {
+            "base64": base64.b64encode(token.encode()).decode(),
+            "base64url": base64.urlsafe_b64encode(token.encode()).decode().rstrip("="),
+            "base64_twice": base64.b64encode(base64.b64encode(token.encode())).decode(),
+            "hex": token.encode().hex(),
+            "percent": "".join(f"%{byte:02X}" for byte in token.encode()),
+        }
+        for name, value in encoded.items():
+            with self.subTest(name=name):
+                result = self.inspect({"messages": [{"role": "tool", "content": value}]},
+                                      mode="block", decode_depth=2)
+                self.assertIn("encoded_secret", result.matched_rules)
+                self.assertIn("ai_tokens", result.matched_rules)
+                self.assertIn("encoded_secret", result.blocked_rules)
+
+    def test_encoded_redaction_replaces_the_original_fragment(self):
+        token = "sk-A1b2C3d4E5f6G7h8J9k0LmNoPqRsTuVx"
+        encoded = base64.b64encode(token.encode()).decode()
+        result = self.inspect({"input": f"prefix:{encoded}:suffix"}, decode_depth=1)
+        cleaned = json.loads(result.body)["input"]
+        self.assertEqual(cleaned, "prefix:[REDACTED:encoded_secret]:suffix")
+        self.assertNotIn(encoded, cleaned)
+
+    def test_known_key_pool_secret_matches_unknown_format_and_encoding(self):
+        secret = "vendor-private-value-987654321"
+        encoded = base64.b64encode(secret.encode()).decode()
+        result = self.inspect({"input": encoded}, mode="block", enabled=frozenset({"ai_tokens"}),
+                              known_secrets=(secret,), decode_depth=1)
+        self.assertIn("known_secret", result.matched_rules)
+        self.assertIn("encoded_secret", result.blocked_rules)
+
+    def test_decode_budget_stops_additional_candidates(self):
+        token = "sk-A1b2C3d4E5f6G7h8J9k0LmNoPqRsTuVx"
+        encoded = base64.b64encode(token.encode()).decode()
+        result = self.inspect({"input": f"{encoded} {encoded}"}, mode="block", decode_depth=1,
+                              decode_max_candidates=1)
+        self.assertIn("encoded_secret", result.blocked_rules)
+        self.assertTrue(result.limit_exceeded)
+
+    def test_disabled_exemptions_do_not_require_markers(self):
+        token = "sk-A1b2C3d4E5f6G7h8J9k0LmNoPqRsTuVx"
+        result = inspect_json_body(
+            json.dumps({"input": token}).encode(), self.enabled, "", "",
+            mode="block", rule_file=RULE_FILE, allow_exemptions=False,
+        )
+        self.assertFalse(result.malformed_exemption)
+        self.assertIn("ai_tokens", result.blocked_rules)
+
+    def test_non_json_body_is_marked_uninspectable(self):
+        result = inspect_json_body(
+            b"plain text", self.enabled, MARKER_START, MARKER_END,
+            mode="block", rule_file=RULE_FILE,
+        )
+        self.assertTrue(result.uninspectable)
+        self.assertEqual(result.body, b"plain text")
 
     def test_entropy_and_allowlist_reduce_false_positives(self):
         prefix = "".join(chr(code) for code in (115, 107, 45))

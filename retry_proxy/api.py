@@ -84,6 +84,10 @@ def _request_ip(request):
     return request.client.host if request.client else ""
 
 
+def _key_pool_secrets():
+    return tuple(entry.key for pool in KEY_POOLS.values() for entry in pool.entries)
+
+
 def create_handlers(service, store):
     async def health():
         return {"status": "ok"}
@@ -199,7 +203,26 @@ def create_handlers(service, store):
                 dlp = inspect_json_body(body, settings.dlp_rules, settings.dlp_exempt_start,
                                         settings.dlp_exempt_end, settings.dlp_strip_exempt_markers,
                                         mode=settings.dlp_mode,
-                                        rule_file=settings.dlp_rule_file)
+                                        rule_file=settings.dlp_rule_file,
+                                        allow_exemptions=settings.dlp_allow_exemptions,
+                                        decode_depth=settings.dlp_decode_depth,
+                                        decode_max_candidates=settings.dlp_decode_max_candidates,
+                                        decode_max_bytes=settings.dlp_decode_max_bytes,
+                                        known_secrets=_key_pool_secrets(),
+                                        known_secret_min_length=settings.dlp_known_secret_min_length)
+                if dlp.uninspectable and settings.dlp_fail_closed and body:
+                    logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP无法解析请求正文")
+                    return Response(
+                        '{"error":{"type":"dlp_uninspectable_body","message":"Request body cannot be inspected by DLP"}}',
+                        status_code=422, media_type="application/json",
+                    )
+                if dlp.limit_exceeded:
+                    logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP解码扫描超限")
+                    if settings.dlp_mode in ("block", "redact"):
+                        return Response(
+                            '{"error":{"type":"dlp_decode_limit_exceeded","message":"Request body exceeds DLP decode inspection limits"}}',
+                            status_code=413, media_type="application/json",
+                        )
                 if dlp.malformed_exemption:
                     logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免标记不完整")
                     if settings.dlp_mode in ("block", "redact"):

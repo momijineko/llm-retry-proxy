@@ -73,11 +73,20 @@ async def lifespan(_app):
         unknown_rules = settings.dlp_rules - (policy.rules.keys() | {"structured_secret"})
         if unknown_rules:
             raise ValueError(f"DLP_RULES 包含未知规则: {','.join(sorted(unknown_rules))}")
-        if (not settings.dlp_exempt_start or not settings.dlp_exempt_end
-                or settings.dlp_exempt_start == settings.dlp_exempt_end):
+        if (settings.dlp_allow_exemptions
+                and (not settings.dlp_exempt_start or not settings.dlp_exempt_end
+                     or settings.dlp_exempt_start == settings.dlp_exempt_end)):
             raise ValueError("DLP 豁免起止标记不能为空或相同")
         if settings.dlp_max_body_bytes <= 0:
             raise ValueError("DLP_MAX_BODY_BYTES 必须大于 0")
+        if settings.dlp_decode_depth < 0 or settings.dlp_decode_depth > 8:
+            raise ValueError("DLP_DECODE_DEPTH 必须在 0 到 8 之间")
+        if settings.dlp_decode_depth and settings.dlp_decode_max_candidates <= 0:
+            raise ValueError("DLP_DECODE_MAX_CANDIDATES 必须大于 0")
+        if settings.dlp_decode_depth and settings.dlp_decode_max_bytes <= 0:
+            raise ValueError("DLP_DECODE_MAX_BYTES 必须大于 0")
+        if settings.dlp_known_secret_min_length <= 0:
+            raise ValueError("DLP_KNOWN_SECRET_MIN_LENGTH 必须大于 0")
     store.initialize()
     pool_sync.load_state()
     client = httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout, connect=settings.connect_timeout),

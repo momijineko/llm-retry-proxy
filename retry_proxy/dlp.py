@@ -1,9 +1,12 @@
+import base64
+import binascii
 import json
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
+from urllib.parse import unquote_to_bytes
 
 import yaml
 
@@ -16,6 +19,13 @@ _ACTION_PRIORITY = {"audit": 1, "redact": 2, "block": 3}
 _VALIDATORS = {"", "cn_id_checksum", "luhn"}
 _BINARY_KEYS = {"image", "image_url", "audio", "file_data", "data", "blob"}
 _BASE64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+_BASE64_CANDIDATE = re.compile(
+    r"(?<![A-Za-z0-9_+/-])[A-Za-z0-9_+/-]{16,}={0,2}(?![A-Za-z0-9_+/-])"
+)
+_HEX_CANDIDATE = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}){16,}(?![0-9A-Fa-f])")
+_PERCENT_CANDIDATE = re.compile(
+    r"(?<![A-Za-z0-9._~%-])(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2}){16,}(?![A-Za-z0-9._~%-])"
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,15 @@ class DlpResult:
     redactions: int = 0
     blocked_rules: tuple[str, ...] = ()
     audited_rules: tuple[str, ...] = ()
+    uninspectable: bool = False
+    limit_exceeded: bool = False
+
+
+@dataclass
+class _DecodeBudget:
+    candidates: int
+    bytes: int
+    exhausted: bool = False
 
 
 def _string_list(value, field, rule_name=""):
@@ -183,7 +202,73 @@ def _candidate_valid(candidate, rule):
     return True
 
 
-def _inspect_text(value, enabled_rules, mode, policy):
+def _known_secret_pattern(known_secrets, min_length):
+    secrets = sorted(
+        {secret for secret in known_secrets if isinstance(secret, str) and len(secret) >= min_length},
+        key=len, reverse=True,
+    )
+    return re.compile("|".join(re.escape(secret) for secret in secrets)) if secrets else None
+
+
+def _decoded_text(raw):
+    try:
+        value = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not value or not all(char.isprintable() or char in "\r\n\t" for char in value):
+        return None
+    return value
+
+
+def _decode_candidates(value, budget):
+    for kind, pattern in (
+        ("hex", _HEX_CANDIDATE),
+        ("percent", _PERCENT_CANDIDATE),
+        ("base64", _BASE64_CANDIDATE),
+    ):
+        for match in pattern.finditer(value):
+            if kind == "percent" and "%" not in match.group(0):
+                continue
+            if budget.bytes <= 0:
+                budget.exhausted = True
+                return
+            start, end, candidate = match.start(), match.end(), match.group(0)
+            if kind == "base64" and _HEX_CANDIDATE.fullmatch(candidate):
+                continue
+            # Reject oversized candidates before allocating their decoded representation.
+            if len(candidate) > budget.bytes * 3 + 8:
+                budget.exhausted = True
+                return
+            try:
+                if kind == "base64":
+                    if len(candidate) % 4 == 1:
+                        continue
+                    padded = candidate + "=" * (-len(candidate) % 4)
+                    raw = base64.b64decode(padded, altchars=b"-_", validate=True)
+                elif kind == "hex":
+                    raw = bytes.fromhex(candidate)
+                else:
+                    raw = unquote_to_bytes(candidate)
+            except (binascii.Error, ValueError):
+                continue
+            if not raw:
+                continue
+            if len(raw) > budget.bytes:
+                budget.exhausted = True
+                return
+            budget.bytes -= len(raw)
+            decoded = _decoded_text(raw)
+            if decoded is None or decoded == candidate:
+                continue
+            if budget.candidates <= 0:
+                budget.exhausted = True
+                return
+            budget.candidates -= 1
+            yield start, end, decoded
+
+
+def _collect_spans(value, enabled_rules, mode, policy, known_secret_pattern,
+                   decode_depth, decode_budget):
     spans = []
     matched = set()
     blocked = set()
@@ -208,6 +293,48 @@ def _inspect_text(value, enabled_rules, mode, policy):
             count += 1
             if count >= rule.max_matches:
                 break
+
+    known_action = mode if mode in _ACTIONS else policy.default_action
+    known_rule = DlpRule("known_secret")
+    if known_secret_pattern is not None:
+        for count, match in enumerate(known_secret_pattern.finditer(value)):
+            start, end = match.span()
+            spans.append((start, end, "known_secret", known_action, known_rule))
+            matched.add("known_secret")
+            if known_action == "block":
+                blocked.add("known_secret")
+            if known_action == "audit":
+                audited.add("known_secret")
+            if count >= 99:
+                break
+
+    if decode_depth > 0:
+        encoded_rule = DlpRule("encoded_secret")
+        for start, end, decoded in _decode_candidates(value, decode_budget):
+            nested_spans, nested_matched, nested_blocked, nested_audited = _collect_spans(
+                decoded, enabled_rules, mode, policy, known_secret_pattern, decode_depth - 1,
+                decode_budget,
+            )
+            if not nested_spans:
+                continue
+            action = max((span[3] for span in nested_spans), key=_ACTION_PRIORITY.__getitem__)
+            spans.append((start, end, "encoded_secret", action, encoded_rule))
+            matched.update(nested_matched)
+            matched.add("encoded_secret")
+            blocked.update(nested_blocked)
+            audited.update(nested_audited)
+            if action == "block":
+                blocked.add("encoded_secret")
+            if action == "audit":
+                audited.add("encoded_secret")
+    return spans, matched, blocked, audited
+
+
+def _inspect_text(value, enabled_rules, mode, policy, known_secret_pattern,
+                  decode_depth, decode_budget):
+    spans, matched, blocked, audited = _collect_spans(
+        value, enabled_rules, mode, policy, known_secret_pattern, decode_depth, decode_budget,
+    )
     if not spans:
         return value, matched, 0, blocked, audited
 
@@ -233,16 +360,23 @@ def _inspect_text(value, enabled_rules, mode, policy):
     return "".join(output), matched, len(transforms), blocked, audited
 
 
-def _process_text(value, start_marker, end_marker, strip_markers, enabled_rules, mode, policy):
+def _process_text(value, start_marker, end_marker, strip_markers, enabled_rules, mode, policy,
+                  allow_exemptions, known_secret_pattern, decode_depth, decode_budget):
     output = []
     matched, blocked, audited = set(), set(), set()
     exemptions = redactions = position = 0
 
     def inspect(segment):
         nonlocal redactions
-        cleaned, found, count, denied, observed = _inspect_text(segment, enabled_rules, mode, policy)
+        cleaned, found, count, denied, observed = _inspect_text(
+            segment, enabled_rules, mode, policy, known_secret_pattern, decode_depth,
+            decode_budget,
+        )
         matched.update(found); blocked.update(denied); audited.update(observed); redactions += count
         return cleaned
+
+    if not allow_exemptions:
+        return inspect(value), matched, 0, redactions, blocked, audited
 
     while position < len(value):
         start = value.find(start_marker, position)
@@ -263,19 +397,23 @@ def _process_text(value, start_marker, end_marker, strip_markers, enabled_rules,
 
 
 def inspect_json_body(body, enabled_rules, start_marker, end_marker, strip_markers=True,
-                      mode="redact", rule_file="", redact=None):
+                      mode="redact", rule_file="", redact=None, allow_exemptions=True,
+                      decode_depth=0, decode_max_candidates=100, decode_max_bytes=1048576,
+                      known_secrets=(), known_secret_min_length=8):
     if not body:
         return DlpResult(body, (), 0)
     if redact is not None:
         mode = "redact" if redact else "audit"
-    if not start_marker or not end_marker or start_marker == end_marker:
+    if allow_exemptions and (not start_marker or not end_marker or start_marker == end_marker):
         return DlpResult(body, (), 0, True)
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return DlpResult(body, (), 0)
+        return DlpResult(body, (), 0, uninspectable=True)
 
     policy = load_policy(rule_file)
+    decode_budget = _DecodeBudget(max(0, decode_max_candidates), max(0, decode_max_bytes))
+    known_secret_pattern = _known_secret_pattern(tuple(known_secrets), known_secret_min_length)
     matched, blocked, audited = set(), set(), set()
     exemptions = redactions = 0
 
@@ -283,7 +421,9 @@ def inspect_json_body(body, enabled_rules, start_marker, end_marker, strip_marke
         nonlocal exemptions, redactions
         if isinstance(value, str):
             cleaned, found, exempted, replaced, denied, observed = _process_text(
-                value, start_marker, end_marker, strip_markers, enabled_rules, mode, policy)
+                value, start_marker, end_marker, strip_markers, enabled_rules, mode, policy,
+                allow_exemptions, known_secret_pattern, decode_depth, decode_budget,
+            )
             matched.update(found); blocked.update(denied); audited.update(observed)
             exemptions += exempted; redactions += replaced
             return cleaned
@@ -339,8 +479,11 @@ def inspect_json_body(body, enabled_rules, start_marker, end_marker, strip_marke
     else:
         cleaned = visit(payload)
     encoded = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return DlpResult(encoded, tuple(sorted(matched)), exemptions, False, redactions,
-                     tuple(sorted(blocked)), tuple(sorted(audited)))
+    return DlpResult(
+        encoded, tuple(sorted(matched)), exemptions, False, redactions,
+        tuple(sorted(blocked)), tuple(sorted(audited)),
+        limit_exceeded=decode_budget.exhausted,
+    )
 
 
 def validate_policy(path):

@@ -176,8 +176,14 @@ class Settings:
     dlp_rule_file: str = os.getenv("DLP_RULE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "dlp_rules.yaml"))
     dlp_exempt_start: str = os.getenv("DLP_EXEMPT_START", "[[ALLOW_SENSITIVE]]")
     dlp_exempt_end: str = os.getenv("DLP_EXEMPT_END", "[[/ALLOW_SENSITIVE]]")
+    dlp_allow_exemptions: bool = _bool("DLP_ALLOW_EXEMPTIONS", "false")
     dlp_strip_exempt_markers: bool = _bool("DLP_STRIP_EXEMPT_MARKERS", "true")
     dlp_max_body_bytes: int = int(os.getenv("DLP_MAX_BODY_BYTES", "16777216"))
+    dlp_decode_depth: int = int(os.getenv("DLP_DECODE_DEPTH", "2"))
+    dlp_decode_max_candidates: int = int(os.getenv("DLP_DECODE_MAX_CANDIDATES", "100"))
+    dlp_decode_max_bytes: int = int(os.getenv("DLP_DECODE_MAX_BYTES", "1048576"))
+    dlp_known_secret_min_length: int = int(os.getenv("DLP_KNOWN_SECRET_MIN_LENGTH", "8"))
+    dlp_fail_closed: bool = _bool("DLP_FAIL_CLOSED", "false")
 
     @property
     def stats_html_path(self):

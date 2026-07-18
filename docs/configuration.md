@@ -114,10 +114,16 @@
 | `DLP_MODE` | `off` | `off` = 关闭，`audit` = 仅告警，`redact` = 脱敏后转发，`block` = 拦截 |
 | `DLP_RULES` | 见 `.env.example` | 启用的 DLP 规则，逗号分隔 |
 | `DLP_RULE_FILE` | `retry_proxy/dlp_rules.yaml` | 自定义 DLP 规则文件，支持 JSON/YAML |
+| `DLP_ALLOW_EXEMPTIONS` | `false` | 是否允许正文固定标记跳过检查；不可信客户端应保持关闭 |
 | `DLP_EXEMPT_START` | `[[ALLOW_SENSITIVE]]` | 主动豁免区间的起始标记 |
 | `DLP_EXEMPT_END` | `[[/ALLOW_SENSITIVE]]` | 主动豁免区间的结束标记 |
 | `DLP_STRIP_EXEMPT_MARKERS` | `true` | 转发前是否移除主动豁免标记 |
 | `DLP_MAX_BODY_BYTES` | `16777216` | DLP 扫描请求体的字节上限；`redact`/`block` 模式下超限返回 413 |
+| `DLP_DECODE_DEPTH` | `2` | Base64/Base64URL、hex、percent 编码递归扫描深度，范围 0～8；`0` = 关闭 |
+| `DLP_DECODE_MAX_CANDIDATES` | `100` | 单次请求最多接受的可打印解码候选片段数 |
+| `DLP_DECODE_MAX_BYTES` | `1048576` | 单次请求累计处理解码结果的字节数 |
+| `DLP_KNOWN_SECRET_MIN_LENGTH` | `8` | 号池 Key 精确匹配的最小长度 |
+| `DLP_FAIL_CLOSED` | `false` | DLP 无法解析非空正文时是否返回 422 |
 
 ## Docker 部署补充
 

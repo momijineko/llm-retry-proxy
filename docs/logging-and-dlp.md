@@ -36,6 +36,8 @@ DLP_MAX_BODY_BYTES=16777216
 
 `redact` 会把未豁免的敏感信息替换为 `[REDACTED:规则名]`，让 Agent 和用户根据上下文决定下一步，不会因普通命中中断调用链。也可以使用 `audit` 仅告警，或使用 `block` 返回 HTTP 422 并停止转发。默认最多扫描 16 MiB 请求体；`redact` 或 `block` 模式下超限会返回 HTTP 413。
 
+DLP 默认递归检查两层 Base64/Base64URL、hex 和 percent 编码；解码后的内容命中时处理整个原始编码片段。候选数量、累计解码字节数和递归深度分别由 `DLP_DECODE_MAX_CANDIDATES`、`DLP_DECODE_MAX_BYTES` 和 `DLP_DECODE_DEPTH` 限制，避免超长或嵌套输入耗尽资源。`redact`/`block` 模式下解码预算耗尽会返回 HTTP 413，避免攻击者用伪候选挤掉真实秘密。启用号池时还会在内存中精确匹配当前 Key，未知厂商格式也能被识别；日志只记录 `known_secret`，不会记录 Key 值。
+
 对于 Chat/Responses/Anthropic 风格请求，DLP 每次都会处理所有用户消息和工具输出，确保本地文件、MCP、Shell 等工具返回的凭据也会在转发副本中脱敏；system/developer 指令、assistant 内容和 JSON Schema 不参与扫描。无法识别结构的通用 JSON 请求会回退到递归扫描全部字符串。
 
 检测规则集中维护在带注释的 `retry_proxy/dlp_rules.yaml`。该文件说明了正则、标志、校验器和敏感 JSON 字段名的配置方式；需要定制时可以直接编辑，或通过 `DLP_RULE_FILE` 指向另一份 YAML/JSON 规则文件。规则文件会在启用 DLP 时随服务启动校验，格式或正则错误会阻止服务启动，避免静默失去防护。
@@ -46,13 +48,13 @@ v2 规则支持 `keywords`、`min_entropy`、`validator`、`action`、`placehold
 python -m retry_proxy.dlp validate
 ```
 
-确定需要发送的敏感内容可以包在豁免标记内：
+主动豁免默认关闭。只有可信单用户部署确实需要时，先设置 `DLP_ALLOW_EXEMPTIONS=true`，再将确定需要发送的敏感内容包在豁免标记内：
 
 ```text
 [[ALLOW_SENSITIVE]]需要主动发送的敏感内容[[/ALLOW_SENSITIVE]]
 ```
 
-该区间跳过检测，标记在请求上游前移除。未配对或嵌套的标记按普通正文处理，不产生豁免，也不会中断 Agent 调用链。日志只记录命中规则和豁免数量，不记录请求正文。固定标记用于个人部署中的防误传，不应作为不可信下游的访问控制机制。
+启用后该区间跳过检测，标记在请求上游前移除。未配对或嵌套的标记按普通正文处理，不产生豁免，也不会中断 Agent 调用链。日志只记录命中规则和豁免数量，不记录请求正文。固定标记仅适用于可信个人部署，不应作为不可信下游的访问控制机制。
 
 ## 字段说明
 
