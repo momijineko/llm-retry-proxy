@@ -11,6 +11,8 @@ env/
 # Environment / secrets
 .env
 key_pool.csv
+key_pool.csv~
+key_pool.csz~
 
 # Logs & runtime data
 logs/
@@ -29,6 +31,7 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+*~
 
 # Local tooling
 .omo/

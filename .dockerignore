@@ -1,7 +1,10 @@
 .git
 .env
 key_pool.csv
+key_pool.csv~
+key_pool.csz~
 logs
 logs.import
 __pycache__
 *.py[cod]
+*~
