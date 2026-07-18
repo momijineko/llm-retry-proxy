@@ -1,11 +1,12 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from starlette.requests import Request
 
 from retry_proxy.config import admin_session_value, can_use_key_pool, require_admin
+from retry_proxy.api import create_handlers
 
 
 def _request(authorization="", cookie="", path="/stats/api"):
@@ -70,6 +71,33 @@ class ProxyPoolAuthTests(unittest.TestCase):
         with patch("retry_proxy.config.settings", SimpleNamespace(proxy_api_key="pool-secret")):
             self.assertFalse(can_use_key_pool({}))
             self.assertFalse(can_use_key_pool({"authorization": "Bearer wrong"}))
+
+
+class ProxyPoolRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_matching_proxy_key_is_not_forwarded_when_pool_is_missing(self):
+        config = SimpleNamespace(
+            proxy_api_key="pool-secret", dlp_mode="off", dlp_max_body_bytes=1024,
+            image_upstream_user_agent="", image_upstream_originator="",
+        )
+        service = SimpleNamespace(request=AsyncMock())
+        store = SimpleNamespace()
+        proxy = create_handlers(service, store)[-1]
+        request = Request({
+            "type": "http", "method": "POST", "path": "/aihub/responses",
+            "headers": [(b"authorization", b"Bearer pool-secret")],
+            "query_string": b"", "server": ("test", 80), "client": ("127.0.0.1", 1),
+        }, receive=AsyncMock(return_value={"type": "http.request", "body": b"{}"}))
+
+        with patch("retry_proxy.api.settings", config), \
+                patch("retry_proxy.config.settings", config), \
+                patch("retry_proxy.api.KEY_POOLS", {}), \
+                patch("retry_proxy.api.match_route",
+                      return_value=("https://upstream.test", "test", "responses")):
+            response = await proxy("aihub/responses", request)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn(b"key_pool_unavailable", response.body)
+        service.request.assert_not_awaited()
 
 
 if __name__ == "__main__":

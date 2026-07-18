@@ -9,6 +9,10 @@ from typing import Optional
 from .config import logger, settings
 
 _FAILURE_KIND_PRIORITY = {"transport": 1, "upstream": 2, "rate_limit": 3, "auth": 4}
+_RUNTIME_FIELDS = (
+    "cooldown_until", "total_fail", "last_fail_ts", "consecutive_failures",
+    "last_failure_kind", "last_failure_status", "last_cooldown_s",
+)
 
 
 class KeyEntry:
@@ -230,30 +234,68 @@ KEY_POOLS = build_key_pools()
 _AUTH_STRIP_HEADERS = {"authorization", settings.key_auth_header}
 
 
+def clone_key_pool(pool: KeyPool) -> KeyPool:
+    """Copy pool configuration and health without sharing mutable entries."""
+    clone = KeyPool([], pool.provider)
+    clone.entries = []
+    for entry in pool.entries:
+        copied = KeyEntry(
+            entry.key, entry.label, entry.models, entry.paths, entry.sort,
+        )
+        for field in _RUNTIME_FIELDS:
+            setattr(copied, field, getattr(entry, field))
+        clone.entries.append(copied)
+    clone.finalize_entries()
+    if pool._current is not None:
+        clone._current = next(
+            (entry for entry in clone.entries if entry.key == pool._current.key), None,
+        )
+        if clone._current is not None:
+            clone._sticky_until = pool._sticky_until
+    return clone
+
+
 def replace_key_pool(url: str, replacement: KeyPool, pools=None):
-    """Replace one live pool while retaining health state for unchanged keys."""
+    """Hot-update one pool while retaining in-flight state for unchanged keys."""
     pools = KEY_POOLS if pools is None else pools
     url = url.rstrip("/")
     previous = pools.get(url)
-    if previous is not None:
-        old_entries = {entry.key: entry for entry in previous.entries}
-        runtime_fields = (
-            "cooldown_until", "total_fail", "last_fail_ts", "consecutive_failures",
-            "last_failure_kind", "last_failure_status", "last_cooldown_s",
-        )
-        for entry in replacement.entries:
-            old = old_entries.get(entry.key)
-            if old is None:
-                continue
-            for field in runtime_fields:
-                setattr(entry, field, getattr(old, field))
-        if previous._current is not None:
-            replacement._current = next(
-                (entry for entry in replacement.entries if entry.key == previous._current.key), None
-            )
-            if replacement._current is not None:
-                replacement._sticky_until = previous._sticky_until
-    pools[url] = replacement
+    if previous is None:
+        pools[url] = replacement
+        return replacement
+
+    old_entries = {entry.key: entry for entry in previous.entries}
+    current_key = previous._current.key if previous._current is not None else None
+    merged = []
+    for fresh in replacement.entries:
+        entry = old_entries.get(fresh.key)
+        if entry is None:
+            merged.append(fresh)
+            continue
+        entry.legacy_key_id = fresh.legacy_key_id
+        entry.key_id = fresh.key_id
+        entry.label = fresh.label
+        entry.sort = fresh.sort
+        entry.models = fresh.models
+        entry.paths = fresh.paths
+        merged.append(entry)
+
+    previous.entries[:] = merged
+    previous.provider = replacement.provider
+    previous._current = next((entry for entry in merged if entry.key == current_key), None)
+    if previous._current is None:
+        previous._sticky_until = 0.0
+
+    live_entry_ids = {id(entry) for entry in merged}
+    previous._views = {
+        signature: view for signature, view in previous._views.items()
+        if all(entry_id in live_entry_ids for entry_id in signature)
+    }
+    for view in previous._views.values():
+        view.provider = replacement.provider
+
+    pools[url] = previous
+    return previous
 
 
 def headers_with_key(base_headers: dict, key: Optional[str]) -> dict:

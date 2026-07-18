@@ -222,7 +222,13 @@ def create_handlers(service, store):
         model_name = parse_model(body)
         outbound_headers = outbound_request_headers(request.headers, remaining, model_name)
         base_pool = KEY_POOLS.get(upstream)
-        pool_access = bool(base_pool and can_use_key_pool(request.headers))
+        pool_credential_ok = can_use_key_pool(request.headers)
+        if settings.proxy_api_key and pool_credential_ok and base_pool is None:
+            return Response(
+                '{"error":{"type":"key_pool_unavailable","message":"Key pool is unavailable for this upstream"}}',
+                status_code=503, media_type="application/json",
+            )
+        pool_access = bool(base_pool and pool_credential_ok)
         request_pool = base_pool.for_request(model_name, remaining) if pool_access else None
         if pool_access and request_pool is None:
             return Response('{"error":{"type":"key_pool_no_match","message":"No key pool entry matches this request"}}',

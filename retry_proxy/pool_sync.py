@@ -6,7 +6,7 @@ import tempfile
 from datetime import datetime, timezone
 
 from .config import logger, settings
-from .key_pool import KEY_POOLS, KeyEntry, KeyPool, replace_key_pool
+from .key_pool import KEY_POOLS, KeyEntry, KeyPool, clone_key_pool, replace_key_pool
 from .routes import normalize_route_prefix
 from .sync_adapters import ADAPTERS, PoolSyncError
 
@@ -29,6 +29,9 @@ class PoolSyncManager:
         self.client = client
         self.adapters = adapters if adapters is not None else ADAPTERS
         self.route_registry = route_registry
+        self.static_pools = {
+            url.rstrip("/"): clone_key_pool(pool) for url, pool in self.pools.items()
+        }
         self.sources = {}
         self.operations = {}
         self._lock = asyncio.Lock()
@@ -63,6 +66,14 @@ class PoolSyncManager:
 
     def _activate(self, source):
         replace_key_pool(source["base_url"], self._pool_from_source(source), self.pools)
+
+    def _restore_static(self, base_url):
+        base_url = base_url.rstrip("/")
+        static = self.static_pools.get(base_url)
+        if static is None:
+            self.pools.pop(base_url, None)
+            return
+        replace_key_pool(base_url, clone_key_pool(static), self.pools)
 
     def _persistent_sources(self):
         sources = []
@@ -422,7 +433,7 @@ class PoolSyncManager:
                 logger.warning(f"上游会话撤销失败，继续删除本地号池: {exc}")
             self.sources.pop(source_id, None)
             self.operations.pop(source_id, None)
-            self.pools.pop(source["base_url"], None)
+            self._restore_static(source["base_url"])
             if self.route_registry is not None:
                 self.route_registry.unregister(source_id)
             self._save_state()
@@ -435,8 +446,22 @@ class PoolSyncManager:
         return result
 
     async def disconnect(self, source_id):
-        """Backward-compatible name for deleting a managed pool."""
-        return await self.delete(source_id)
+        async with self._lock:
+            source = self.sources.get(source_id)
+            if source is None:
+                raise PoolSyncError("号池同步连接不存在")
+            adapter = self._adapter(source["adapter"])
+            try:
+                await adapter.disconnect(self.client, source, source.get("session") or {})
+            except Exception as exc:
+                logger.warning(f"上游会话撤销失败，已清除本地连接: {exc}")
+            source["session"] = {}
+            source["last_error"] = ""
+            self._save_state()
+            result = self.status()
+        if not self._has_connected_sources():
+            await self.stop()
+        return result
 
     def status(self, source_id=None):
         selected = [self.sources[source_id]] if source_id in self.sources else list(self.sources.values())

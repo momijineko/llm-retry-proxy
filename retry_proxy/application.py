@@ -190,6 +190,14 @@ async def key_pools_delete(request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+async def key_pools_disconnect(request: Request):
+    try:
+        body = await _json_object(request)
+        return await pool_sync.disconnect(body.get("source_id"))
+    except (ValueError, TypeError, PoolSyncError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 async def key_pools_catalog(source_id: str):
     try:
         return await pool_sync.catalog(source_id)
@@ -259,8 +267,7 @@ app.add_api_route("/admin/key-pools/api/status", key_pools_status, methods=["GET
 app.add_api_route("/admin/key-pools/api/connect", key_pools_connect, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/sync", key_pools_sync, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/delete", key_pools_delete, methods=["POST"], dependencies=admin_dependencies)
-# Keep old clients working, but the old action now has the same delete semantics.
-app.add_api_route("/admin/key-pools/api/disconnect", key_pools_delete, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/disconnect", key_pools_disconnect, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/catalog", key_pools_catalog, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/create-keys", key_pools_create_keys, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/group-rules", key_pools_group_rules, methods=["POST"], dependencies=admin_dependencies)

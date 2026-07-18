@@ -222,6 +222,52 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         restored.load_state()
         self.assertEqual(restored.status()["sources"], [])
 
+    async def test_delete_restores_static_pool_for_the_same_upstream(self):
+        client = FakeClient()
+        static = KeyPool([("static-key", "static")], "static-provider")
+        pools = {"https://upstream.test": static}
+        manager = PoolSyncManager(
+            pools, self.config, client, {"sub2api": Sub2APIAdapter()},
+        )
+        status = await manager.connect(
+            "sub2api", "https://upstream.test", "online-provider",
+            {"email": "user@example.com", "password": "secret"},
+        )
+        source_id = status["sources"][0]["id"]
+        self.assertEqual(pools["https://upstream.test"].entries[0].key, "sk-secret-one")
+
+        await manager.delete(source_id)
+
+        restored = pools["https://upstream.test"]
+        self.assertEqual(restored.provider, "static-provider")
+        self.assertEqual([entry.key for entry in restored.entries], ["static-key"])
+
+    async def test_disconnect_keeps_source_route_and_last_synced_pool(self):
+        route_config = SimpleNamespace(
+            extra_upstreams="", upstream_url="https://default.test", provider="default",
+        )
+        registry = RouteRegistry(route_config)
+        pools = {}
+        manager = PoolSyncManager(
+            pools, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()}, registry,
+        )
+        status = await manager.connect(
+            "sub2api", "https://upstream.test", "online-provider",
+            {"email": "user@example.com", "password": "secret"}, "/custom",
+        )
+        source_id = status["sources"][0]["id"]
+
+        status = await manager.disconnect(source_id)
+
+        self.assertEqual(len(status["sources"]), 1)
+        self.assertFalse(status["sources"][0]["connected"])
+        self.assertIn("https://upstream.test", pools)
+        self.assertEqual(registry.match("custom/responses")[0], "https://upstream.test")
+        with open(self.state_file, encoding="utf-8") as f:
+            persisted = json.load(f)
+        self.assertEqual(len(persisted["sources"]), 1)
+        self.assertEqual(persisted["sources"][0]["session"], {})
+
     async def test_managed_route_rejects_root_prefix(self):
         route_config = SimpleNamespace(
             extra_upstreams="", upstream_url="https://default.test", provider="default",

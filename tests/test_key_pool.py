@@ -33,6 +33,25 @@ class KeyPoolStickyTests(unittest.TestCase):
         self.assertIs(current._current, current.entries[0])
         self.assertEqual(current._sticky_until, 300)
 
+    def test_inflight_failure_after_replacement_updates_the_live_pool(self):
+        previous = KeyPool([("same", "old")])
+        request_view = previous.for_request("model", "responses")
+        inflight_entry = request_view.pick()
+        pools = {"https://upstream.test": previous}
+
+        replace_key_pool(
+            "https://upstream.test", KeyPool([("same", "new")]), pools,
+        )
+        request_view.mark_cooldown(
+            inflight_entry, 60, failure_kind="rate_limit", status=429,
+        )
+
+        live_entry = pools["https://upstream.test"].entries[0]
+        self.assertIs(live_entry, inflight_entry)
+        self.assertEqual(live_entry.label, "new")
+        self.assertEqual(live_entry.last_failure_status, 429)
+        self.assertGreater(live_entry.cooldown_until, 0)
+
     def test_sort_orders_entries_numerically_and_formats_log_id(self):
         pool = KeyPool([])
         pool.entries = [
