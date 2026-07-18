@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from .config import logger, settings
 from .key_pool import KEY_POOLS, KeyEntry, KeyPool, replace_key_pool
+from .routes import normalize_route_prefix
 from .sync_adapters import ADAPTERS, PoolSyncError
 
 
@@ -22,11 +23,12 @@ def _source_id(adapter, base_url):
 class PoolSyncManager:
     """Schedules provider adapters and atomically applies their normalized key sets."""
 
-    def __init__(self, pools=None, config=settings, client=None, adapters=None):
+    def __init__(self, pools=None, config=settings, client=None, adapters=None, route_registry=None):
         self.pools = pools if pools is not None else KEY_POOLS
         self.config = config
         self.client = client
         self.adapters = adapters if adapters is not None else ADAPTERS
+        self.route_registry = route_registry
         self.sources = {}
         self.operations = {}
         self._lock = asyncio.Lock()
@@ -84,13 +86,24 @@ class PoolSyncManager:
                         object.__setattr__(self.config, "key_pool_sync_interval", interval)
                 except (TypeError, ValueError):
                     logger.warning("号池同步状态中的周期无效，继续使用环境配置")
+            if self.route_registry is not None:
+                self.route_registry.clear_managed()
             for source in state.get("sources") or []:
                 adapter = source.get("adapter", "")
                 if adapter not in self.adapters or not source.get("base_url"):
                     continue
                 source["base_url"] = source["base_url"].rstrip("/")
+                source.setdefault("route_prefix", "")
                 source.setdefault("group_rules", {})
                 self.sources[source["id"]] = source
+                if self.route_registry is not None and source.get("route_prefix"):
+                    try:
+                        self.route_registry.register(
+                            source["id"], source["route_prefix"], source["base_url"],
+                            source.get("provider", ""),
+                        )
+                    except ValueError as exc:
+                        logger.warning(f"号池代理路由未恢复: {exc}")
                 # A successful sync with zero keys is authoritative too. Retain
                 # the entries check for state files written by older versions.
                 if source.get("entries") or source.get("last_sync_at"):
@@ -156,13 +169,23 @@ class PoolSyncManager:
             }
         return normalized
 
-    async def connect(self, adapter_name, base_url, provider, credentials):
+    async def connect(self, adapter_name, base_url, provider, credentials, route_prefix=None):
         adapter_name = (adapter_name or self.config.key_pool_sync_default_adapter).strip().lower()
         base_url = (base_url or self.default_url).strip().rstrip("/")
         if not base_url.startswith(("http://", "https://")):
             raise PoolSyncError("上游地址必须以 http:// 或 https:// 开头")
         adapter = self._adapter(adapter_name)
         source_id = _source_id(adapter_name, base_url)
+        normalized_route_prefix = None
+        if route_prefix is not None:
+            try:
+                normalized_route_prefix = normalize_route_prefix(route_prefix)
+                if not normalized_route_prefix:
+                    raise ValueError("代理前缀不能为空或使用根路径")
+                if self.route_registry is not None:
+                    self.route_registry.validate(source_id, normalized_route_prefix, base_url)
+            except ValueError as exc:
+                raise PoolSyncError(str(exc)) from exc
         async with self._lock:
             conflict = next((source for sid, source in self.sources.items()
                              if sid != source_id and source.get("base_url") == base_url), None)
@@ -172,9 +195,12 @@ class PoolSyncManager:
             source = self.sources.get(source_id, {
                 "id": source_id, "adapter": adapter_name, "base_url": base_url,
                 "provider": (provider or self.config.provider).strip(), "session": {}, "entries": [],
+                "route_prefix": "",
                 "last_sync_at": "", "last_attempt_at": "", "last_error": "",
             })
             source["provider"] = (provider or source.get("provider") or self.config.provider).strip()
+            if normalized_route_prefix is not None:
+                source["route_prefix"] = normalized_route_prefix
             try:
                 source["session"] = await adapter.connect(self.client, source, credentials or {})
             except PoolSyncError:
@@ -183,7 +209,13 @@ class PoolSyncManager:
                 raise PoolSyncError(f"连接上游失败: {exc}") from exc
             if conflict is not None:
                 self.sources.pop(conflict["id"], None)
+                if self.route_registry is not None:
+                    self.route_registry.unregister(conflict["id"])
             self.sources[source_id] = source
+            if self.route_registry is not None:
+                self.route_registry.register(
+                    source_id, source.get("route_prefix", ""), base_url, source["provider"],
+                )
             self._save_state()
             result = await self._sync_source_locked(source_id)
         await self.start()
@@ -403,6 +435,9 @@ class PoolSyncManager:
         for source in selected:
             adapter = self._adapter(source["adapter"])
             pool = self.pools.get(source["base_url"])
+            route_prefix = source.get("route_prefix", "")
+            if not route_prefix and self.route_registry is not None:
+                route_prefix = self.route_registry.environment_prefix_for_url(source["base_url"])
             runtime = {entry.key: entry for entry in pool.entries} if pool else {}
             visible_entries = []
             for item in source.get("entries") or []:
@@ -425,6 +460,7 @@ class PoolSyncManager:
             public_sources.append({
                 "id": source["id"], "adapter": source["adapter"], "adapter_label": adapter.label,
                 "base_url": source["base_url"], "provider": source.get("provider", ""),
+                "route_prefix": route_prefix,
                 "connected": adapter.connected(source.get("session") or {}),
                 "account": adapter.public_session(source.get("session") or {}),
                 "last_sync_at": source.get("last_sync_at", ""),

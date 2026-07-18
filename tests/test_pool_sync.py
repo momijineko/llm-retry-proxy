@@ -8,6 +8,8 @@ import httpx
 
 from retry_proxy.key_pool import KeyEntry, KeyPool
 from retry_proxy.pool_sync import PoolSyncManager
+from retry_proxy.routes import RouteRegistry
+from retry_proxy.sync_adapters import PoolSyncError
 from retry_proxy.sync_adapters.sub2api import Sub2APIAdapter
 
 
@@ -157,6 +159,69 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("access-1", persisted)
         self.assertIn("refresh-1", persisted)
         self.assertEqual(os.stat(self.state_file).st_mode & 0o777, 0o600)
+
+    async def test_managed_route_is_persisted_and_restored(self):
+        route_config = SimpleNamespace(
+            extra_upstreams="", upstream_url="https://default.test", provider="default",
+        )
+        registry = RouteRegistry(route_config)
+        manager = PoolSyncManager(
+            {}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()}, registry,
+        )
+
+        status = await manager.connect(
+            "sub2api", "https://upstream.test", "custom-provider",
+            {"email": "user@example.com", "password": "secret"}, "/custom",
+        )
+
+        self.assertEqual(status["sources"][0]["route_prefix"], "/custom")
+        self.assertEqual(registry.match("custom/v1/models")[0], "https://upstream.test")
+
+        restored_registry = RouteRegistry(route_config)
+        restored = PoolSyncManager(
+            {}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()}, restored_registry,
+        )
+        restored.load_state()
+
+        self.assertEqual(restored.status()["sources"][0]["route_prefix"], "/custom")
+        self.assertEqual(restored_registry.match("custom/v1/models")[0], "https://upstream.test")
+
+    async def test_managed_route_rejects_root_prefix(self):
+        route_config = SimpleNamespace(
+            extra_upstreams="", upstream_url="https://default.test", provider="default",
+        )
+        registry = RouteRegistry(route_config)
+        manager = PoolSyncManager(
+            {}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()}, registry,
+        )
+
+        with self.assertRaisesRegex(PoolSyncError, "代理前缀不能为空"):
+            await manager.connect(
+                "sub2api", "https://upstream.test", "provider",
+                {"email": "user@example.com", "password": "secret"}, "/",
+            )
+
+    async def test_legacy_source_uses_matching_environment_route(self):
+        state = {"version": 2, "sources": [{
+            "id": "legacy", "adapter": "sub2api", "base_url": "https://upstream.test",
+            "provider": "legacy-provider", "session": {}, "entries": [],
+        }]}
+        with open(self.state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        route_config = SimpleNamespace(
+            extra_upstreams="/legacy|https://upstream.test|env-provider",
+            upstream_url="https://default.test", provider="default",
+        )
+        registry = RouteRegistry(route_config)
+        manager = PoolSyncManager(
+            {}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()}, registry,
+        )
+
+        manager.load_state()
+
+        self.assertEqual(manager.status()["sources"][0]["route_prefix"], "/legacy")
+        self.assertEqual(registry.match("legacy/models")[:2], ("https://upstream.test", "env-provider"))
+        self.assertEqual(manager.sources["legacy"]["route_prefix"], "")
 
     async def test_state_restores_multiple_generic_sources(self):
         state = {"version": 2, "sources": [

@@ -18,14 +18,14 @@ from .dlp import load_policy
 from .key_pool import KEY_POOLS
 from .log_store import RetryLogStore
 from .retry import RetryProxy
-from .routes import ROUTES
+from .routes import ROUTES, route_registry
 
 if sys.platform == "win32":
     os.system("")
 
 store = RetryLogStore()
 client = None
-pool_sync = PoolSyncManager(KEY_POOLS)
+pool_sync = PoolSyncManager(KEY_POOLS, route_registry=route_registry)
 
 
 def _log_startup():
@@ -168,6 +168,7 @@ async def key_pools_connect(request: Request):
         }
         return await pool_sync.connect(
             body.get("adapter"), body.get("base_url"), body.get("provider"), credentials,
+            body.get("route_prefix"),
         )
     except (ValueError, TypeError, PoolSyncError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
