@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import unittest
 from types import SimpleNamespace
@@ -36,6 +37,25 @@ class RetryLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("#1 选号" in message for message in messages))
         self.assertTrue(any("#1 发出上游" in message for message in messages))
         self.assertTrue(any("#1 收到响应头 200" in message for message in messages))
+
+    async def test_responses_header_wait_has_a_hard_timeout(self):
+        config = SimpleNamespace(
+            responses_header_timeout=0.01, hedge_mode="off", max_retries=1,
+        )
+        proxy = RetryProxy(config=config, client=object())
+
+        async def never_returns(*_args):
+            await asyncio.Future()
+
+        proxy._send = never_returns
+        result = await proxy.request(
+            "POST", "https://upstream.test/responses", {}, b"{}",
+            "aihub/responses", "test", "model",
+        )
+
+        self.assertIsNone(result.response)
+        self.assertEqual(result.total_sent, 1)
+        self.assertIn("within 0.0s", result.failure_reason)
 
 
 if __name__ == "__main__":

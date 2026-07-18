@@ -255,7 +255,10 @@ def create_handlers(service, store):
                            "client_ip": client_ip})
         if response is None:
             logger.error(f"{_tag(request.method, path, provider, model_name, client_ip)} 放弃({total_sent}发) {time.time() - start:.1f}s")
-            return Response(f'{{"error":{{"message":"upstream overloaded after {total_sent} attempts","type":"upstream_error","code":"503"}}}}', status_code=503, media_type="application/json", headers={"X-Forward-Attempts": str(total_sent)})
+            reason = getattr(result, "failure_reason", "")
+            message = reason or f"upstream overloaded after {total_sent} attempts"
+            payload = json.dumps({"error": {"message": message, "type": "upstream_error", "code": "503"}}, ensure_ascii=False)
+            return Response(payload, status_code=503, media_type="application/json", headers={"X-Forward-Attempts": str(total_sent)})
         headers = filter_headers(response.headers, SKIP_RESPONSE_HEADERS); headers["X-Forward-Attempts"] = str(winner_attempt)
         # 流式响应禁用反向代理缓冲，否则 nginx/群晖反代会攒批 flush 导致远程访问"一顿一顿"
         if "event-stream" in response.headers.get("content-type", "") or response.headers.get("content-length") is None:

@@ -5,8 +5,9 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from retry_proxy.key_pool import KeyEntry, KeyPool, replace_key_pool
-from retry_proxy.retry import (RetryProxy, _key_available_for_status, _key_failure_policy,
-                               _mark_key_failure, _pick_key, _select_key_failure_status)
+from retry_proxy.retry import (KeyPoolWaitTimeout, RetryProxy, _key_available_for_status,
+                               _key_failure_policy, _mark_key_failure, _pick_key,
+                               _select_key_failure_status)
 
 
 class KeyPoolStickyTests(unittest.TestCase):
@@ -212,6 +213,62 @@ class KeyPoolCooldownWaitTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(selected, entry)
         sleep.assert_awaited_once_with(30)
+
+    async def test_pick_timeout_does_not_wait_for_a_long_cooldown(self):
+        pool = KeyPool([("key", "key")])
+        pool.entries[0].cooldown_until = 130
+
+        with patch("retry_proxy.key_pool.time.time", return_value=100), \
+                patch("retry_proxy.retry.time.time", return_value=100), \
+                patch("retry_proxy.retry.time.monotonic", side_effect=[100, 100]), \
+                patch("retry_proxy.retry.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            with self.assertRaises(KeyPoolWaitTimeout):
+                await _pick_key(pool, wait_timeout=0.5)
+
+        sleep.assert_awaited_once_with(0.5)
+
+    async def test_proxy_turns_key_wait_timeout_into_a_failed_result(self):
+        config = SimpleNamespace(hedge_mode="off", max_retries=2, key_pool_wait_timeout=0.5)
+        proxy = RetryProxy(config=config, client=object())
+
+        with patch("retry_proxy.retry._pick_key", new_callable=AsyncMock,
+                   side_effect=KeyPoolWaitTimeout(30, 0.5)):
+            result = await proxy.request(
+                "POST", "https://upstream.test/responses", {}, b'{}',
+                "responses", "test", "model", KeyPool([("key", "key")]),
+            )
+
+        self.assertIsNone(result.response)
+        self.assertEqual(result.total_sent, 0)
+        self.assertIn("wait limit 0.5s", result.failure_reason)
+
+    async def test_retry_cooldown_wait_is_also_bounded(self):
+        pool = KeyPool([("key", "key")])
+        config = SimpleNamespace(
+            hedge_mode="off", max_retries=60, retry_interval=1,
+            retry_interval_429=5, retry_backoff=False, retry_backoff_max=60,
+            retry_backoff_429=True, retry_backoff_max_429=60,
+            key_cooldown=30, key_cooldown_5xx=30, key_cooldown_429=60,
+            key_cooldown_auth=1800, key_cooldown_max=3600,
+            key_cooldown_backoff=True, key_pool_wait_timeout=0.5,
+        )
+        response = httpx.Response(
+            503, json={"error": {"message": "temporarily unavailable"}},
+            request=httpx.Request("POST", "https://upstream.test/responses"),
+        )
+        proxy = RetryProxy(config=config, client=object())
+        proxy._send = AsyncMock(return_value=response)
+
+        with patch("retry_proxy.retry.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await proxy.request(
+                "POST", "https://upstream.test/responses", {}, b'{}',
+                "responses", "test", "model", pool,
+            )
+
+        self.assertIsNone(result.response)
+        self.assertEqual(result.total_sent, 1)
+        self.assertIn("wait limit 0.5s", result.failure_reason)
+        sleep.assert_awaited_once_with(0.5)
 
     async def test_race_exhaustion_still_opens_key_circuit(self):
         pool = KeyPool([("key", "key")])

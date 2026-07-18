@@ -15,6 +15,19 @@ from .key_pool import headers_with_key
 
 _client_ip = contextvars.ContextVar("client_ip", default="")
 _spawned_tasks = contextvars.ContextVar("spawned_tasks", default=None)
+_request_progress = contextvars.ContextVar("request_progress", default=None)
+
+
+class KeyPoolWaitTimeout(Exception):
+    """Raised when every eligible key remains in cooldown too long."""
+
+    def __init__(self, wait_seconds, timeout_seconds):
+        self.wait_seconds = wait_seconds
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"all eligible keys are cooling down (next in {wait_seconds:.1f}s; "
+            f"wait limit {timeout_seconds:.1f}s)"
+        )
 
 
 def set_client_ip(value):
@@ -70,6 +83,10 @@ def parse_retry_after(value):
 
 def is_host_level_error(exc): return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
 def filter_headers(headers, skip): return {k: v for k, v in headers.items() if k.lower() not in skip}
+
+
+def _is_responses_path(path):
+    return "/responses/" in f"/{(path or '').strip('/')}/"
 
 
 def calc_backoff_wait(consecutive, base, cap, enabled, ra_wait=None):
@@ -133,9 +150,11 @@ def _mark_key_outcome(pool, entry, config, status):
         _mark_key_failure(pool, entry, config, status)
 
 
-async def _pick_key(pool):
+async def _pick_key(pool, wait_timeout=None):
     if pool is None:
         return None
+    deadline = time.monotonic() + wait_timeout if wait_timeout and wait_timeout > 0 else None
+    logged_wait = False
     while True:
         entry = pool.pick()
         if entry is None:
@@ -143,7 +162,32 @@ async def _pick_key(pool):
         wait = max(entry.cooldown_until - time.time(), 0.0)
         if wait <= 0:
             return entry
+        if not logged_wait:
+            logger.info(f"号池全部熔断，最早 key={entry.key_id} 将在 {wait:.1f}s 后恢复")
+            logged_wait = True
+        if deadline is None:
+            await asyncio.sleep(wait)
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise KeyPoolWaitTimeout(wait, wait_timeout)
+        if wait > remaining:
+            await asyncio.sleep(remaining)
+            raise KeyPoolWaitTimeout(wait, wait_timeout)
         await asyncio.sleep(wait)
+
+
+async def _sleep_before_retry(wait, pool=None, pool_wait=0.0, wait_timeout=None):
+    if not pool or pool_wait <= 0 or not wait_timeout or wait_timeout <= 0 or pool_wait <= wait_timeout:
+        await asyncio.sleep(wait)
+        return
+    await asyncio.sleep(wait_timeout)
+    if not pool.has_fresh():
+        remaining = pool.next_available_in() or max(pool_wait - wait_timeout, 0.0)
+        raise KeyPoolWaitTimeout(remaining, wait_timeout)
+    remaining_wait = max(wait - wait_timeout, 0.0)
+    if remaining_wait > 0:
+        await asyncio.sleep(remaining_wait)
 
 
 def _tag(method, path, provider, model, client_ip=""):
@@ -199,6 +243,7 @@ class RetryResult:
     key_id: str
     started_at: float
     key_attempts: list = None
+    failure_reason: str = ""
 
 
 class RetryProxy:
@@ -211,6 +256,12 @@ class RetryProxy:
         req = self.client.build_request(method, url, headers=headers, content=body if body else None)
         return await self.client.send(req, stream=True)
 
+    async def _send_upstream(self, method, url, headers, body):
+        progress = _request_progress.get()
+        if progress is not None:
+            progress["sent"] += 1
+        return await self._send(method, url, headers, body)
+
     async def _race(self, method, url, req_headers, body, path, t0, provider, model, pool):
         total_sent = last_status = round_num = 0; retry_codes = []; key_attempts = []; c429 = cother = 0; last_key_id = ""
         while True:
@@ -218,7 +269,7 @@ class RetryProxy:
             to_fire = min(self.config.max_concurrent, self.config.max_retries - total_sent) if self.config.max_retries > 0 else self.config.max_concurrent
             if to_fire <= 0: break
             self.logger.debug(f"{_tag(method, path, provider, model)} R{round_num} 选号 总{time.time() - t0:.2f}s")
-            entry = await _pick_key(pool)
+            entry = await _pick_key(pool, getattr(self.config, "key_pool_wait_timeout", None))
             hdrs = headers_with_key(req_headers, entry.key) if entry else req_headers
             if entry: last_key_id = entry.key_id
             async def send(n):
@@ -226,11 +277,13 @@ class RetryProxy:
                 key_tag = f"[{entry.key_id}]" if pool and entry else ""
                 self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{n} 发出上游 总{sent_at - t0:.2f}s")
                 try:
-                    response = await self._send(method, url, hdrs, body)
+                    response = await self._send_upstream(method, url, hdrs, body)
                     now = time.time()
                     self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{n} 收到响应头 {response.status_code} 本次{now - sent_at:.2f}s 总{now - t0:.2f}s")
                     return "ok", response, n
                 except asyncio.CancelledError: raise
+                except KeyPoolWaitTimeout:
+                    raise
                 except Exception as exc:
                     return "error", exc, n
             start = total_sent; tasks = set()
@@ -293,9 +346,12 @@ class RetryProxy:
                 c429 += 1; cother = 0; wait, src = calc_backoff_wait(c429, self.config.retry_interval_429, self.config.retry_backoff_max_429, self.config.retry_backoff_429, ra_max or None)
             else:
                 cother += 1; c429 = 0; wait, src = calc_backoff_wait(cother, self.config.retry_interval, self.config.retry_backoff_max, self.config.retry_backoff)
-            if pool and not pool.has_fresh(): wait = max(wait, pool.next_available_in())
+            pool_wait = pool.next_available_in() if pool and not pool.has_fresh() else 0.0
+            wait = max(wait, pool_wait)
             self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} R{round_num}全败 {wait:.1f}s后{f'({src})' if src else ''} {time.time() - t0:.1f}s")
-            await asyncio.sleep(wait)
+            await _sleep_before_retry(
+                wait, pool, pool_wait, getattr(self.config, "key_pool_wait_timeout", None),
+            )
         return RetryResult(None, 0, total_sent, last_status, retry_codes, False, last_key_id, t0, key_attempts)
 
     async def _stagger(self, method, url, req_headers, body, path, t0, provider, model, pool):
@@ -303,17 +359,18 @@ class RetryProxy:
         next_allowed = 0.0; c429 = cother = 0; last_key_id = ""; all_tasks = set()
         async def send(n):
             self.logger.debug(f"{_tag(method, path, provider, model)} #{n} 选号 总{time.time() - t0:.2f}s")
-            entry = await _pick_key(pool); hdrs = headers_with_key(req_headers, entry.key) if entry else req_headers
+            entry = await _pick_key(pool, getattr(self.config, "key_pool_wait_timeout", None)); hdrs = headers_with_key(req_headers, entry.key) if entry else req_headers
             if entry: nonlocal last_key_id; last_key_id = entry.key_id
             sent_at = time.time()
             key_tag = f"[{entry.key_id}]" if pool and entry else ""
             self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{n} 发出上游 总{sent_at - t0:.2f}s")
             try:
-                response = await self._send(method, url, hdrs, body)
+                response = await self._send_upstream(method, url, hdrs, body)
                 now = time.time()
                 self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{n} 收到响应头 {response.status_code} 本次{now - sent_at:.2f}s 总{now - t0:.2f}s")
                 return "ok", response, n, entry
             except asyncio.CancelledError: raise
+            except KeyPoolWaitTimeout: raise
             except Exception as exc: return "error", exc, n, entry
         def can_fire(now): return winner is None and (self.config.max_retries == 0 or total_sent < self.config.max_retries) and len(in_flight) < self.config.max_concurrent and now >= next_allowed
         total_sent = 1; task = _spawn(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
@@ -323,7 +380,10 @@ class RetryProxy:
                 if self.config.max_retries > 0 and total_sent >= self.config.max_retries: break
                 wait = max(next_allowed - time.time(), 0)
                 if wait > 0: self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} 退避 {wait:.1f}s {time.time() - t0:.1f}s")
-                await asyncio.sleep(wait)
+                pool_wait = pool.next_available_in() if pool and not pool.has_fresh() else 0.0
+                await _sleep_before_retry(
+                    wait, pool, pool_wait, getattr(self.config, "key_pool_wait_timeout", None),
+                )
                 if can_fire(time.time()):
                     total_sent += 1; task = _spawn(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
                 continue
@@ -397,14 +457,33 @@ class RetryProxy:
         start = time.time()
         self.logger.debug(f"{_tag(method, path, provider, model)} 开始转发")
         spawned = set()
+        progress = {"sent": 0}
         spawned_token = _spawned_tasks.set(spawned)
+        progress_token = _request_progress.set(progress)
         try:
-            return await self._request(method, url, headers, body, path, provider, model, pool, start)
+            work = self._request(method, url, headers, body, path, provider, model, pool, start)
+            timeout = getattr(self.config, "responses_header_timeout", 0)
+            if timeout > 0 and _is_responses_path(path):
+                try:
+                    return await asyncio.wait_for(work, timeout=timeout)
+                except asyncio.TimeoutError:
+                    await _cancel_spawned(spawned)
+                    reason = f"Responses upstream did not return headers within {timeout:.1f}s"
+                    self.logger.error(f"{_tag(method, path, provider, model)} {reason}")
+                    return RetryResult(None, 0, progress["sent"], 0, [], False, "", start, [], reason)
+            return await work
+        except KeyPoolWaitTimeout as exc:
+            await _cancel_spawned(spawned)
+            self.logger.error(
+                f"{_tag(method, path, provider, model)} 号池等待超时: {exc}"
+            )
+            return RetryResult(None, 0, progress["sent"], 0, [], False, "", start, [], str(exc))
         except asyncio.CancelledError:
             await _cancel_spawned(spawned)
             self.logger.info(f"{_tag(method, path, provider, model)} 下游已断开，停止重试")
             raise
         finally:
+            _request_progress.reset(progress_token)
             _spawned_tasks.reset(spawned_token)
 
     async def _request(self, method, url, headers, body, path, provider, model, pool, start):
@@ -416,7 +495,7 @@ class RetryProxy:
         while True:
             attempt += 1
             self.logger.debug(f"{_tag(method, path, provider, model)} #{attempt} 选号 总{time.time() - start:.2f}s")
-            entry = await _pick_key(pool); send_headers = headers_with_key(headers, entry.key) if entry else headers
+            entry = await _pick_key(pool, getattr(self.config, "key_pool_wait_timeout", None)); send_headers = headers_with_key(headers, entry.key) if entry else headers
             if entry: last_key_id = entry.key_id
             key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
             if self.config.max_retries > 0 and attempt > self.config.max_retries:
@@ -425,7 +504,7 @@ class RetryProxy:
             cycle = time.time()
             self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{attempt} 发出上游 总{cycle - start:.2f}s")
             try:
-                response = await self._send(method, url, send_headers, body)
+                response = await self._send_upstream(method, url, send_headers, body)
                 now = time.time()
                 self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{attempt} 收到响应头 {response.status_code} 本次{now - cycle:.2f}s 总{now - start:.2f}s")
             except (httpx.RequestError, httpx.HTTPError) as exc:
@@ -435,15 +514,17 @@ class RetryProxy:
                 if not model:
                     self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #1({elapsed:.2f}s) 不重试")
                     return RetryResult(None, 0, 1, 0, retry_codes, False, last_key_id, start, key_attempts)
-                sleep_for = max(self.config.retry_interval - elapsed, 0)
+                sleep_for = max(self.config.retry_interval - elapsed, 0); pool_wait = 0.0
                 self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt}({elapsed:.2f}s) {exc!r} {sleep_for:.2f}s后重试")
                 if pool and entry and not is_host_level_error(exc):
                     _mark_key_failure(pool, entry, self.config, 0)
                     if pool.has_fresh():
                         self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} ERR #{attempt} 换key 总{time.time() - start:.1f}s")
                         continue
-                    sleep_for = max(sleep_for, pool.next_available_in())
-                await asyncio.sleep(sleep_for); continue
+                    pool_wait = pool.next_available_in(); sleep_for = max(sleep_for, pool_wait)
+                await _sleep_before_retry(
+                    sleep_for, pool, pool_wait, getattr(self.config, "key_pool_wait_timeout", None),
+                ); continue
             if model and _should_retry(response.status_code):
                 _record_key_attempt(key_attempts, entry, False)
                 last_status = response.status_code; retry_codes.append(response.status_code)
@@ -466,9 +547,12 @@ class RetryProxy:
                 if response.status_code == 429: c429 += 1; cother = 0; wait, src = calc_backoff_wait(c429, self.config.retry_interval_429, self.config.retry_backoff_max_429, self.config.retry_backoff_429, ra)
                 else: cother += 1; c429 = 0; wait, src = calc_backoff_wait(cother, self.config.retry_interval, self.config.retry_backoff_max, self.config.retry_backoff)
                 sleep_for = wait if src.startswith("RA") else max(wait - (time.time() - cycle), 0)
-                if pool and not pool.has_fresh(): sleep_for = max(sleep_for, pool.next_available_in())
+                pool_wait = pool.next_available_in() if pool and not pool.has_fresh() else 0.0
+                sleep_for = max(sleep_for, pool_wait)
                 self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(response.status_code)} #{attempt} {sleep_for:.2f}s后重试{f'({src})' if src else ''} 总{time.time() - start:.1f}s")
-                await asyncio.sleep(sleep_for); continue
+                await _sleep_before_retry(
+                    sleep_for, pool, pool_wait, getattr(self.config, "key_pool_wait_timeout", None),
+                ); continue
             key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
             self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} -> {_sc(response.status_code)} #{attempt} {time.time() - start:.2f}s")
             _record_key_attempt(key_attempts, entry, _key_available_for_status(response.status_code))

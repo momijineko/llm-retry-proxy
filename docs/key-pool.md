@@ -64,7 +64,7 @@ KEY_POOLS=https://aihub.top|aihub|sk-cheap;sk-premium,https://other.com|other|sk
 5. 同一 key 在熔断到期后再次遇到同类错误，冷却时间按 `1→2→4...` 倍延长，默认最高 1 小时；任意成功响应会立即清空该 key 的连续失败级别
 6. 429 带 `Retry-After` 时取 `max(指数熔断时间, Retry-After)`，即使超过 `KEY_COOLDOWN_MAX` 也尊重上游时间
 7. **粘性保持**（`KEY_STICKY` 默认 120 秒）：选定一个 key 后，后续请求会不断续期；只有持续空闲超过 2 分钟或当前 key 被限流，下一次才从号池开头重新选择。设为 `0` 禁用
-8. 全部 key 熔断时，请求等待最早到期的 key 再进行探测，不会穿透熔断继续高频请求；客户端断开后等待会立即取消
+8. 全部 key 熔断时，请求等待最早到期的 key 再进行探测，不会穿透熔断继续高频请求；等待超过 `KEY_POOL_WAIT_TIMEOUT`（默认 120 秒）后返回 503，客户端断开后也会立即取消
 
 ## 向后兼容
 

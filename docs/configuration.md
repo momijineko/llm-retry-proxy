@@ -22,6 +22,7 @@
 | `MAX_CONCURRENT` | `10` | 竞速模式下同时在飞/每轮并发的最大请求数 |
 | `TIMEOUT` | `300` | 读写超时（秒），流式下指两次数据间最大间隔 |
 | `CONNECT_TIMEOUT` | `10` | 连接上游超时（秒） |
+| `RESPONSES_HEADER_TIMEOUT` | `120` | Responses API 整笔请求从开始处理到收到响应头的硬上限（秒）；预算内正常重试，`0` = 不限制 |
 | `TRUST_ENV` | `false` | 是否让 HTTP 客户端读取系统代理等环境变量 |
 | `PROVIDER` | `xfyun` | 供应商标签，写入每条重试记录，用于区分不同上游/账号 |
 | `EXTRA_UPSTREAMS` | （空） | 额外上游路由，按路径前缀分流。格式 `prefix\|url\|provider`，多组逗号分隔。详见[多上游路由](routing.md) |
@@ -34,7 +35,7 @@
 | `KEY_COOLDOWN_MAX` | `3600` | 连续同类错误指数熔断的上限（秒），不截短上游 `Retry-After` |
 | `KEY_COOLDOWN_BACKOFF` | `true` | 同类错误在熔断到期后再次失败时，将熔断时间按 `1→2→4...` 倍延长；成功后清零 |
 | `KEY_STICKY` | `120` | key 粘性空闲超时（秒）。`0` = 禁用 |
-| `KEY_POOL_WAIT_TIMEOUT` | `120` | 全部 key 熔断时等待可用 key 的最长时间（秒） |
+| `KEY_POOL_WAIT_TIMEOUT` | `120` | 全部 key 熔断时等待可用 key 的最长时间（秒）；超时返回 503，`0` = 不限制 |
 | `KEY_AUTH_HEADER` | `authorization` | 号池注入鉴权头的 header 名 |
 | `KEY_AUTH_SCHEME` | `Bearer` | 鉴权 scheme 前缀；设为空则只放裸 key |
 | `LOG_DIR` | `logs` | 日志目录。明细按天拆分为 `retry_YYYY-MM-DD.jsonl`，累计汇总存 `_summary.json` |
