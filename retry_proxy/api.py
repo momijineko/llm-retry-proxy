@@ -32,21 +32,24 @@ def outbound_request_headers(request_headers, path, model, config=settings):
 
 async def _run_until_disconnect(request, awaitable):
     work = asyncio.create_task(awaitable)
+
     async def watch_disconnect():
-        while not await request.is_disconnected():
-            await asyncio.sleep(0.1)
+        while True:
+            message = await request.receive()
+            if message.get("type") == "http.disconnect":
+                return
+
     watcher = asyncio.create_task(watch_disconnect())
     try:
         done, _ = await asyncio.wait((work, watcher), return_when=asyncio.FIRST_COMPLETED)
         if work in done:
             return await work
-        work.cancel()
-        await asyncio.gather(work, return_exceptions=True)
         return None
     finally:
-        if not watcher.done():
-            watcher.cancel()
-        await asyncio.gather(watcher, return_exceptions=True)
+        for task in (work, watcher):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(work, watcher, return_exceptions=True)
 
 
 def _summary_view(summary):
