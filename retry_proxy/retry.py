@@ -379,7 +379,13 @@ class RetryProxy:
             except KeyPoolWaitTimeout: raise
             except Exception as exc: return "error", exc, n, entry
         def can_fire(now): return winner is None and (self.config.max_retries == 0 or total_sent < self.config.max_retries) and len(in_flight) < self.config.max_concurrent and now >= next_allowed
-        total_sent = 1; task = _spawn(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
+        def launch(now):
+            nonlocal total_sent, next_allowed
+            total_sent += 1
+            task = _spawn(send(total_sent)); in_flight[task] = now; all_tasks.add(task)
+            next_allowed = max(next_allowed, now + self.config.retry_interval)
+            return task
+        launch(time.time())
         while True:
             key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
             if not in_flight:
@@ -390,15 +396,16 @@ class RetryProxy:
                 await _sleep_before_retry(
                     wait, pool, pool_wait, getattr(self.config, "key_pool_wait_timeout", None),
                 )
-                if can_fire(time.time()):
-                    total_sent += 1; task = _spawn(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
+                now = time.time()
+                if can_fire(now):
+                    task = launch(now)
                 continue
-            now = time.time(); delay = max(min(in_flight.values()) + self.config.retry_interval - now, 0)
+            now = time.time(); delay = max(next_allowed - now, 0)
             done, _ = await asyncio.wait(set(in_flight), timeout=delay, return_when=asyncio.FIRST_COMPLETED)
             now = time.time()
             if not done:
                 if can_fire(now):
-                    total_sent += 1; task = _spawn(send(total_sent)); in_flight[task] = now; all_tasks.add(task)
+                    task = launch(now)
                     self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} 补发#{total_sent}(在飞{len(in_flight)}) {now - t0:.1f}s")
                 continue
             for task in done:
@@ -455,9 +462,10 @@ class RetryProxy:
                         if kind == "ok" and result is not winner: await result.aclose()
                     except Exception: pass
                 in_flight.clear(); break
-            if in_flight and can_fire(time.time()) and any(time.time() - stamp >= self.config.retry_interval for stamp in in_flight.values()):
-                total_sent += 1; task = _spawn(send(total_sent)); in_flight[task] = time.time(); all_tasks.add(task)
-                self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} 补发#{total_sent}(在飞{len(in_flight)}) {time.time() - t0:.1f}s")
+            now = time.time()
+            if in_flight and can_fire(now):
+                task = launch(now)
+                self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} 补发#{total_sent}(在飞{len(in_flight)}) {now - t0:.1f}s")
         return RetryResult(winner, winner_attempt, total_sent, last_status, retry_codes, bool(winner and winner_attempt == 1), last_key_id, t0, key_attempts)
 
     async def request(self, method, url, headers, body, path, provider, model, pool=None):

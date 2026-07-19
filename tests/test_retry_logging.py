@@ -87,6 +87,34 @@ class RetryLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sent_at), 3)
         self.assertGreaterEqual(min(b - a for a, b in zip(sent_at, sent_at[1:])), 0.02)
 
+    async def test_stagger_initial_launches_are_spacing_gated(self):
+        config = SimpleNamespace(
+            hedge_mode="stagger", max_concurrent=3, max_retries=3,
+            retry_interval=0.03, retry_interval_429=0.05,
+            retry_backoff=False, retry_backoff_max=60,
+            retry_backoff_429=True, retry_backoff_max_429=60,
+        )
+        proxy = RetryProxy(config=config, client=object())
+        sent_at = []
+
+        async def send(*_args):
+            sent_at.append(time.monotonic())
+            await asyncio.sleep(0.08)
+            return httpx.Response(
+                200, json={"ok": True},
+                request=httpx.Request("POST", "https://upstream.test"),
+            )
+
+        proxy._send = send
+        result = await proxy.request(
+            "POST", "https://upstream.test", {}, b"{}",
+            "v1/chat", "test", "model",
+        )
+
+        self.assertEqual(result.response.status_code, 200)
+        self.assertEqual(len(sent_at), 3)
+        self.assertGreaterEqual(min(b - a for a, b in zip(sent_at, sent_at[1:])), 0.02)
+
 
 if __name__ == "__main__":
     unittest.main()
