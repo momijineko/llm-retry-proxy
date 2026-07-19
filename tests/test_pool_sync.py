@@ -242,6 +242,50 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.provider, "static-provider")
         self.assertEqual([entry.key for entry in restored.entries], ["static-key"])
 
+    async def test_same_provider_online_source_overrides_route_and_pool_then_restores_static(self):
+        test_url = "http://57.131.13.16:8080"
+        production_url = "https://upstream.test"
+        route_config = SimpleNamespace(
+            extra_upstreams=f"/aihub|{test_url}|aihub",
+            upstream_url="https://default.test", provider="default",
+        )
+        registry = RouteRegistry(route_config)
+        static = KeyPool([("static-key", "static")], "aihub")
+        pools = {test_url: static}
+        manager = PoolSyncManager(
+            pools, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()}, registry,
+        )
+
+        status = await manager.connect(
+            "sub2api", production_url, "aihub",
+            {"email": "user@example.com", "password": "secret"}, "/aihub",
+        )
+        source_id = status["sources"][0]["id"]
+
+        self.assertEqual(manager.sources[source_id]["pool_url"], production_url)
+        self.assertEqual(registry.match("aihub/responses")[0], production_url)
+        self.assertEqual([entry.key for entry in pools[production_url].entries], ["sk-secret-one"])
+        self.assertEqual([entry.key for entry in pools[test_url].entries], ["static-key"])
+
+        restored_pools = {test_url: KeyPool([("static-key", "static")], "aihub")}
+        restored_registry = RouteRegistry(route_config)
+        restored = PoolSyncManager(
+            restored_pools, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()},
+            restored_registry,
+        )
+        restored.load_state()
+        self.assertEqual(
+            [entry.key for entry in restored_pools[production_url].entries], ["sk-secret-one"],
+        )
+        self.assertEqual([entry.key for entry in restored_pools[test_url].entries], ["static-key"])
+        self.assertEqual(restored_registry.match("aihub/responses")[0], production_url)
+
+        await restored.delete(source_id)
+
+        self.assertNotIn(production_url, restored_pools)
+        self.assertEqual([entry.key for entry in restored_pools[test_url].entries], ["static-key"])
+        self.assertEqual(restored_registry.match("aihub/responses")[0], test_url)
+
     async def test_disconnect_keeps_source_route_and_last_synced_pool(self):
         route_config = SimpleNamespace(
             extra_upstreams="", upstream_url="https://default.test", provider="default",

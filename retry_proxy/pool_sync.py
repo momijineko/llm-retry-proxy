@@ -64,8 +64,21 @@ class PoolSyncManager:
         pool.finalize_entries()
         return pool
 
+    @staticmethod
+    def _pool_url(source):
+        return (source.get("pool_url") or source["base_url"]).rstrip("/")
+
+    def _resolve_pool_url(self, source):
+        base_url = source["base_url"].rstrip("/")
+        prefix = source.get("route_prefix", "")
+        if self.route_registry is None or not prefix:
+            return (source.get("pool_url") or base_url).rstrip("/")
+        return self.route_registry.environment_upstream(
+            prefix, base_url, source.get("provider", ""),
+        )
+
     def _activate(self, source):
-        replace_key_pool(source["base_url"], self._pool_from_source(source), self.pools)
+        replace_key_pool(self._pool_url(source), self._pool_from_source(source), self.pools)
 
     def _restore_static(self, base_url):
         base_url = base_url.rstrip("/")
@@ -106,6 +119,11 @@ class PoolSyncManager:
                 source["base_url"] = source["base_url"].rstrip("/")
                 source.setdefault("route_prefix", "")
                 source.setdefault("group_rules", {})
+                try:
+                    source["pool_url"] = self._resolve_pool_url(source)
+                except ValueError as exc:
+                    source["pool_url"] = source["base_url"]
+                    logger.warning(f"号池运行地址未绑定到环境路由: {exc}")
                 self.sources[source["id"]] = source
                 if self.route_registry is not None and source.get("route_prefix"):
                     try:
@@ -146,7 +164,7 @@ class PoolSyncManager:
 
     def _merge_local_rules(self, source, entries):
         rules = {}
-        current = self.pools.get(source["base_url"])
+        current = self.pools.get(self._pool_url(source))
         if current:
             rules.update({entry.key: (list(entry.models), list(entry.paths)) for entry in current.entries})
         for item in source.get("entries") or []:
@@ -187,6 +205,10 @@ class PoolSyncManager:
             raise PoolSyncError("上游地址必须以 http:// 或 https:// 开头")
         adapter = self._adapter(adapter_name)
         source_id = _source_id(adapter_name, base_url)
+        existing = self.sources.get(source_id)
+        requested_provider = (
+            provider or (existing or {}).get("provider") or self.config.provider
+        ).strip()
         normalized_route_prefix = None
         if route_prefix is not None:
             try:
@@ -194,7 +216,9 @@ class PoolSyncManager:
                 if not normalized_route_prefix:
                     raise ValueError("代理前缀不能为空或使用根路径")
                 if self.route_registry is not None:
-                    self.route_registry.validate(source_id, normalized_route_prefix, base_url)
+                    self.route_registry.validate(
+                        source_id, normalized_route_prefix, base_url, requested_provider,
+                    )
             except ValueError as exc:
                 raise PoolSyncError(str(exc)) from exc
         async with self._lock:
@@ -205,13 +229,17 @@ class PoolSyncManager:
                 raise PoolSyncError("同一上游地址已由另一个连接接管")
             source = self.sources.get(source_id, {
                 "id": source_id, "adapter": adapter_name, "base_url": base_url,
-                "provider": (provider or self.config.provider).strip(), "session": {}, "entries": [],
+                "provider": requested_provider, "session": {}, "entries": [],
                 "route_prefix": "",
                 "last_sync_at": "", "last_attempt_at": "", "last_error": "",
             })
-            source["provider"] = (provider or source.get("provider") or self.config.provider).strip()
+            source["provider"] = requested_provider
             if normalized_route_prefix is not None:
                 source["route_prefix"] = normalized_route_prefix
+            try:
+                source["pool_url"] = self._resolve_pool_url(source)
+            except ValueError as exc:
+                raise PoolSyncError(str(exc)) from exc
             try:
                 source["session"] = await adapter.connect(self.client, source, credentials or {})
             except PoolSyncError:
@@ -410,7 +438,7 @@ class PoolSyncManager:
                          if str(entry.get("source_key_id")) == str(source_key_id)), None)
             if item is None:
                 raise PoolSyncError("Key 不存在或已被上游删除")
-            pool = self.pools.get(source["base_url"])
+            pool = self.pools.get(self._pool_url(source))
             runtime = next((entry for entry in pool.entries if entry.key == item.get("key")), None) if pool else None
             if runtime is None:
                 raise PoolSyncError("Key 尚未加载到运行时号池")
@@ -433,7 +461,7 @@ class PoolSyncManager:
                 logger.warning(f"上游会话撤销失败，继续删除本地号池: {exc}")
             self.sources.pop(source_id, None)
             self.operations.pop(source_id, None)
-            self._restore_static(source["base_url"])
+            self._restore_static(self._pool_url(source))
             if self.route_registry is not None:
                 self.route_registry.unregister(source_id)
             self._save_state()
@@ -469,7 +497,7 @@ class PoolSyncManager:
         now = datetime.now().timestamp()
         for source in selected:
             adapter = self._adapter(source["adapter"])
-            pool = self.pools.get(source["base_url"])
+            pool = self.pools.get(self._pool_url(source))
             route_prefix = source.get("route_prefix", "")
             if not route_prefix and self.route_registry is not None:
                 route_prefix = self.route_registry.environment_prefix_for_url(source["base_url"])

@@ -51,20 +51,32 @@ class RouteRegistry:
         return routes
 
     def _refresh(self):
-        environment_prefixes = {route[0] for route in self._environment}
-        managed = [route for route in self._managed.values() if route[0] not in environment_prefixes]
-        extras = list(self._environment) + managed
+        environment = {route[0]: route for route in self._environment}
+        managed = [
+            route for route in self._managed.values()
+            if route[0] not in environment or route[2] == environment[route[0]][2]
+        ]
+        overridden = {route[0] for route in managed}
+        extras = managed + [route for route in self._environment if route[0] not in overridden]
         extras.sort(key=lambda route: len(route[0]), reverse=True)
         self.routes[:] = extras + [("", self.config.upstream_url, self.config.provider, False)]
 
-    def validate(self, source_id: str, prefix: str, upstream_url: str):
+    def environment_upstream(self, prefix: str, upstream_url: str, provider: str = "") -> str:
+        """Resolve the runtime upstream when a sync source reuses an env route."""
+        prefix = normalize_route_prefix(prefix)
+        upstream_url = (upstream_url or "").strip().rstrip("/")
+        environment = next((route for route in self._environment if route[0] == prefix), None)
+        if environment is None or environment[1] == upstream_url:
+            return upstream_url
+        if (provider or "").strip() == environment[2]:
+            return upstream_url
+        raise ValueError(f"代理前缀 {prefix} 已由 EXTRA_UPSTREAMS 配置为 {environment[1]}")
+
+    def validate(self, source_id: str, prefix: str, upstream_url: str, provider: str = ""):
         prefix = normalize_route_prefix(prefix)
         if not prefix:
             return prefix
-        upstream_url = (upstream_url or "").strip().rstrip("/")
-        environment = next((route for route in self._environment if route[0] == prefix), None)
-        if environment is not None and environment[1] != upstream_url:
-            raise ValueError(f"代理前缀 {prefix} 已由 EXTRA_UPSTREAMS 配置为 {environment[1]}")
+        self.environment_upstream(prefix, upstream_url, provider)
         conflict = next((route for sid, route in self._managed.items()
                          if sid != source_id and route[0] == prefix), None)
         if conflict is not None:
@@ -72,7 +84,7 @@ class RouteRegistry:
         return prefix
 
     def register(self, source_id: str, prefix: str, upstream_url: str, provider: str):
-        prefix = self.validate(source_id, prefix, upstream_url)
+        prefix = self.validate(source_id, prefix, upstream_url, provider)
         if not prefix:
             self.unregister(source_id)
             return ""

@@ -43,6 +43,29 @@ class RouteRegistryTests(unittest.TestCase):
         registry.register("source-1", "/fixed", "https://env.test", "managed")
         self.assertEqual(registry.match("fixed/models")[:2], ("https://env.test", "env"))
 
+    def test_same_provider_managed_route_overrides_environment_target(self):
+        registry = RouteRegistry(self.config("/aihub|http://57.131.13.16:8080|aihub"))
+
+        registry.register("source-1", "/aihub", "https://account.aihub.test", "aihub")
+
+        self.assertEqual(
+            registry.environment_upstream(
+                "/aihub", "https://account.aihub.test", "aihub",
+            ),
+            "https://account.aihub.test",
+        )
+        self.assertEqual(
+            registry.match("aihub/v1/models")[:2],
+            ("https://account.aihub.test", "aihub"),
+        )
+
+        registry.unregister("source-1")
+
+        self.assertEqual(
+            registry.match("aihub/v1/models")[:2],
+            ("http://57.131.13.16:8080", "aihub"),
+        )
+
     def test_prefix_normalization_and_validation(self):
         self.assertEqual(normalize_route_prefix("example/"), "/example")
         self.assertEqual(normalize_route_prefix("/"), "")
