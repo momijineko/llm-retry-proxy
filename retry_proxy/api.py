@@ -1,8 +1,10 @@
 import asyncio
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta
+from urllib.parse import unquote
 
 import httpx
 from fastapi import Request
@@ -17,6 +19,49 @@ from .stats import _normalize_provider, _req_succeeded, _upstream_window_stats, 
 
 SKIP_REQUEST_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade"}
 SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "keep-alive", "content-encoding"}
+
+_GEMINI_MODEL_PATH = re.compile(
+    r"(?:^|/)models/([^/:]+):(?:generatecontent|streamgeneratecontent|embedcontent|batchgeneratecontent)(?:/|$)",
+    re.IGNORECASE,
+)
+
+
+def classify_endpoint(path):
+    """Return a stable endpoint family for capability-aware key routing."""
+    normalized = (path or "").strip("/").lower()
+    if not normalized:
+        return ""
+    if _GEMINI_MODEL_PATH.search(normalized):
+        return "gemini"
+    segments = normalized.split("/")
+    if "images" in segments:
+        return "images"
+    if len(segments) >= 2 and segments[-2:] == ["chat", "completions"]:
+        return "chat"
+    for family in ("responses", "messages", "embeddings", "audio"):
+        if family in segments:
+            return family
+    return ""
+
+
+def parse_request_model(body, path=""):
+    model = parse_model(body)
+    if model:
+        return model
+    match = _GEMINI_MODEL_PATH.search((path or "").strip("/"))
+    return unquote(match.group(1)) if match else ""
+
+
+def classify_model_scope(model, endpoint_family=""):
+    value = (model or "").strip().lower()
+    if value.startswith("claude"):
+        return "claude"
+    if value.startswith("gemini"):
+        image_markers = ("image", "imagen", "nano-banana")
+        if endpoint_family == "images" or any(marker in value for marker in image_markers):
+            return "gemini_image"
+        return "gemini_text"
+    return ""
 
 
 def _sse_has_token(buffer):
@@ -279,7 +324,9 @@ def create_handlers(service, store):
                     logger.warning(f"{_tag(request.method, path, provider, '', client_ip)} DLP{action} rules={rules}{count}")
                 if dlp.exemptions:
                     logger.info(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免 count={dlp.exemptions}")
-        model_name = parse_model(body)
+        endpoint_family = classify_endpoint(remaining)
+        model_name = parse_request_model(body, remaining)
+        model_scope = classify_model_scope(model_name, endpoint_family)
         outbound_headers = outbound_request_headers(request.headers, remaining, model_name)
         base_pool = KEY_POOLS.get(upstream)
         pool_credential_ok = can_use_key_pool(request.headers)
@@ -289,10 +336,30 @@ def create_handlers(service, store):
                 status_code=503, media_type="application/json",
             )
         pool_access = bool(base_pool and pool_credential_ok)
-        request_pool = base_pool.for_request(model_name, remaining) if pool_access else None
+        capability_routing = bool(
+            pool_access and endpoint_family and base_pool.has_routing_capabilities()
+        )
+        request_pool = base_pool.for_request(
+            model_name, remaining, endpoint_family, model_scope,
+        ) if pool_access else None
         if pool_access and request_pool is None:
-            return Response('{"error":{"type":"key_pool_no_match","message":"No key pool entry matches this request"}}',
-                            status_code=403, media_type="application/json")
+            error_type = (
+                "key_pool_no_compatible_route" if capability_routing else "key_pool_no_match"
+            )
+            message = (
+                "No compatible key pool route for this endpoint and model"
+                if capability_routing else "No key pool entry matches this request"
+            )
+            payload = json.dumps({"error": {
+                "type": error_type,
+                "message": message,
+                "model": model_name,
+                "endpoint_family": endpoint_family,
+                "provider": provider,
+                "upstream": upstream,
+                "reason": "capability_mismatch" if capability_routing else "manual_rule_mismatch",
+            }}, ensure_ascii=False)
+            return Response(payload, status_code=403, media_type="application/json")
         key_pool = upstream if request_pool else ""
         ip_token = set_client_ip(client_ip)
         try:

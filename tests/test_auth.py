@@ -7,6 +7,7 @@ from starlette.requests import Request
 
 from retry_proxy.config import admin_session_value, can_use_key_pool, require_admin
 from retry_proxy.api import create_handlers
+from retry_proxy.key_pool import KeyEntry, KeyPool
 
 
 def _request(authorization="", cookie="", path="/stats/api"):
@@ -97,6 +98,37 @@ class ProxyPoolRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertIn(b"key_pool_unavailable", response.body)
+        service.request.assert_not_awaited()
+
+    async def test_incompatible_synced_pool_is_rejected_without_upstream_request(self):
+        config = SimpleNamespace(
+            proxy_api_key="", dlp_mode="off", dlp_max_body_bytes=1024,
+            image_upstream_user_agent="", image_upstream_originator="",
+        )
+        pool = KeyPool([])
+        pool.entries = [KeyEntry("anthropic-key", "anthropic", routing_capabilities={
+            "platform": "anthropic", "endpoint_families": ["messages"],
+        })]
+        service = SimpleNamespace(request=AsyncMock())
+        proxy = create_handlers(service, SimpleNamespace())[-1]
+        request = Request({
+            "type": "http", "method": "POST", "path": "/responses",
+            "headers": [(b"content-type", b"application/json")],
+            "query_string": b"", "server": ("test", 80), "client": ("127.0.0.1", 1),
+        }, receive=AsyncMock(return_value={
+            "type": "http.request", "body": b'{"model":"gpt-4o"}', "more_body": False,
+        }))
+
+        with patch("retry_proxy.api.settings", config), \
+                patch("retry_proxy.config.settings", config), \
+                patch("retry_proxy.api.KEY_POOLS", {"https://upstream.test": pool}), \
+                patch("retry_proxy.api.match_route",
+                      return_value=("https://upstream.test", "test", "responses")):
+            response = await proxy("responses", request)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn(b"key_pool_no_compatible_route", response.body)
+        self.assertIn(b'"endpoint_family": "responses"', response.body)
         service.request.assert_not_awaited()
 
 

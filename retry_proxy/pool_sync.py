@@ -67,6 +67,8 @@ class PoolSyncManager:
                 item["key"], item.get("label", ""), item.get("models", ()),
                 item.get("paths", ()), item.get("sort", ""),
                 item.get("group_id", ""), item.get("group_name", ""),
+                item.get("routing_capabilities"),
+                item.get("auth"),
             ))
         pool.finalize_entries()
         return pool
@@ -157,7 +159,7 @@ class PoolSyncManager:
             return
         directory = os.path.dirname(os.path.abspath(self.state_file))
         os.makedirs(directory, exist_ok=True)
-        state = {"version": 2, "interval": self.config.key_pool_sync_interval,
+        state = {"version": 3, "interval": self.config.key_pool_sync_interval,
                  "sources": self._persistent_sources()}
         fd, temp_path = tempfile.mkstemp(prefix=".pool_sync_", suffix=".json", dir=directory)
         try:
@@ -477,6 +479,18 @@ class PoolSyncManager:
     def _probe_status(status):
         return 200 <= status < 400
 
+    @staticmethod
+    def _probe_failure(status):
+        if status == 0:
+            return "transport_error", True
+        if status in (401, 403):
+            return "auth_error", True
+        if status == 429:
+            return "rate_limited", True
+        if status >= 500:
+            return "upstream_error", True
+        return "request_rejected", False
+
     async def check_availability(self, source_id, model=None):
         source = self.sources.get(source_id)
         if source is None:
@@ -489,43 +503,48 @@ class PoolSyncManager:
             raise PoolSyncError("请先填写检测模型")
         source["check_model"] = check_model
         self._save_state()
-        probe_url = source["base_url"].rstrip("/") + "/v1/chat/completions"
+        adapter = self._adapter(source["adapter"])
+        request_spec = adapter.availability_request(source, check_model)
+        if not isinstance(request_spec, dict) or not request_spec.get("url"):
+            raise PoolSyncError("同步适配器未提供有效的可用性检测请求")
+        probe_url = request_spec["url"]
+        probe_payload = request_spec.get("json") or {}
+        probe_headers = request_spec.get("headers") or {}
         groups = {}
         for entry in pool.entries:
             groups.setdefault(entry.group_id or entry.key, []).append(entry)
         semaphore = asyncio.Semaphore(2)
 
         async def probe(entry):
-            headers = {self.config.key_auth_header: (
-                f"{self.config.key_auth_scheme} {entry.key}"
-                if self.config.key_auth_scheme else entry.key
-            )}
-            payload = {
-                "model": check_model,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 1,
-                "stream": False,
-            }
+            headers = dict(probe_headers)
+            headers[entry.auth_header] = (
+                f"{entry.auth_scheme} {entry.key}"
+                if entry.auth_scheme else entry.key
+            )
             try:
                 async with semaphore:
                     started = time.monotonic()
                     response = await self.client.post(
-                        probe_url, json=payload, headers=headers, timeout=30,
+                        probe_url, json=probe_payload, headers=headers, timeout=30,
                     )
                     elapsed = time.monotonic() - started
                 available = self._probe_status(response.status_code)
                 if available:
                     pool.record_ttft(entry, elapsed)
-                return entry, response.status_code, available, elapsed
+                reason, circuit_failure = (
+                    ("available", False) if available
+                    else self._probe_failure(response.status_code)
+                )
+                return entry, response.status_code, available, elapsed, reason, circuit_failure
             except httpx.RequestError:
-                return entry, 0, False, None
+                return entry, 0, False, None, "transport_error", True
 
         async def probe_group(entries):
             attempts = []
             for entry in entries:
                 result = await probe(entry)
                 attempts.append(result)
-                if result[2]:
+                if result[2] or not result[5]:
                     break
             return attempts
 
@@ -537,7 +556,10 @@ class PoolSyncManager:
         for group_id, attempts in by_group.items():
             available = any(item[2] is True for item in attempts)
             explicitly_failed = bool(attempts) and all(item[2] is False for item in attempts)
-            if not available and explicitly_failed:
+            circuit_opened = (
+                explicitly_failed and all(item[5] is True for item in attempts)
+            )
+            if circuit_opened:
                 status = next(item[1] for item in attempts if item[2] is False)
                 for entry in groups[group_id]:
                     pool.mark_cooldown(
@@ -548,13 +570,29 @@ class PoolSyncManager:
                 "group_id": group_id,
                 "group_name": groups[group_id][0].group_name or groups[group_id][0].label,
                 "available": True if available else False if explicitly_failed else None,
+                "circuit_opened": circuit_opened,
+                "reason": "available" if available else attempts[-1][4],
                 "statuses": [item[1] for item in attempts],
                 "ttft_s": min((item[3] for item in attempts if item[2] and item[3] is not None),
                                default=None),
             })
+        unavailable = sum(item["available"] is False for item in summary)
+        rejected = sum(
+            item["available"] is False and not item["circuit_opened"] for item in summary
+        )
+        circuit_opened = sum(item["circuit_opened"] for item in summary)
+        status_counts = {}
+        for item in summary:
+            for status in item["statuses"]:
+                status_counts[status] = status_counts.get(status, 0) + 1
+        status_summary = ",".join(
+            f"{status}:{count}" for status, count in sorted(status_counts.items())
+        )
         logger.info(
-            f"号池可用性检测完成: upstream={source['base_url']} groups={len(summary)} "
-            f"unavailable={sum(item['available'] is False for item in summary)}"
+            f"号池可用性检测完成: upstream={source['base_url']} model={check_model} "
+            f"groups={len(summary)} statuses={status_summary or '-'} "
+            f"unavailable={unavailable} request_rejected={rejected} "
+            f"circuit_opened={circuit_opened}"
         )
         return {"model": check_model, "checks": summary, "state": self.status()}
 
@@ -673,6 +711,7 @@ class PoolSyncManager:
                     "key_name": item.get("key_name", ""), "group_name": item.get("group_name", ""),
                     "platform": item.get("platform", ""),
                     "allow_image_generation": bool(item.get("allow_image_generation")),
+                    "routing_capabilities": dict(item.get("routing_capabilities") or {}),
                     "models": item.get("models", []),
                     "paths": item.get("paths", []),
                     "cooled": bool(entry and entry.cooldown_until > now),

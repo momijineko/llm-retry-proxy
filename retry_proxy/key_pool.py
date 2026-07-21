@@ -20,11 +20,12 @@ KEY_POOL_STRATEGIES = {"cost", "ttft", "balanced"}
 
 class KeyEntry:
     __slots__ = ("key", "key_id", "legacy_key_id", "label", "sort", "group_id", "group_name",
-                 "models", "paths", "cooldown_until", "total_fail",
+                 "models", "paths", "routing_capabilities", "auth_header", "auth_scheme",
+                 "cooldown_until", "total_fail",
                  "last_fail_ts", "consecutive_failures", "last_failure_kind", "last_failure_status",
                  "last_cooldown_s", "ttft_ewma", "ttft_samples", "ttft_last_ts")
     def __init__(self, key: str, label: str = "", models=(), paths=(), sort: str = "",
-                 group_id: str = "", group_name: str = ""):
+                 group_id: str = "", group_name: str = "", routing_capabilities=None, auth=None):
         self.key, self.label, self.sort = key, label, sort.strip()
         self.group_id = str(group_id) if group_id not in (None, "") else ""
         self.group_name = group_name
@@ -32,6 +33,27 @@ class KeyEntry:
         self.key_id = f"{self.legacy_key_id}|{self.sort}" if self.sort else self.legacy_key_id
         self.models = tuple(pattern.lower() for pattern in models)
         self.paths = tuple(pattern.lstrip("/").lower() for pattern in paths)
+        capabilities = routing_capabilities if isinstance(routing_capabilities, dict) else {}
+        self.routing_capabilities = {
+            "platform": str(capabilities.get("platform") or "").strip().lower(),
+            "endpoint_families": tuple(
+                str(value).strip().lower() for value in capabilities.get("endpoint_families", ())
+                if str(value).strip()
+            ),
+            "model_patterns": tuple(
+                str(value).strip().lower() for value in capabilities.get("model_patterns", ())
+                if str(value).strip()
+            ),
+            "model_scopes": tuple(
+                str(value).strip().lower() for value in capabilities.get("model_scopes", ())
+                if str(value).strip()
+            ),
+            "image_generation": bool(capabilities.get("image_generation")),
+        } if capabilities else {}
+        auth = auth if isinstance(auth, dict) else {}
+        self.auth_header = str(auth.get("header") or settings.key_auth_header).strip().lower()
+        raw_scheme = auth.get("scheme") if "scheme" in auth else None
+        self.auth_scheme = settings.key_auth_scheme if raw_scheme is None else str(raw_scheme)
         self.cooldown_until = 0.0
         self.total_fail = 0
         self.last_fail_ts = 0.0
@@ -90,13 +112,42 @@ class KeyPool:
                 fingerprint = hashlib.sha256(entry.key.encode("utf-8")).hexdigest()[:8]
                 entry.key_id = f"{base}#{fingerprint}"
 
-    def for_request(self, model="", path=""):
+    @staticmethod
+    def _capability_matches(entry, model, endpoint_family, model_scope):
+        capabilities = entry.routing_capabilities
+        if not capabilities:
+            return False
+        families = capabilities.get("endpoint_families", ())
+        if endpoint_family and endpoint_family not in families:
+            return False
+        patterns = capabilities.get("model_patterns", ())
+        if patterns and (not model or not any(
+                fnmatch.fnmatchcase(model, pattern) for pattern in patterns)):
+            return False
+        scopes = capabilities.get("model_scopes", ())
+        if scopes and (not model_scope or model_scope not in scopes):
+            return False
+        return True
+
+    def has_routing_capabilities(self):
+        return any(entry.routing_capabilities for entry in self.entries)
+
+    def for_request(self, model="", path="", endpoint_family="", model_scope=""):
         model = (model or "").lower()
         path = (path or "").lstrip("/").lower()
-        matched = [entry for entry in self.entries if
+        endpoint_family = (endpoint_family or "").lower()
+        model_scope = (model_scope or "").lower()
+        candidates = self.entries
+        if endpoint_family and self.has_routing_capabilities():
+            candidates = [entry for entry in candidates if self._capability_matches(
+                entry, model, endpoint_family, model_scope,
+            )]
+            if not candidates:
+                return None
+        matched = [entry for entry in candidates if
                    (model and any(fnmatch.fnmatchcase(model, pattern) for pattern in entry.models)) or
                    (path and any(fnmatch.fnmatchcase(path, pattern) for pattern in entry.paths))]
-        selected = matched or [entry for entry in self.entries if not entry.models and not entry.paths]
+        selected = matched or [entry for entry in candidates if not entry.models and not entry.paths]
         if not selected:
             return None
         signature = tuple(id(entry) for entry in selected)
@@ -262,7 +313,12 @@ class KeyPool:
                  "group_id": e.group_id, "group_name": e.group_name,
                  "ttft_ewma": round(e.ttft_ewma, 3) if e.ttft_ewma is not None else None,
                  "ttft_samples": e.ttft_samples, "ttft_last_ts": e.ttft_last_ts,
-                 "models": list(e.models), "paths": list(e.paths)} for e in self.entries]
+                 "models": list(e.models), "paths": list(e.paths),
+                 "routing_capabilities": {
+                     key: list(value) if isinstance(value, tuple) else value
+                     for key, value in e.routing_capabilities.items()
+                 }, "auth": {"header": e.auth_header, "scheme": e.auth_scheme}}
+                for e in self.entries]
 
 
 def _resolve_path(path):
@@ -301,9 +357,19 @@ def load_key_pools_csv(path):
         sort = (row.get("sort") or "").strip()
         models = tuple(pattern.strip() for pattern in (row.get("models") or "").split(";") if pattern.strip())
         paths = tuple(pattern.strip() for pattern in (row.get("paths") or "").split(";") if pattern.strip())
+        auth = {}
+        if (row.get("auth_header") or "").strip():
+            auth["header"] = row.get("auth_header")
+        auth_scheme = (row.get("auth_scheme") or "").strip()
+        if auth_scheme.lower() in ("-", "none"):
+            auth["scheme"] = ""
+        elif auth_scheme:
+            auth["scheme"] = auth_scheme
         if url in pools and provider and pools[url].provider != provider:
             logger.warning(f"号池 key={label or key[:8]} 的 provider={provider!r} 与池现有={pools[url].provider!r} 不一致，已忽略")
-        pools.setdefault(url, KeyPool([], provider)).entries.append(KeyEntry(key, label, models, paths, sort))
+        pools.setdefault(url, KeyPool([], provider)).entries.append(KeyEntry(
+            key, label, models, paths, sort, auth=auth,
+        ))
     if pools:
         for pool in pools.values():
             pool.finalize_entries()
@@ -344,7 +410,8 @@ def clone_key_pool(pool: KeyPool) -> KeyPool:
     for entry in pool.entries:
         copied = KeyEntry(
             entry.key, entry.label, entry.models, entry.paths, entry.sort,
-            entry.group_id, entry.group_name,
+            entry.group_id, entry.group_name, entry.routing_capabilities,
+            {"header": entry.auth_header, "scheme": entry.auth_scheme},
         )
         for field in _RUNTIME_FIELDS:
             setattr(copied, field, getattr(entry, field))
@@ -384,6 +451,9 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
         entry.paths = fresh.paths
         entry.group_id = fresh.group_id
         entry.group_name = fresh.group_name
+        entry.routing_capabilities = fresh.routing_capabilities
+        entry.auth_header = fresh.auth_header
+        entry.auth_scheme = fresh.auth_scheme
         merged.append(entry)
 
     previous.entries[:] = merged
@@ -408,7 +478,11 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
     return previous
 
 
-def headers_with_key(base_headers: dict, key: Optional[str]) -> dict:
-    headers = {k: v for k, v in base_headers.items() if k.lower() not in _AUTH_STRIP_HEADERS}
-    if key: headers[settings.key_auth_header] = f"{settings.key_auth_scheme} {key}" if settings.key_auth_scheme else key
+def headers_with_key(base_headers: dict, key: Optional[str], auth_header=None, auth_scheme=None) -> dict:
+    auth_header = (auth_header or settings.key_auth_header).lower()
+    auth_scheme = settings.key_auth_scheme if auth_scheme is None else auth_scheme
+    skip_headers = _AUTH_STRIP_HEADERS | {auth_header}
+    headers = {k: v for k, v in base_headers.items() if k.lower() not in skip_headers}
+    if key:
+        headers[auth_header] = f"{auth_scheme} {key}" if auth_scheme else key
     return headers

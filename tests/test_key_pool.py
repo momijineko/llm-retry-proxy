@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from retry_proxy.key_pool import KeyEntry, KeyPool, replace_key_pool
+from retry_proxy.api import classify_endpoint, classify_model_scope, parse_request_model
+from retry_proxy.key_pool import KeyEntry, KeyPool, headers_with_key, replace_key_pool
 from retry_proxy.retry import (KeyPoolWaitTimeout, RetryProxy, _key_available_for_status,
                                _key_failure_policy, _mark_key_failure, _pick_key,
                                _select_key_failure_status)
@@ -324,6 +325,91 @@ class KeyPoolStickyTests(unittest.TestCase):
         scoped = pool.for_request("gpt-image-1", "responses")
         with patch("retry_proxy.key_pool.time.time", return_value=100):
             self.assertEqual(scoped.pick().key_id, "image")
+
+    def test_capabilities_filter_before_manual_rules(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("openai", "openai", routing_capabilities={
+                "platform": "openai", "endpoint_families": ["chat"],
+            }),
+            KeyEntry("anthropic", "anthropic", models=("gpt-*",),
+                     routing_capabilities={
+                         "platform": "anthropic", "endpoint_families": ["messages"],
+                     }),
+        ]
+
+        selected = pool.for_request("gpt-4o", "v1/chat/completions", "chat")
+
+        self.assertEqual([entry.key_id for entry in selected.entries], ["openai"])
+
+    def test_capability_pool_does_not_fall_back_when_no_route_matches(self):
+        pool = KeyPool([])
+        pool.entries = [KeyEntry("anthropic", "anthropic", routing_capabilities={
+            "platform": "anthropic", "endpoint_families": ["messages"],
+        })]
+
+        self.assertIsNone(pool.for_request("gpt-4o", "v1/responses", "responses"))
+
+    def test_model_scope_and_patterns_are_hard_constraints(self):
+        pool = KeyPool([])
+        pool.entries = [KeyEntry("gemini", "gemini", routing_capabilities={
+            "platform": "gemini", "endpoint_families": ["gemini"],
+            "model_patterns": ["gemini-2.*"], "model_scopes": ["gemini_text"],
+        })]
+
+        self.assertIsNotNone(pool.for_request(
+            "gemini-2.5-pro", "v1beta/models/gemini-2.5-pro:generateContent",
+            "gemini", "gemini_text",
+        ))
+        self.assertIsNone(pool.for_request(
+            "gemini-1.5-pro", "v1beta/models/gemini-1.5-pro:generateContent",
+            "gemini", "gemini_text",
+        ))
+
+    def test_pool_without_capabilities_preserves_legacy_default(self):
+        pool = KeyPool([("legacy", "legacy")])
+
+        selected = pool.for_request("claude-3", "v1/messages", "messages", "claude")
+
+        self.assertEqual([entry.key_id for entry in selected.entries], ["legacy"])
+
+
+class RequestClassificationTests(unittest.TestCase):
+    def test_endpoint_families(self):
+        cases = {
+            "v1/chat/completions": "chat",
+            "responses": "responses",
+            "v1/messages": "messages",
+            "v1/images/generations": "images",
+            "v1/embeddings": "embeddings",
+            "v1/audio/transcriptions": "audio",
+            "v1beta/models/gemini-2.5-pro:generateContent": "gemini",
+            "v1/models": "",
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(classify_endpoint(path), expected)
+
+    def test_model_comes_from_body_or_gemini_path(self):
+        self.assertEqual(parse_request_model(b'{"model":"gpt-4o"}', "responses"), "gpt-4o")
+        self.assertEqual(parse_request_model(
+            b"", "v1beta/models/gemini-2.5-pro%2Btest:streamGenerateContent",
+        ), "gemini-2.5-pro+test")
+
+    def test_model_scope(self):
+        self.assertEqual(classify_model_scope("claude-3-7-sonnet"), "claude")
+        self.assertEqual(classify_model_scope("gemini-2.5-pro"), "gemini_text")
+        self.assertEqual(classify_model_scope("gemini-2.5-image-preview"), "gemini_image")
+
+    def test_per_entry_authentication_can_use_vendor_header(self):
+        entry = KeyEntry("secret", auth={"header": "x-api-key", "scheme": ""})
+        headers = headers_with_key(
+            {"authorization": "Bearer client", "x-api-key": "old"},
+            entry.key, entry.auth_header, entry.auth_scheme,
+        )
+
+        self.assertNotIn("authorization", {key.lower() for key in headers})
+        self.assertEqual(headers["x-api-key"], "secret")
 
 
 class KeyPoolCooldownWaitTests(unittest.IsolatedAsyncioTestCase):

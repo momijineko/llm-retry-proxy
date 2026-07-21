@@ -37,6 +37,39 @@ class Sub2APIAdapter(PoolSyncAdapter):
     ]
     capabilities = ["group_catalog", "create_keys", "delete_keys"]
 
+    @staticmethod
+    def routing_capabilities(group):
+        platform = str(group.get("platform") or "").strip().lower()
+        endpoints = {
+            "openai": {"chat", "responses", "embeddings", "audio"},
+            "anthropic": {"messages"},
+            "gemini": {"gemini"},
+            "antigravity": {"chat", "messages", "gemini"},
+            "grok": {"chat", "responses"},
+        }.get(platform, set())
+        if platform == "openai" and group.get("allow_messages_dispatch"):
+            endpoints.add("messages")
+        image_generation = bool(group.get("allow_image_generation"))
+        if image_generation:
+            endpoints.add("images")
+        if not endpoints:
+            return {}
+        models_config = group.get("models_list_config") or {}
+        model_patterns = (
+            models_config.get("models") or []
+            if isinstance(models_config, dict) and models_config.get("enabled") else []
+        )
+        return {
+            "platform": platform,
+            "endpoint_families": sorted(endpoints),
+            "model_patterns": [str(value) for value in model_patterns if str(value).strip()],
+            "model_scopes": [
+                str(value) for value in (group.get("supported_model_scopes") or [])
+                if str(value).strip()
+            ],
+            "image_generation": image_generation,
+        }
+
     async def _post(self, client, source, path, body):
         response = await client.post(source["base_url"] + path, json=body, timeout=20)
         return _unwrap(response)
@@ -147,7 +180,8 @@ class Sub2APIAdapter(PoolSyncAdapter):
             if not isinstance(item, dict) or item.get("status") != "active" or not item.get("key"):
                 continue
             group_id = item.get("group_id")
-            group = item.get("group") or groups_by_id.get(str(group_id)) or {}
+            group = dict(groups_by_id.get(str(group_id)) or {})
+            group.update(item.get("group") or {})
             if group_id is None or not group or group.get("status") not in (None, "", "active"):
                 continue
             key_name = str(item.get("name") or "").strip()
@@ -162,6 +196,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
                 "sort": _number_text(rate), "key_name": key_name, "group_id": group_id,
                 "group_name": group_name, "platform": group.get("platform", ""),
                 "allow_image_generation": bool(group.get("allow_image_generation")),
+                "routing_capabilities": self.routing_capabilities(group),
             })
         return session, entries
 
@@ -190,6 +225,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
                 "id": group_id, "name": group.get("name", ""),
                 "platform": group.get("platform", ""),
                 "allow_image_generation": bool(group.get("allow_image_generation")),
+                "routing_capabilities": self.routing_capabilities(group),
                 "rate_multiplier": _number_text(rates.get(key, group.get("rate_multiplier"))),
                 "key_count": counts.get(key, 0), "active_key_count": active_counts.get(key, 0),
             })

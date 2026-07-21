@@ -278,7 +278,9 @@ class RetryProxy:
             if to_fire <= 0: break
             self.logger.debug(f"{_tag(method, path, provider, model)} R{round_num} 选号 总{time.time() - t0:.2f}s")
             entry = await _pick_key(pool, getattr(self.config, "key_pool_wait_timeout", None))
-            hdrs = headers_with_key(req_headers, entry.key) if entry else req_headers
+            hdrs = headers_with_key(
+                req_headers, entry.key, entry.auth_header, entry.auth_scheme,
+            ) if entry else req_headers
             if entry: last_key_id = entry.key_id
             async def send(n):
                 sent_at = time.time()
@@ -367,7 +369,7 @@ class RetryProxy:
         next_allowed = 0.0; c429 = cother = 0; last_key_id = ""; all_tasks = set()
         async def send(n):
             self.logger.debug(f"{_tag(method, path, provider, model)} #{n} 选号 总{time.time() - t0:.2f}s")
-            entry = await _pick_key(pool, getattr(self.config, "key_pool_wait_timeout", None)); hdrs = headers_with_key(req_headers, entry.key) if entry else req_headers
+            entry = await _pick_key(pool, getattr(self.config, "key_pool_wait_timeout", None)); hdrs = headers_with_key(req_headers, entry.key, entry.auth_header, entry.auth_scheme) if entry else req_headers
             if entry: nonlocal last_key_id; last_key_id = entry.key_id
             sent_at = time.time()
             key_tag = f"[{entry.key_id}]" if pool and entry else ""
@@ -513,7 +515,7 @@ class RetryProxy:
         while True:
             attempt += 1
             self.logger.debug(f"{_tag(method, path, provider, model)} #{attempt} 选号 总{time.time() - start:.2f}s")
-            entry = await _pick_key(pool, getattr(self.config, "key_pool_wait_timeout", None)); send_headers = headers_with_key(headers, entry.key) if entry else headers
+            entry = await _pick_key(pool, getattr(self.config, "key_pool_wait_timeout", None)); send_headers = headers_with_key(headers, entry.key, entry.auth_header, entry.auth_scheme) if entry else headers
             if entry: last_key_id = entry.key_id
             key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
             if self.config.max_retries > 0 and attempt > self.config.max_retries:

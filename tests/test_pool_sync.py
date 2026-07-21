@@ -111,6 +111,28 @@ class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entries[0]["label"], "A011-Team")
         self.assertEqual(entries[0]["sort"], "0.03")
         self.assertEqual(entries[0]["platform"], "openai")
+        self.assertEqual(
+            entries[0]["routing_capabilities"]["endpoint_families"],
+            ["audio", "chat", "embeddings", "responses"],
+        )
+
+    def test_sub2api_routing_capabilities_use_structured_group_fields(self):
+        capabilities = Sub2APIAdapter.routing_capabilities({
+            "platform": "antigravity",
+            "allow_image_generation": True,
+            "supported_model_scopes": ["claude", "gemini_image"],
+            "models_list_config": {"enabled": True, "models": ["claude-*", "gemini-*"]},
+        })
+
+        self.assertEqual(capabilities["platform"], "antigravity")
+        self.assertEqual(capabilities["endpoint_families"], [
+            "chat", "gemini", "images", "messages",
+        ])
+        self.assertEqual(capabilities["model_scopes"], ["claude", "gemini_image"])
+        self.assertEqual(capabilities["model_patterns"], ["claude-*", "gemini-*"])
+
+    def test_unknown_platform_omits_automatic_routing(self):
+        self.assertEqual(Sub2APIAdapter.routing_capabilities({"platform": "future"}), {})
 
     async def test_expired_access_token_rotates_refresh_token(self):
         adapter = Sub2APIAdapter()
@@ -463,6 +485,8 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         result = await manager.check_availability(source_id, "test-model")
 
         self.assertFalse(result["checks"][0]["available"])
+        self.assertTrue(result["checks"][0]["circuit_opened"])
+        self.assertEqual(result["checks"][0]["reason"], "upstream_error")
         entry = manager.pools["https://upstream.test"].entries[0]
         self.assertTrue(entry.cooldown_until > 0)
         self.assertEqual(entry.last_failure_kind, "probe")
@@ -478,6 +502,37 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         result = await manager.check_availability(source_id)
         self.assertTrue(result["checks"][0]["available"])
         self.assertEqual(entry.ttft_samples, 1)
+
+    async def test_availability_check_does_not_cool_model_rejection(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        pool = manager.pools["https://upstream.test"]
+        pool.entries.append(KeyEntry(
+            "sk-secret-two", "second", sort="0.03", group_id="2", group_name="Team",
+        ))
+        pool.finalize_entries()
+        manager.client.post = AsyncMock(return_value=response({
+            "error": {"type": "model_not_found", "message": "unsupported"},
+        }, 404))
+        self.config.key_auth_header = "authorization"
+        self.config.key_auth_scheme = "Bearer"
+        self.config.key_cooldown_5xx = 30
+
+        with self.assertLogs("forward", level="INFO") as captured:
+            result = await manager.check_availability(source_id, "missing-model")
+
+        check = result["checks"][0]
+        self.assertFalse(check["available"])
+        self.assertFalse(check["circuit_opened"])
+        self.assertEqual(check["reason"], "request_rejected")
+        self.assertEqual(check["statuses"], [404])
+        self.assertEqual(manager.client.post.await_count, 1)
+        self.assertTrue(all(entry.cooldown_until == 0 for entry in pool.entries))
+        self.assertIn("model=missing-model", "\n".join(captured.output))
+        self.assertIn("statuses=404:1", "\n".join(captured.output))
 
     async def test_availability_check_stops_group_after_first_success(self):
         manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
@@ -569,6 +624,10 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key["models"], ["image2-*"])
         self.assertEqual(key["paths"], ["v1/images/*"])
         self.assertEqual(pools["https://upstream.test"].entries[0].models, ("image2-*",))
+        self.assertEqual(
+            pools["https://upstream.test"].entries[0].routing_capabilities["platform"],
+            "openai",
+        )
 
     async def test_reset_key_clears_runtime_circuit_breaker(self):
         pools = {"https://upstream.test": KeyPool([])}
