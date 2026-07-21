@@ -79,10 +79,13 @@ class LogCaptureHandler(logging.Handler):
         with self._lock:
             self._seq += 1
             seq = self._seq
+        message = self._ANSI_RE.sub("", record.getMessage())
+        if record.exc_info:
+            message += "\n" + logging.Formatter().formatException(record.exc_info)
         entry = {
             "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created)),
             "level": record.levelname,
-            "message": self._ANSI_RE.sub("", record.getMessage()),
+            "message": message,
             "seq": seq,
         }
         with self._lock:

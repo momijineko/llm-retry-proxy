@@ -3,10 +3,14 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 
+import httpx
+
 from .config import logger, settings
-from .key_pool import KEY_POOLS, KeyEntry, KeyPool, clone_key_pool, replace_key_pool
+from .key_pool import (KEY_POOLS, KEY_POOL_STRATEGIES, KeyEntry, KeyPool,
+                       clone_key_pool, replace_key_pool)
 from .routes import normalize_route_prefix
 from .sync_adapters import ADAPTERS, PoolSyncError
 
@@ -56,10 +60,13 @@ class PoolSyncManager:
 
     def _pool_from_source(self, source):
         pool = KeyPool([], source.get("provider") or self.config.provider)
+        pool.strategy = source.get("strategy", "cost")
+        pool.target_ttft_s = float(source.get("target_ttft_s", 5.0))
         for item in source.get("entries", []):
             pool.entries.append(KeyEntry(
                 item["key"], item.get("label", ""), item.get("models", ()),
                 item.get("paths", ()), item.get("sort", ""),
+                item.get("group_id", ""), item.get("group_name", ""),
             ))
         pool.finalize_entries()
         return pool
@@ -119,6 +126,9 @@ class PoolSyncManager:
                 source["base_url"] = source["base_url"].rstrip("/")
                 source.setdefault("route_prefix", "")
                 source.setdefault("group_rules", {})
+                source.setdefault("strategy", "cost")
+                source.setdefault("target_ttft_s", 5.0)
+                source.setdefault("check_model", "")
                 try:
                     source["pool_url"] = self._resolve_pool_url(source)
                 except ValueError as exc:
@@ -151,14 +161,18 @@ class PoolSyncManager:
                  "sources": self._persistent_sources()}
         fd, temp_path = tempfile.mkstemp(prefix=".pool_sync_", suffix=".json", dir=directory)
         try:
-            os.fchmod(fd, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = None
                 json.dump(state, f, ensure_ascii=False, separators=(",", ":"))
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(temp_path, self.state_file)
             os.chmod(self.state_file, 0o600)
         finally:
+            if fd is not None:
+                os.close(fd)
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
 
@@ -230,7 +244,8 @@ class PoolSyncManager:
             source = self.sources.get(source_id, {
                 "id": source_id, "adapter": adapter_name, "base_url": base_url,
                 "provider": requested_provider, "session": {}, "entries": [],
-                "route_prefix": "",
+                "route_prefix": "", "strategy": "cost", "target_ttft_s": 5.0,
+                "check_model": "",
                 "last_sync_at": "", "last_attempt_at": "", "last_error": "",
             })
             source["provider"] = requested_provider
@@ -429,6 +444,148 @@ class PoolSyncManager:
                 self._task = asyncio.create_task(self._run(), name="key-pool-sync")
             return self.status()
 
+    async def set_source_settings(self, source_id, strategy, target_ttft_s=5.0,
+                                  check_model=""):
+        if strategy not in KEY_POOL_STRATEGIES:
+            raise PoolSyncError("号池策略必须是 cost、ttft 或 balanced")
+        try:
+            target = float(target_ttft_s)
+        except (TypeError, ValueError) as exc:
+            raise PoolSyncError("可接受首 Token 上限必须是数字") from exc
+        if target < 0.1 or target > 300:
+            raise PoolSyncError("可接受首 Token 上限必须在 0.1 到 300 秒之间")
+        async with self._lock:
+            source = self.sources.get(source_id)
+            if source is None:
+                raise PoolSyncError("号池同步连接不存在")
+            source["strategy"] = strategy
+            source["target_ttft_s"] = target
+            source["check_model"] = str(check_model or "").strip()
+            pool = self.pools.get(self._pool_url(source))
+            if pool is not None:
+                pool.strategy = strategy
+                pool.target_ttft_s = target
+                for view in pool._views.values():
+                    view.strategy = strategy
+                    view.target_ttft_s = target
+            self._save_state()
+            return self.status()
+
+    @staticmethod
+    def _probe_status(status):
+        return 200 <= status < 400
+
+    async def check_availability(self, source_id, model=None):
+        source = self.sources.get(source_id)
+        if source is None:
+            raise PoolSyncError("号池同步连接不存在")
+        pool = self.pools.get(self._pool_url(source))
+        if pool is None or not pool.entries:
+            raise PoolSyncError("号池没有可检测的 Key")
+        check_model = str(model or source.get("check_model") or "").strip()
+        if not check_model:
+            raise PoolSyncError("请先填写检测模型")
+        source["check_model"] = check_model
+        self._save_state()
+        probe_url = source["base_url"].rstrip("/") + "/v1/chat/completions"
+        groups = {}
+        for entry in pool.entries:
+            groups.setdefault(entry.group_id or entry.key, []).append(entry)
+        semaphore = asyncio.Semaphore(2)
+
+        async def probe(entry):
+            headers = {self.config.key_auth_header: (
+                f"{self.config.key_auth_scheme} {entry.key}"
+                if self.config.key_auth_scheme else entry.key
+            )}
+            payload = {
+                "model": check_model,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            try:
+                async with semaphore:
+                    started = time.monotonic()
+                    response = await self.client.post(
+                        probe_url, json=payload, headers=headers, timeout=30,
+                    )
+                    elapsed = time.monotonic() - started
+                available = self._probe_status(response.status_code)
+                if available:
+                    pool.record_ttft(entry, elapsed)
+                return entry, response.status_code, available, elapsed
+            except httpx.RequestError:
+                return entry, 0, False, None
+
+        async def probe_group(entries):
+            attempts = []
+            for entry in entries:
+                result = await probe(entry)
+                attempts.append(result)
+                if result[2]:
+                    break
+            return attempts
+
+        group_results = await asyncio.gather(
+            *(probe_group(entries) for entries in groups.values())
+        )
+        by_group = dict(zip(groups, group_results))
+        summary = []
+        for group_id, attempts in by_group.items():
+            available = any(item[2] is True for item in attempts)
+            explicitly_failed = bool(attempts) and all(item[2] is False for item in attempts)
+            if not available and explicitly_failed:
+                status = next(item[1] for item in attempts if item[2] is False)
+                for entry in groups[group_id]:
+                    pool.mark_cooldown(
+                        entry, self.config.key_cooldown_5xx,
+                        failure_kind="probe", status=status,
+                    )
+            summary.append({
+                "group_id": group_id,
+                "group_name": groups[group_id][0].group_name or groups[group_id][0].label,
+                "available": True if available else False if explicitly_failed else None,
+                "statuses": [item[1] for item in attempts],
+                "ttft_s": min((item[3] for item in attempts if item[2] and item[3] is not None),
+                               default=None),
+            })
+        logger.info(
+            f"号池可用性检测完成: upstream={source['base_url']} groups={len(summary)} "
+            f"unavailable={sum(item['available'] is False for item in summary)}"
+        )
+        return {"model": check_model, "checks": summary, "state": self.status()}
+
+    async def reset_group(self, source_id, group_id):
+        async with self._lock:
+            source = self.sources.get(source_id)
+            if source is None:
+                raise PoolSyncError("号池同步连接不存在")
+            pool = self.pools.get(self._pool_url(source))
+            entries = [entry for entry in pool.entries
+                       if (entry.group_id or entry.key) == str(group_id)] if pool else []
+            if not entries:
+                raise PoolSyncError("分组不存在或尚未加载")
+            for entry in entries:
+                pool.mark_success(entry)
+            logger.info(
+                f"号池分组已手动解除熔断: upstream={source['base_url']} group={group_id}"
+            )
+            return self.status()
+
+    async def reset_groups(self, source_id):
+        async with self._lock:
+            source = self.sources.get(source_id)
+            if source is None:
+                raise PoolSyncError("号池同步连接不存在")
+            pool = self.pools.get(self._pool_url(source))
+            if pool is None:
+                raise PoolSyncError("号池尚未加载")
+            for entry in pool.entries:
+                pool.mark_success(entry)
+            logger.info(f"号池全部分组已手动解除熔断: upstream={source['base_url']}")
+            return self.status()
+
     async def reset_key(self, source_id, source_key_id):
         async with self._lock:
             source = self.sources.get(source_id)
@@ -510,6 +667,7 @@ class PoolSyncManager:
                     "source_key_id": item.get("source_key_id"),
                     "key_masked": raw_key[:7] + "..." + raw_key[-4:],
                     "label": item.get("label", ""), "sort": item.get("sort", ""),
+                    "group_id": str(item.get("group_id") or ""),
                     "key_name": item.get("key_name", ""), "group_name": item.get("group_name", ""),
                     "platform": item.get("platform", ""),
                     "allow_image_generation": bool(item.get("allow_image_generation")),
@@ -519,6 +677,8 @@ class PoolSyncManager:
                     "cooldown_remaining": round(max(entry.cooldown_until - now, 0), 1) if entry else 0,
                     "last_failure_status": entry.last_failure_status if entry else None,
                     "last_failure_kind": entry.last_failure_kind if entry else "",
+                    "ttft_ewma": round(entry.ttft_ewma, 3) if entry and entry.ttft_ewma is not None else None,
+                    "ttft_samples": entry.ttft_samples if entry else 0,
                 })
             public_sources.append({
                 "id": source["id"], "adapter": source["adapter"], "adapter_label": adapter.label,
@@ -529,6 +689,9 @@ class PoolSyncManager:
                 "last_sync_at": source.get("last_sync_at", ""),
                 "last_attempt_at": source.get("last_attempt_at", ""),
                 "last_error": source.get("last_error", ""),
+                "strategy": source.get("strategy", "cost"),
+                "target_ttft_s": source.get("target_ttft_s", 5.0),
+                "check_model": source.get("check_model", ""),
                 "key_count": len(visible_entries), "keys": visible_entries,
                 "operation": dict(self.operations.get(source["id"]) or {}),
             })

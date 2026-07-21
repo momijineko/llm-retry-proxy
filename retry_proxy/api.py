@@ -19,6 +19,43 @@ SKIP_REQUEST_HEADERS = {"host", "content-length", "transfer-encoding", "connecti
 SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "keep-alive", "content-encoding"}
 
 
+def _sse_has_token(buffer):
+    while b"\n\n" in buffer:
+        event, buffer = buffer.split(b"\n\n", 1)
+        data = b"\n".join(line[5:].strip() for line in event.splitlines()
+                           if line.startswith(b"data:"))
+        if not data or data == b"[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except (ValueError, TypeError):
+            return True, buffer
+        candidates = []
+        known_stream_shape = False
+        if isinstance(payload, dict):
+            event_type = payload.get("type")
+            known_stream_shape = (
+                "choices" in payload or "delta" in payload
+                or isinstance(event_type, str) and event_type.startswith((
+                    "response.", "content_block_", "message_",
+                ))
+            )
+            candidates.extend((payload.get("delta"), payload.get("text")))
+            for choice in payload.get("choices") or []:
+                if isinstance(choice, dict):
+                    delta = choice.get("delta")
+                    candidates.append(delta.get("content") if isinstance(delta, dict) else delta)
+                    candidates.append(choice.get("text"))
+            nested = payload.get("delta")
+            if isinstance(nested, dict):
+                candidates.extend((nested.get("text"), nested.get("content")))
+        if any(isinstance(value, str) and value for value in candidates):
+            return True, buffer
+        if isinstance(payload, dict) and not known_stream_shape:
+            return True, buffer
+    return False, buffer
+
+
 def outbound_request_headers(request_headers, path, model, config=settings):
     headers = filter_headers(request_headers, SKIP_REQUEST_HEADERS)
     image_request = ("/images/" in f"/{(path or '').lower()}"
@@ -296,8 +333,26 @@ def create_handlers(service, store):
         if "event-stream" in response.headers.get("content-type", "") or response.headers.get("content-length") is None:
             headers["X-Accel-Buffering"] = "no"; headers["Cache-Control"] = "no-cache"
         async def body_gen():
+            probe_buffer = b""
+            ttft_recorded = False
+            is_sse = "event-stream" in response.headers.get("content-type", "")
             try:
-                async for chunk in response.aiter_bytes(): yield chunk
+                async for chunk in response.aiter_bytes():
+                    if not ttft_recorded and response.status_code < 400 and chunk:
+                        if is_sse:
+                            probe_buffer += chunk.replace(b"\r\n", b"\n")
+                            if len(probe_buffer) > 65536:
+                                probe_buffer = probe_buffer[-65536:]
+                            found, probe_buffer = _sse_has_token(probe_buffer)
+                        else:
+                            found = True
+                        if found:
+                            ttft_recorded = True
+                            entry = getattr(result, "key_entry", None)
+                            sent_at = getattr(result, "response_started_at", 0.0)
+                            if request_pool is not None and entry is not None and sent_at > 0:
+                                request_pool.record_ttft(entry, time.time() - sent_at)
+                    yield chunk
             except httpx.TransportError as e:
                 logger.warning(f"{_tag(request.method, path, provider, model_name, client_ip)} 流式中断 #{winner_attempt} {e!r} 总{time.time() - start:.2f}s")
             finally:

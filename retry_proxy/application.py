@@ -257,6 +257,46 @@ async def key_pools_settings(request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+async def key_pools_source_settings(request: Request):
+    try:
+        body = await _json_object(request)
+        return await pool_sync.set_source_settings(
+            body.get("source_id"), body.get("strategy"), body.get("target_ttft_s", 5.0),
+            body.get("check_model", ""),
+        )
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def key_pools_check(request: Request):
+    try:
+        body = await _json_object(request)
+        return await pool_sync.check_availability(
+            body.get("source_id"), body.get("model"),
+        )
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def key_pools_reset_group(request: Request):
+    try:
+        body = await _json_object(request)
+        group_id = body.get("group_id")
+        if group_id in (None, ""):
+            raise HTTPException(status_code=400, detail="group_id 不能为空")
+        return await pool_sync.reset_group(body.get("source_id"), str(group_id))
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def key_pools_reset_groups(request: Request):
+    try:
+        body = await _json_object(request)
+        return await pool_sync.reset_groups(body.get("source_id"))
+    except PoolSyncError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 async def key_pools_reset_key(request: Request):
     try:
         body = await _json_object(request)
@@ -284,6 +324,10 @@ app.add_api_route("/admin/key-pools/api/create-keys", key_pools_create_keys, met
 app.add_api_route("/admin/key-pools/api/group-rules", key_pools_group_rules, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/clear-keys", key_pools_clear_keys, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/settings", key_pools_settings, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/source-settings", key_pools_source_settings, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/check", key_pools_check, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/reset-group", key_pools_reset_group, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools/api/reset-groups", key_pools_reset_groups, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/reset-key", key_pools_reset_key, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/stats", stats_page, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/stats/api", stats_api, methods=["GET"], dependencies=admin_dependencies)

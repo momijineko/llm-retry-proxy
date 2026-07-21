@@ -8,19 +8,26 @@ from typing import Optional
 
 from .config import logger, settings
 
-_FAILURE_KIND_PRIORITY = {"transport": 1, "upstream": 2, "rate_limit": 3, "auth": 4}
+_FAILURE_KIND_PRIORITY = {"transport": 1, "probe": 2, "upstream": 2, "rate_limit": 3, "auth": 4}
 _RUNTIME_FIELDS = (
     "cooldown_until", "total_fail", "last_fail_ts", "consecutive_failures",
     "last_failure_kind", "last_failure_status", "last_cooldown_s",
+    "ttft_ewma", "ttft_samples", "ttft_last_ts",
 )
+
+KEY_POOL_STRATEGIES = {"cost", "ttft", "balanced"}
 
 
 class KeyEntry:
-    __slots__ = ("key", "key_id", "legacy_key_id", "label", "sort", "models", "paths", "cooldown_until", "total_fail",
+    __slots__ = ("key", "key_id", "legacy_key_id", "label", "sort", "group_id", "group_name",
+                 "models", "paths", "cooldown_until", "total_fail",
                  "last_fail_ts", "consecutive_failures", "last_failure_kind", "last_failure_status",
-                 "last_cooldown_s")
-    def __init__(self, key: str, label: str = "", models=(), paths=(), sort: str = ""):
+                 "last_cooldown_s", "ttft_ewma", "ttft_samples", "ttft_last_ts")
+    def __init__(self, key: str, label: str = "", models=(), paths=(), sort: str = "",
+                 group_id: str = "", group_name: str = ""):
         self.key, self.label, self.sort = key, label, sort.strip()
+        self.group_id = str(group_id) if group_id not in (None, "") else ""
+        self.group_name = group_name
         self.legacy_key_id = label if label else key[:8]
         self.key_id = f"{self.legacy_key_id}|{self.sort}" if self.sort else self.legacy_key_id
         self.models = tuple(pattern.lower() for pattern in models)
@@ -32,12 +39,17 @@ class KeyEntry:
         self.last_failure_kind = ""
         self.last_failure_status = None
         self.last_cooldown_s = 0.0
+        self.ttft_ewma = None
+        self.ttft_samples = 0
+        self.ttft_last_ts = 0.0
 
 
 class KeyPool:
     def __init__(self, keys, provider: str = ""):
         self.entries = [KeyEntry(k[0], k[1] if len(k) > 1 else "") if isinstance(k, tuple) else KeyEntry(k) for k in keys]
         self.provider, self._current, self._sticky_until = provider, None, 0.0
+        self.strategy, self.target_ttft_s = "cost", 5.0
+        self._selection_count = 0
         self._views = {}
         self.finalize_entries()
 
@@ -91,22 +103,91 @@ class KeyPool:
         if signature not in self._views:
             view = KeyPool([], self.provider)
             view.entries = selected
+            view.strategy = self.strategy
+            view.target_ttft_s = self.target_ttft_s
             self._views[signature] = view
+        else:
+            self._views[signature].strategy = self.strategy
+            self._views[signature].target_ttft_s = self.target_ttft_s
         return self._views[signature]
 
     def pick(self):
         now = time.time()
-        if self._current is not None and now < self._sticky_until and self._current.cooldown_until <= now:
+        available = [entry for entry in self.entries if entry.cooldown_until <= now]
+        if not available:
+            best = min(self.entries, key=lambda e: e.cooldown_until) if self.entries else None
+            if best is not None:
+                self._current, self._sticky_until = best, now + settings.key_sticky
+            return best
+        if self.strategy == "cost":
+            selected_group = None
+        else:
+            selected_group = self._pick_group(available)
+            available = [entry for entry in available if self._group_key(entry) == selected_group]
+        if (self._current is not None and now < self._sticky_until
+                and self._current in available):
             self._sticky_until = now + settings.key_sticky
             return self._current
-        for entry in self.entries:
-            if entry.cooldown_until <= now:
-                self._current, self._sticky_until = entry, now + settings.key_sticky
-                return entry
-        best = min(self.entries, key=lambda e: e.cooldown_until) if self.entries else None
-        if best is not None:
-            self._current, self._sticky_until = best, now + settings.key_sticky
-        return best
+        entry = available[0]
+        self._current, self._sticky_until = entry, now + settings.key_sticky
+        return entry
+
+    @staticmethod
+    def _group_key(entry):
+        return entry.group_id or entry.key
+
+    @staticmethod
+    def _sort_value(entry):
+        try:
+            value = Decimal(entry.sort)
+            return value if value.is_finite() else Decimal("Infinity")
+        except InvalidOperation:
+            return Decimal("Infinity")
+
+    def _group_metrics(self, entries):
+        groups = {}
+        for index, entry in enumerate(entries):
+            group = groups.setdefault(self._group_key(entry), {
+                "entries": [], "sort": self._sort_value(entry), "index": index,
+                "ttft": None, "samples": 0, "last_ts": 0.0,
+            })
+            group["entries"].append(entry)
+            group["sort"] = min(group["sort"], self._sort_value(entry))
+            if entry.ttft_samples and (group["ttft"] is None or entry.ttft_last_ts > group["last_ts"]):
+                group["ttft"] = entry.ttft_ewma
+                group["samples"] = entry.ttft_samples
+                group["last_ts"] = entry.ttft_last_ts
+        return groups
+
+    def _pick_group(self, entries):
+        groups = self._group_metrics(entries)
+        self._selection_count += 1
+        unknown = [(key, item) for key, item in groups.items() if item["ttft"] is None]
+        if unknown:
+            return min(unknown, key=lambda pair: (pair[1]["sort"], pair[1]["index"]))[0]
+        if self._selection_count % 20 == 0:
+            return min(groups.items(), key=lambda pair: (pair[1]["samples"], pair[1]["last_ts"]))[0]
+        if self.strategy == "ttft":
+            return min(groups.items(), key=lambda pair: (pair[1]["ttft"], pair[1]["sort"]))[0]
+        within_target = [(key, item) for key, item in groups.items()
+                         if item["ttft"] <= self.target_ttft_s]
+        if within_target:
+            return min(within_target, key=lambda pair: (pair[1]["sort"], pair[1]["ttft"]))[0]
+        return min(groups.items(), key=lambda pair: (pair[1]["ttft"], pair[1]["sort"]))[0]
+
+    def record_ttft(self, entry, seconds, alpha=0.3):
+        if entry is None or seconds < 0:
+            return
+        group_key = self._group_key(entry)
+        now = time.time()
+        peers = [candidate for candidate in self.entries if self._group_key(candidate) == group_key]
+        prior = next((candidate.ttft_ewma for candidate in peers if candidate.ttft_samples), None)
+        samples = max((candidate.ttft_samples for candidate in peers), default=0) + 1
+        value = seconds if prior is None else alpha * seconds + (1 - alpha) * prior
+        for candidate in peers:
+            candidate.ttft_ewma = value
+            candidate.ttft_samples = samples
+            candidate.ttft_last_ts = now
 
     def has_fresh(self):
         return any(e.cooldown_until <= time.time() for e in self.entries)
@@ -159,6 +240,9 @@ class KeyPool:
                  "cooldown_remaining": round(max(e.cooldown_until - now, 0), 1), "total_fail": e.total_fail,
                  "consecutive_failures": e.consecutive_failures, "last_failure_kind": e.last_failure_kind,
                  "last_failure_status": e.last_failure_status, "last_cooldown_s": round(e.last_cooldown_s, 1),
+                 "group_id": e.group_id, "group_name": e.group_name,
+                 "ttft_ewma": round(e.ttft_ewma, 3) if e.ttft_ewma is not None else None,
+                 "ttft_samples": e.ttft_samples, "ttft_last_ts": e.ttft_last_ts,
                  "models": list(e.models), "paths": list(e.paths)} for e in self.entries]
 
 
@@ -241,6 +325,7 @@ def clone_key_pool(pool: KeyPool) -> KeyPool:
     for entry in pool.entries:
         copied = KeyEntry(
             entry.key, entry.label, entry.models, entry.paths, entry.sort,
+            entry.group_id, entry.group_name,
         )
         for field in _RUNTIME_FIELDS:
             setattr(copied, field, getattr(entry, field))
@@ -278,10 +363,14 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
         entry.sort = fresh.sort
         entry.models = fresh.models
         entry.paths = fresh.paths
+        entry.group_id = fresh.group_id
+        entry.group_name = fresh.group_name
         merged.append(entry)
 
     previous.entries[:] = merged
     previous.provider = replacement.provider
+    previous.strategy = replacement.strategy
+    previous.target_ttft_s = replacement.target_ttft_s
     previous._current = next((entry for entry in merged if entry.key == current_key), None)
     if previous._current is None:
         previous._sticky_until = 0.0
@@ -293,6 +382,8 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
     }
     for view in previous._views.values():
         view.provider = replacement.provider
+        view.strategy = replacement.strategy
+        view.target_ttft_s = replacement.target_ttft_s
 
     pools[url] = previous
     return previous

@@ -11,6 +11,48 @@ from retry_proxy.retry import (KeyPoolWaitTimeout, RetryProxy, _key_available_fo
 
 
 class KeyPoolStickyTests(unittest.TestCase):
+    def test_ttft_strategy_selects_fastest_group(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("fast", "fast", sort="0.10", group_id="fast"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "ttft"
+        pool.record_ttft(pool.entries[0], 8.0)
+        pool.record_ttft(pool.entries[1], 1.0)
+
+        self.assertEqual(pool.pick().group_id, "fast")
+
+    def test_balanced_strategy_selects_cheapest_group_within_target(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("slow-cheap", "slow-cheap", sort="0.01", group_id="slow"),
+            KeyEntry("good", "good", sort="0.03", group_id="good"),
+            KeyEntry("fast", "fast", sort="0.20", group_id="fast"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 5
+        pool.record_ttft(pool.entries[0], 9.0)
+        pool.record_ttft(pool.entries[1], 4.0)
+        pool.record_ttft(pool.entries[2], 1.0)
+
+        self.assertEqual(pool.pick().group_id, "good")
+
+    def test_group_members_share_ttft_samples(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("one", "one", group_id="group"),
+            KeyEntry("two", "two", group_id="group"),
+        ]
+        pool.finalize_entries()
+
+        pool.record_ttft(pool.entries[0], 2.5)
+
+        self.assertEqual([entry.ttft_ewma for entry in pool.entries], [2.5, 2.5])
+        self.assertEqual([entry.ttft_samples for entry in pool.entries], [1, 1])
+
     def test_live_replacement_preserves_runtime_health_for_unchanged_keys(self):
         previous = KeyPool([("same", "old"), ("removed", "removed")])
         previous.entries[0].cooldown_until = 500

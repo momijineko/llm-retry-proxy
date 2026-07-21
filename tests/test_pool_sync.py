@@ -1,8 +1,10 @@
+import asyncio
 import json
 import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 
@@ -76,6 +78,22 @@ class FakeClient:
         if "/keys/" in url:
             return response({"code": 0, "data": {}})
         raise AssertionError(url)
+
+
+class QueuedProbeClient:
+    def __init__(self):
+        self.calls = []
+        self.first_batch_ready = asyncio.Event()
+        self.release_first_batch = asyncio.Event()
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        index = len(self.calls)
+        self.calls.append((url, json, headers, timeout))
+        if index < 2:
+            if index == 1:
+                self.first_batch_ready.set()
+            await self.release_first_batch.wait()
+        return response({"choices": []}, 200)
 
 
 class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -158,7 +176,8 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("not-persisted", persisted)
         self.assertNotIn("access-1", persisted)
         self.assertIn("refresh-1", persisted)
-        self.assertEqual(os.stat(self.state_file).st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(os.stat(self.state_file).st_mode & 0o777, 0o600)
 
     async def test_managed_route_is_persisted_and_restored(self):
         route_config = SimpleNamespace(
@@ -401,6 +420,109 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         restored = PoolSyncManager({}, restored_config, FakeClient(), {"sub2api": Sub2APIAdapter()})
         restored.load_state()
         self.assertEqual(restored_config.key_pool_sync_interval, 900)
+
+    async def test_source_strategy_is_applied_and_persisted(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+
+        status = await manager.set_source_settings(
+            source_id, "balanced", 4.5, "test-model",
+        )
+
+        source = status["sources"][0]
+        self.assertEqual(source["strategy"], "balanced")
+        self.assertEqual(source["target_ttft_s"], 4.5)
+        self.assertEqual(source["check_model"], "test-model")
+        pool = manager.pools["https://upstream.test"]
+        self.assertEqual(pool.strategy, "balanced")
+        self.assertEqual(pool.target_ttft_s, 4.5)
+        with open(self.state_file, encoding="utf-8") as f:
+            persisted = json.load(f)
+        self.assertEqual(persisted["sources"][0]["strategy"], "balanced")
+        self.assertEqual(persisted["sources"][0]["check_model"], "test-model")
+
+    async def test_availability_check_cools_failed_group_and_reset_clears_it(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        manager.client.post = AsyncMock(return_value=response({"error": "unavailable"}, 503))
+        self.config.key_auth_header = "authorization"
+        self.config.key_auth_scheme = "Bearer"
+        self.config.key_cooldown_5xx = 30
+
+        result = await manager.check_availability(source_id, "test-model")
+
+        self.assertFalse(result["checks"][0]["available"])
+        entry = manager.pools["https://upstream.test"].entries[0]
+        self.assertTrue(entry.cooldown_until > 0)
+        self.assertEqual(entry.last_failure_kind, "probe")
+        call = manager.client.post.await_args
+        self.assertTrue(call.args[0].endswith("/v1/chat/completions"))
+        self.assertEqual(call.kwargs["json"]["model"], "test-model")
+        self.assertEqual(call.kwargs["json"]["max_tokens"], 1)
+
+        await manager.reset_group(source_id, entry.group_id)
+        self.assertEqual(entry.cooldown_until, 0)
+
+        manager.client.post = AsyncMock(return_value=response({"choices": []}, 200))
+        result = await manager.check_availability(source_id)
+        self.assertTrue(result["checks"][0]["available"])
+        self.assertEqual(entry.ttft_samples, 1)
+
+    async def test_availability_check_stops_group_after_first_success(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        pool = manager.pools["https://upstream.test"]
+        pool.entries.append(KeyEntry(
+            "sk-secret-two", "second", sort="0.03", group_id="2", group_name="Team",
+        ))
+        pool.finalize_entries()
+        manager.client.post = AsyncMock(return_value=response({"choices": []}, 200))
+        self.config.key_auth_header = "authorization"
+        self.config.key_auth_scheme = "Bearer"
+
+        result = await manager.check_availability(source_id, "test-model")
+
+        self.assertTrue(result["checks"][0]["available"])
+        self.assertEqual(manager.client.post.await_count, 1)
+
+    async def test_availability_ttft_excludes_concurrency_queue_time(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        pool = manager.pools["https://upstream.test"]
+        pool.entries = [
+            KeyEntry(
+                f"sk-secret-{index}", f"group-{index}", sort=str(index),
+                group_id=str(index), group_name=f"group-{index}",
+            )
+            for index in range(3)
+        ]
+        pool.finalize_entries()
+        client = QueuedProbeClient()
+        manager.client = client
+        self.config.key_auth_header = "authorization"
+        self.config.key_auth_scheme = "Bearer"
+
+        task = asyncio.create_task(manager.check_availability(source_id, "test-model"))
+        await client.first_batch_ready.wait()
+        await asyncio.sleep(0.05)
+        client.release_first_batch.set()
+        result = await task
+
+        checks = {item["group_id"]: item for item in result["checks"]}
+        first_batch_min = min(checks[str(index)]["ttft_s"] for index in range(2))
+        self.assertLess(checks["2"]["ttft_s"], first_batch_min / 2)
 
     async def test_catalog_and_one_click_create_only_missing_groups(self):
         client = FakeClient()
