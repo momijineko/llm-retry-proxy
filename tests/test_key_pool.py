@@ -40,6 +40,75 @@ class KeyPoolStickyTests(unittest.TestCase):
 
         self.assertEqual(pool.pick().group_id, "good")
 
+    def test_balanced_cold_start_stops_after_cheapest_group_meets_target(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("premium", "premium", sort="0.20", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 5
+
+        selected = pool.pick()
+        pool.record_ttft(selected, 4.0)
+
+        self.assertEqual(selected.group_id, "cheap")
+        self.assertEqual(pool.pick().group_id, "cheap")
+        self.assertEqual(pool.entries[1].ttft_samples, 0)
+
+    def test_balanced_cold_start_explores_higher_rate_until_one_meets_target(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("good", "good", sort="0.05", group_id="good"),
+            KeyEntry("premium", "premium", sort="0.20", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 5
+        pool.record_ttft(pool.entries[0], 9.0)
+
+        selected = pool.pick()
+        pool.record_ttft(selected, 4.0)
+
+        self.assertEqual(selected.group_id, "good")
+        self.assertEqual(pool.pick().group_id, "good")
+        self.assertEqual(pool.entries[2].ttft_samples, 0)
+
+    def test_balanced_periodic_retest_only_selects_cheaper_group(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("good", "good", sort="0.05", group_id="good"),
+            KeyEntry("premium", "premium", sort="0.20", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 5
+        pool.record_ttft(pool.entries[0], 9.0)
+        pool.record_ttft(pool.entries[1], 4.0)
+        pool.record_ttft(pool.entries[2], 1.0)
+
+        first_nineteen = [pool.pick().group_id for _ in range(19)]
+
+        self.assertEqual(set(first_nineteen), {"good"})
+        self.assertEqual(pool.pick().group_id, "cheap")
+
+    def test_balanced_periodic_retest_never_selects_more_expensive_group(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("good", "good", sort="0.05", group_id="good"),
+            KeyEntry("premium", "premium", sort="0.20", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 5
+        pool.record_ttft(pool.entries[0], 4.0)
+        pool.record_ttft(pool.entries[1], 1.0)
+
+        self.assertEqual({pool.pick().group_id for _ in range(40)}, {"good"})
+
     def test_group_members_share_ttft_samples(self):
         pool = KeyPool([])
         pool.entries = [

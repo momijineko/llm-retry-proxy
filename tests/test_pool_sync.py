@@ -427,6 +427,10 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
             "email": "user@example.com", "password": "secret",
         })
         source_id = status["sources"][0]["id"]
+        pool = manager.pools["https://upstream.test"]
+        pool._selection_count = 19
+        view = pool.for_request("test-model", "v1/chat/completions")
+        view._selection_count = 19
 
         status = await manager.set_source_settings(
             source_id, "balanced", 4.5, "test-model",
@@ -436,9 +440,10 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source["strategy"], "balanced")
         self.assertEqual(source["target_ttft_s"], 4.5)
         self.assertEqual(source["check_model"], "test-model")
-        pool = manager.pools["https://upstream.test"]
         self.assertEqual(pool.strategy, "balanced")
         self.assertEqual(pool.target_ttft_s, 4.5)
+        self.assertEqual(pool._selection_count, 0)
+        self.assertEqual(view._selection_count, 0)
         with open(self.state_file, encoding="utf-8") as f:
             persisted = json.load(f)
         self.assertEqual(persisted["sources"][0]["strategy"], "balanced")

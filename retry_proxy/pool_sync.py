@@ -465,9 +465,11 @@ class PoolSyncManager:
             if pool is not None:
                 pool.strategy = strategy
                 pool.target_ttft_s = target
+                pool._selection_count = 0
                 for view in pool._views.values():
                     view.strategy = strategy
                     view.target_ttft_s = target
+                    view._selection_count = 0
             self._save_state()
             return self.status()
 

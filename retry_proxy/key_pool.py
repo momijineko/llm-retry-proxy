@@ -163,17 +163,36 @@ class KeyPool:
         groups = self._group_metrics(entries)
         self._selection_count += 1
         unknown = [(key, item) for key, item in groups.items() if item["ttft"] is None]
-        if unknown:
-            return min(unknown, key=lambda pair: (pair[1]["sort"], pair[1]["index"]))[0]
-        if self._selection_count % 20 == 0:
-            return min(groups.items(), key=lambda pair: (pair[1]["samples"], pair[1]["last_ts"]))[0]
         if self.strategy == "ttft":
+            if unknown:
+                return min(unknown, key=lambda pair: (pair[1]["sort"], pair[1]["index"]))[0]
+            if self._selection_count % 20 == 0:
+                return min(groups.items(),
+                           key=lambda pair: (pair[1]["samples"], pair[1]["last_ts"]))[0]
             return min(groups.items(), key=lambda pair: (pair[1]["ttft"], pair[1]["sort"]))[0]
         within_target = [(key, item) for key, item in groups.items()
-                         if item["ttft"] <= self.target_ttft_s]
+                         if item["ttft"] is not None
+                         and item["ttft"] <= self.target_ttft_s]
         if within_target:
-            return min(within_target, key=lambda pair: (pair[1]["sort"], pair[1]["ttft"]))[0]
-        return min(groups.items(), key=lambda pair: (pair[1]["ttft"], pair[1]["sort"]))[0]
+            preferred = min(within_target,
+                            key=lambda pair: (pair[1]["sort"], pair[1]["ttft"]))
+            cheaper_unknown = [(key, item) for key, item in unknown
+                               if item["sort"] < preferred[1]["sort"]]
+            if cheaper_unknown:
+                return min(cheaper_unknown,
+                           key=lambda pair: (pair[1]["sort"], pair[1]["index"]))[0]
+        else:
+            if unknown:
+                return min(unknown, key=lambda pair: (pair[1]["sort"], pair[1]["index"]))[0]
+            preferred = min(groups.items(),
+                            key=lambda pair: (pair[1]["ttft"], pair[1]["sort"]))
+        if self._selection_count % 20 == 0:
+            cheaper = [(key, item) for key, item in groups.items()
+                       if item["sort"] < preferred[1]["sort"]]
+            if cheaper:
+                return min(cheaper,
+                           key=lambda pair: (pair[1]["samples"], pair[1]["last_ts"]))[0]
+        return preferred[0]
 
     def record_ttft(self, entry, seconds, alpha=0.3):
         if entry is None or seconds < 0:
