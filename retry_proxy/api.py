@@ -7,25 +7,18 @@ from datetime import datetime, timedelta
 from urllib.parse import unquote
 
 import httpx
-import websockets
-from fastapi import Request, WebSocket, WebSocketDisconnect
+from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
-from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from .config import can_use_key_pool, log_capture, logger, settings
 from .dlp import inspect_json_body
 from .routes import ROUTES, is_excluded_path, match_route
-from .key_pool import KEY_POOLS, headers_with_key
-from .retry import (KeyPoolWaitTimeout, _mark_key_failure, _pick_key, filter_headers,
-                    parse_model, reset_client_ip, set_client_ip, _tag)
+from .key_pool import KEY_POOLS
+from .retry import filter_headers, parse_model, reset_client_ip, set_client_ip, _tag
 from .stats import _normalize_provider, _req_succeeded, _upstream_window_stats, compute_key_pool_stats, compute_stats
 
 SKIP_REQUEST_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade"}
 SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "keep-alive", "content-encoding"}
-SKIP_WEBSOCKET_HEADERS = SKIP_REQUEST_HEADERS | {
-    "origin", "sec-websocket-accept", "sec-websocket-extensions", "sec-websocket-key",
-    "sec-websocket-protocol", "sec-websocket-version",
-}
 
 _GEMINI_MODEL_PATH = re.compile(
     r"(?:^|/)models/([^/:]+):(?:generatecontent|streamgeneratecontent|embedcontent|batchgeneratecontent)(?:/|$)",
@@ -71,31 +64,6 @@ def classify_model_scope(model, endpoint_family=""):
     return ""
 
 
-def _json_has_token(payload):
-    candidates = []
-    known_stream_shape = False
-    if isinstance(payload, dict):
-        event_type = payload.get("type")
-        known_stream_shape = (
-            "choices" in payload or "delta" in payload
-            or isinstance(event_type, str) and event_type.startswith((
-                "response.", "content_block_", "message_", "session.",
-            ))
-        )
-        candidates.extend((payload.get("delta"), payload.get("text")))
-        for choice in payload.get("choices") or []:
-            if isinstance(choice, dict):
-                delta = choice.get("delta")
-                candidates.append(delta.get("content") if isinstance(delta, dict) else delta)
-                candidates.append(choice.get("text"))
-        nested = payload.get("delta")
-        if isinstance(nested, dict):
-            candidates.extend((nested.get("text"), nested.get("content")))
-    if any(isinstance(value, str) and value for value in candidates):
-        return True
-    return not known_stream_shape
-
-
 def _sse_has_token(buffer):
     while b"\n\n" in buffer:
         event, buffer = buffer.split(b"\n\n", 1)
@@ -107,67 +75,30 @@ def _sse_has_token(buffer):
             payload = json.loads(data)
         except (ValueError, TypeError):
             return True, buffer
-        if _json_has_token(payload):
+        candidates = []
+        known_stream_shape = False
+        if isinstance(payload, dict):
+            event_type = payload.get("type")
+            known_stream_shape = (
+                "choices" in payload or "delta" in payload
+                or isinstance(event_type, str) and event_type.startswith((
+                    "response.", "content_block_", "message_",
+                ))
+            )
+            candidates.extend((payload.get("delta"), payload.get("text")))
+            for choice in payload.get("choices") or []:
+                if isinstance(choice, dict):
+                    delta = choice.get("delta")
+                    candidates.append(delta.get("content") if isinstance(delta, dict) else delta)
+                    candidates.append(choice.get("text"))
+            nested = payload.get("delta")
+            if isinstance(nested, dict):
+                candidates.extend((nested.get("text"), nested.get("content")))
+        if any(isinstance(value, str) and value for value in candidates):
+            return True, buffer
+        if isinstance(payload, dict) and not known_stream_shape:
             return True, buffer
     return False, buffer
-
-
-def _websocket_message_has_token(message):
-    if not message:
-        return False
-    if isinstance(message, bytes):
-        try:
-            message = message.decode("utf-8")
-        except UnicodeDecodeError:
-            return True
-    try:
-        payload = json.loads(message)
-    except (ValueError, TypeError):
-        return True
-    if isinstance(payload, dict) and payload.get("type") in (
-            "error", "response.error", "response.failed", "response.incomplete"):
-        return False
-    return _json_has_token(payload)
-
-
-def _websocket_request_info(message):
-    if isinstance(message, bytes):
-        try:
-            message = message.decode("utf-8")
-        except UnicodeDecodeError:
-            return "", False, False
-    try:
-        payload = json.loads(message)
-    except (ValueError, TypeError):
-        return "", False, False
-    if not isinstance(payload, dict) or payload.get("type") != "response.create":
-        return "", False, False
-    model = payload.get("model")
-    return model if isinstance(model, str) else "", payload.get("generate") is not False, True
-
-
-def _websocket_event_type(message):
-    if isinstance(message, bytes):
-        try:
-            message = message.decode("utf-8")
-        except UnicodeDecodeError:
-            return ""
-    try:
-        payload = json.loads(message)
-    except (ValueError, TypeError):
-        return ""
-    return payload.get("type", "") if isinstance(payload, dict) else ""
-
-
-def _websocket_url(upstream, remaining, query=""):
-    if upstream.startswith("https://"):
-        upstream = "wss://" + upstream[8:]
-    elif upstream.startswith("http://"):
-        upstream = "ws://" + upstream[7:]
-    elif not upstream.startswith(("ws://", "wss://")):
-        raise ValueError("WebSocket upstream must use http(s) or ws(s)")
-    url = f"{upstream}/{remaining}" if remaining else upstream
-    return f"{url}?{query}" if query else url
 
 
 def outbound_request_headers(request_headers, path, model, config=settings):
@@ -179,42 +110,6 @@ def outbound_request_headers(request_headers, path, model, config=settings):
     if image_request and config.image_upstream_originator:
         headers["originator"] = config.image_upstream_originator
     return headers
-
-
-def _inspect_websocket_message(body, path, provider, client_ip):
-    if settings.dlp_mode not in ("audit", "block", "redact"):
-        return body, ""
-    tag = _tag("WS", path, provider, "", client_ip)
-    if len(body) > settings.dlp_max_body_bytes:
-        logger.warning(f"{tag} DLP消息超限 bytes={len(body)}")
-        if settings.dlp_mode in ("block", "redact"):
-            return body, "WebSocket message exceeds DLP inspection limit"
-        return body, ""
-    dlp = inspect_json_body(
-        body, settings.dlp_rules, settings.dlp_exempt_start, settings.dlp_exempt_end,
-        settings.dlp_strip_exempt_markers, mode=settings.dlp_mode,
-        rule_file=settings.dlp_rule_file, allow_exemptions=settings.dlp_allow_exemptions,
-        decode_depth=settings.dlp_decode_depth,
-        decode_max_candidates=settings.dlp_decode_max_candidates,
-        decode_max_bytes=settings.dlp_decode_max_bytes, known_secrets=_key_pool_secrets(),
-        known_secret_min_length=settings.dlp_known_secret_min_length,
-    )
-    if dlp.uninspectable and settings.dlp_fail_closed and body:
-        logger.warning(f"{tag} DLP无法解析消息")
-        return body, "WebSocket message cannot be inspected by DLP"
-    if dlp.limit_exceeded and settings.dlp_mode in ("block", "redact"):
-        logger.warning(f"{tag} DLP解码扫描超限")
-        return body, "WebSocket message exceeds DLP decode inspection limits"
-    if dlp.malformed_exemption and settings.dlp_mode in ("block", "redact"):
-        logger.warning(f"{tag} DLP豁免标记不完整")
-        return body, "Malformed DLP exemption markers"
-    if dlp.blocked_rules:
-        logger.warning(f"{tag} DLP拦截 rules={','.join(dlp.blocked_rules)}")
-        return body, "WebSocket message blocked by sensitive data policy"
-    if dlp.matched_rules:
-        action = "脱敏" if dlp.redactions else "告警"
-        logger.warning(f"{tag} DLP{action} rules={','.join(dlp.matched_rules)}")
-    return dlp.body, ""
 
 
 async def _run_until_disconnect(request, awaitable):
@@ -531,207 +426,3 @@ def create_handlers(service, store):
                 await response.aclose()
         return StreamingResponse(body_gen(), status_code=response.status_code, headers=headers, media_type=response.headers.get("content-type"))
     return health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy
-
-
-def create_websocket_handler(store):
-    async def websocket_proxy(websocket: WebSocket, path: str):
-        if is_excluded_path(path):
-            await websocket.close(code=1008)
-            return
-        client_ip = _request_ip(websocket)
-        upstream, provider, remaining = match_route(path)
-        try:
-            url = _websocket_url(upstream, remaining, websocket.url.query)
-        except ValueError:
-            await websocket.close(code=1011)
-            return
-        base_pool = KEY_POOLS.get(upstream)
-        pool_credential_ok = can_use_key_pool(websocket.headers)
-        if settings.proxy_api_key and pool_credential_ok and base_pool is None:
-            await websocket.close(code=1013, reason="Key pool is unavailable for this upstream")
-            return
-        headers = filter_headers(websocket.headers, SKIP_WEBSOCKET_HEADERS)
-        origin = websocket.headers.get("origin")
-        await websocket.accept()
-        try:
-            first_message = await websocket.receive()
-        except WebSocketDisconnect:
-            return
-        if first_message["type"] == "websocket.disconnect":
-            return
-        first_value = first_message.get("text")
-        first_binary = first_value is None
-        if first_binary:
-            first_value = first_message.get("bytes", b"")
-        first_raw = first_value if isinstance(first_value, bytes) else first_value.encode("utf-8")
-        first_raw, dlp_error = _inspect_websocket_message(
-            first_raw, path, provider, client_ip,
-        )
-        if dlp_error:
-            await websocket.close(code=1008, reason=dlp_error[:120])
-            return
-        first_outbound = first_raw if first_binary else first_raw.decode("utf-8")
-        model, first_generates, _ = _websocket_request_info(first_outbound)
-        if not model:
-            model = websocket.query_params.get("model", "")
-        endpoint_family = classify_endpoint(remaining)
-        model_scope = classify_model_scope(model, endpoint_family)
-        pool_access = bool(base_pool and pool_credential_ok)
-        request_pool = base_pool.for_request(
-            model, remaining, endpoint_family, model_scope,
-        ) if pool_access else None
-        if pool_access and request_pool is None:
-            await websocket.close(code=1008, reason="No compatible key pool route")
-            return
-        try:
-            entry = await _pick_key(
-                request_pool, getattr(settings, "key_pool_wait_timeout", None),
-            )
-        except KeyPoolWaitTimeout:
-            await websocket.close(code=1013, reason="All compatible keys are cooling down")
-            return
-        if entry:
-            headers = headers_with_key(headers, entry.key, entry.auth_header, entry.auth_scheme)
-        started_at = time.time()
-        logger.debug(f"{_tag('WS', path, provider, model, client_ip)} 连接上游")
-        try:
-            upstream_ws = await websockets.connect(
-                url, additional_headers=headers, origin=origin,
-                open_timeout=settings.connect_timeout, close_timeout=10, max_size=None,
-                user_agent_header=None if "user-agent" in headers else "Python/websockets",
-                proxy=True if settings.trust_env else None,
-            )
-        except InvalidStatus as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", 0)
-            if entry and (status in (401, 403, 429) or status >= 500):
-                _mark_key_failure(request_pool, entry, settings, status)
-            await websocket.close(code=1013, reason=f"Upstream WebSocket handshake failed ({status or 'HTTP'})")
-            return
-        except (OSError, TimeoutError, websockets.WebSocketException):
-            await websocket.close(code=1013, reason="Upstream WebSocket connection failed")
-            return
-
-        if entry:
-            request_pool.mark_success(entry)
-        logger.info(f"{_tag('WS', path, provider, model, client_ip)} 已连接")
-        request_started_at = time.time() if first_generates else 0.0
-        ttft_recorded = not first_generates
-        response_pending = first_generates
-        downstream_close_code = 1000
-        downstream_close_reason = ""
-        succeeded = True
-        await upstream_ws.send(first_outbound)
-
-        async def downstream_to_upstream():
-            nonlocal request_started_at, response_pending, ttft_recorded
-            while True:
-                message = await websocket.receive()
-                if message["type"] == "websocket.disconnect":
-                    return
-                value = message.get("text")
-                binary = value is None
-                if binary:
-                    value = message.get("bytes", b"")
-                raw = value if isinstance(value, bytes) else value.encode("utf-8")
-                inspected, error = _inspect_websocket_message(
-                    raw, path, provider, client_ip,
-                )
-                if error:
-                    await websocket.close(code=1008, reason=error[:120])
-                    return
-                outbound = inspected if binary else inspected.decode("utf-8")
-                next_model, generates, is_response_create = _websocket_request_info(outbound)
-                if is_response_create:
-                    if next_model and base_pool is not None and entry is not None:
-                        compatible_pool = base_pool.for_request(
-                            next_model, remaining, endpoint_family,
-                            classify_model_scope(next_model, endpoint_family),
-                        )
-                        if compatible_pool is None or entry not in compatible_pool.entries:
-                            await websocket.close(
-                                code=1008,
-                                reason="Model is incompatible with the selected key pool route",
-                            )
-                            return
-                    request_started_at = time.time() if generates else 0.0
-                    ttft_recorded = not generates
-                    response_pending = generates
-                await upstream_ws.send(outbound)
-
-        async def upstream_to_downstream():
-            nonlocal response_pending, ttft_recorded
-            async for message in upstream_ws:
-                if (not ttft_recorded and request_started_at > 0
-                        and _websocket_message_has_token(message)):
-                    ttft_recorded = True
-                    if request_pool is not None and entry is not None:
-                        request_pool.record_ttft(entry, time.time() - request_started_at)
-                if _websocket_event_type(message) in (
-                        "response.completed", "response.failed",
-                        "response.incomplete", "error"):
-                    response_pending = False
-                if isinstance(message, bytes):
-                    await websocket.send_bytes(message)
-                else:
-                    await websocket.send_text(message)
-
-        downstream_task = asyncio.create_task(downstream_to_upstream())
-        upstream_task = asyncio.create_task(upstream_to_downstream())
-        tasks = {downstream_task, upstream_task}
-        try:
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
-            if downstream_task in done:
-                succeeded = not response_pending
-            elif upstream_task in done:
-                upstream_code = getattr(upstream_ws, "close_code", None) or 1000
-                upstream_reason = getattr(upstream_ws, "close_reason", "") or ""
-                if response_pending:
-                    succeeded = False
-                    downstream_close_code = (
-                        upstream_code if upstream_code != 1000 else 1011
-                    )
-                    downstream_close_reason = (
-                        upstream_reason or "Upstream closed before response.completed"
-                    )
-        except WebSocketDisconnect:
-            succeeded = False
-        except ConnectionClosed as exc:
-            succeeded = False
-            if upstream_task in done:
-                downstream_close_code = exc.code or 1011
-                downstream_close_reason = (
-                    exc.reason or "Upstream closed before response.completed"
-                )
-        finally:
-            if not succeeded and downstream_close_reason:
-                logger.warning(
-                    f"{_tag('WS', path, provider, model, client_ip)} 上游中断 "
-                    f"code={downstream_close_code} reason={downstream_close_reason}"
-                )
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await upstream_ws.close()
-            if websocket.client_state.name != "DISCONNECTED":
-                try:
-                    await websocket.close(
-                        code=downstream_close_code,
-                        reason=downstream_close_reason[:120],
-                    )
-                except RuntimeError:
-                    pass
-        await store.write({
-            "ts": datetime.now().isoformat(timespec="milliseconds"), "method": "WS",
-            "path": "/" + path, "provider": provider, "model": model,
-            "upstream_status": 101, "final_status": downstream_close_code,
-            "attempts": 1, "retries": 0,
-            "duration_s": round(time.time() - started_at, 3), "succeeded": succeeded,
-            "retry_codes": [], "mode": "off", "first_ok": True,
-            "key_id": entry.key_id if entry else "", "key_pool": upstream if entry else "",
-            "key_attempts": [], "client_ip": client_ip,
-        })
-
-    return websocket_proxy

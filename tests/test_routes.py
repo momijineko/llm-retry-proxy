@@ -1,6 +1,9 @@
 import unittest
 from types import SimpleNamespace
 
+from starlette.routing import WebSocketRoute
+
+from retry_proxy.application import app
 from retry_proxy.routes import RouteRegistry, normalize_route_prefix
 
 
@@ -71,6 +74,16 @@ class RouteRegistryTests(unittest.TestCase):
         self.assertEqual(normalize_route_prefix("/"), "")
         with self.assertRaises(ValueError):
             normalize_route_prefix("https://example.test")
+
+
+class ApplicationTransportRouteTests(unittest.TestCase):
+    def test_proxy_uses_http_fallback_without_websocket_route(self):
+        self.assertFalse(any(isinstance(route, WebSocketRoute) for route in app.routes))
+        self.assertTrue(any(
+            getattr(route, "path", "") == "/{path:path}"
+            and "POST" in (getattr(route, "methods", None) or set())
+            for route in app.routes
+        ))
 
 
 if __name__ == "__main__":
