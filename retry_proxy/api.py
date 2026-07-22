@@ -146,6 +146,19 @@ def _websocket_request_info(message):
     return model if isinstance(model, str) else "", payload.get("generate") is not False, True
 
 
+def _websocket_event_type(message):
+    if isinstance(message, bytes):
+        try:
+            message = message.decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
+    try:
+        payload = json.loads(message)
+    except (ValueError, TypeError):
+        return ""
+    return payload.get("type", "") if isinstance(payload, dict) else ""
+
+
 def _websocket_url(upstream, remaining, query=""):
     if upstream.startswith("https://"):
         upstream = "wss://" + upstream[8:]
@@ -603,10 +616,14 @@ def create_websocket_handler(store):
         logger.info(f"{_tag('WS', path, provider, model, client_ip)} 已连接")
         request_started_at = time.time() if first_generates else 0.0
         ttft_recorded = not first_generates
+        response_pending = first_generates
+        downstream_close_code = 1000
+        downstream_close_reason = ""
+        succeeded = True
         await upstream_ws.send(first_outbound)
 
         async def downstream_to_upstream():
-            nonlocal request_started_at, ttft_recorded
+            nonlocal request_started_at, response_pending, ttft_recorded
             while True:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
@@ -638,32 +655,61 @@ def create_websocket_handler(store):
                             return
                     request_started_at = time.time() if generates else 0.0
                     ttft_recorded = not generates
+                    response_pending = generates
                 await upstream_ws.send(outbound)
 
         async def upstream_to_downstream():
-            nonlocal ttft_recorded
+            nonlocal response_pending, ttft_recorded
             async for message in upstream_ws:
                 if (not ttft_recorded and request_started_at > 0
                         and _websocket_message_has_token(message)):
                     ttft_recorded = True
                     if request_pool is not None and entry is not None:
                         request_pool.record_ttft(entry, time.time() - request_started_at)
+                if _websocket_event_type(message) in (
+                        "response.completed", "response.failed",
+                        "response.incomplete", "error"):
+                    response_pending = False
                 if isinstance(message, bytes):
                     await websocket.send_bytes(message)
                 else:
                     await websocket.send_text(message)
 
-        tasks = {
-            asyncio.create_task(downstream_to_upstream()),
-            asyncio.create_task(upstream_to_downstream()),
-        }
+        downstream_task = asyncio.create_task(downstream_to_upstream())
+        upstream_task = asyncio.create_task(upstream_to_downstream())
+        tasks = {downstream_task, upstream_task}
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
-        except (WebSocketDisconnect, ConnectionClosed):
-            pass
+            if downstream_task in done:
+                succeeded = not response_pending
+            elif upstream_task in done:
+                upstream_code = getattr(upstream_ws, "close_code", None) or 1000
+                upstream_reason = getattr(upstream_ws, "close_reason", "") or ""
+                if response_pending:
+                    succeeded = False
+                    downstream_close_code = (
+                        upstream_code if upstream_code != 1000 else 1011
+                    )
+                    downstream_close_reason = (
+                        upstream_reason or "Upstream closed before response.completed"
+                    )
+        except WebSocketDisconnect:
+            succeeded = False
+        except ConnectionClosed as exc:
+            succeeded = False
+            if upstream_task in done:
+                downstream_close_code = exc.code or 1011
+                downstream_close_reason = (
+                    exc.reason or "Upstream closed before response.completed"
+                )
         finally:
+            if not succeeded and downstream_close_reason:
+                logger.warning(
+                    f"{_tag('WS', path, provider, model, client_ip)} 上游中断 "
+                    f"code={downstream_close_code} reason={downstream_close_reason}"
+                )
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -671,14 +717,18 @@ def create_websocket_handler(store):
             await upstream_ws.close()
             if websocket.client_state.name != "DISCONNECTED":
                 try:
-                    await websocket.close()
+                    await websocket.close(
+                        code=downstream_close_code,
+                        reason=downstream_close_reason[:120],
+                    )
                 except RuntimeError:
                     pass
         await store.write({
             "ts": datetime.now().isoformat(timespec="milliseconds"), "method": "WS",
             "path": "/" + path, "provider": provider, "model": model,
-            "upstream_status": 101, "final_status": 101, "attempts": 1, "retries": 0,
-            "duration_s": round(time.time() - started_at, 3), "succeeded": True,
+            "upstream_status": 101, "final_status": downstream_close_code,
+            "attempts": 1, "retries": 0,
+            "duration_s": round(time.time() - started_at, 3), "succeeded": succeeded,
             "retry_codes": [], "mode": "off", "first_ok": True,
             "key_id": entry.key_id if entry else "", "key_pool": upstream if entry else "",
             "key_attempts": [], "client_ip": client_ip,

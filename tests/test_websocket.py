@@ -9,6 +9,7 @@ from starlette.datastructures import Headers, QueryParams, URL
 from starlette.websockets import WebSocketState
 
 from retry_proxy.api import (
+    _websocket_event_type,
     _websocket_message_has_token,
     _websocket_request_info,
     _websocket_url,
@@ -113,6 +114,12 @@ class WebSocketProtocolTests(unittest.TestCase):
         self.assertTrue(_websocket_message_has_token(json.dumps({
             "type": "response.output_text.delta", "delta": "hello",
         })))
+
+    def test_event_type_handles_text_binary_and_invalid_frames(self):
+        event = json.dumps({"type": "response.completed"})
+        self.assertEqual(_websocket_event_type(event), "response.completed")
+        self.assertEqual(_websocket_event_type(event.encode()), "response.completed")
+        self.assertEqual(_websocket_event_type(b"\xff"), "")
 
 
 class WebSocketProxyTests(unittest.IsolatedAsyncioTestCase):
@@ -220,6 +227,38 @@ class WebSocketProxyTests(unittest.IsolatedAsyncioTestCase):
             await handler(downstream, "responses")
 
         self.assertEqual(pool.entries[0].ttft_samples, 0)
+
+    async def test_upstream_close_before_completed_is_reported_to_client(self):
+        config = _config(proxy_api_key="")
+        request = json.dumps({
+            "type": "response.create", "model": "gpt-5", "input": [],
+        })
+        downstream = FakeDownstream([
+            {"type": "websocket.receive", "text": request},
+        ])
+        upstream = FakeUpstream([
+            json.dumps({"type": "response.created", "response": {"id": "resp-1"}}),
+            json.dumps({"type": "response.output_text.delta", "delta": "partial"}),
+        ])
+        store = SimpleNamespace(write=AsyncMock())
+        handler = create_websocket_handler(store)
+
+        with patch("retry_proxy.api.settings", config), \
+                patch("retry_proxy.config.settings", config), \
+                patch("retry_proxy.api.KEY_POOLS", {}), \
+                patch("retry_proxy.api.match_route", return_value=(
+                    "https://upstream.test/v1", "test", "responses",
+                )), \
+                patch("retry_proxy.api.websockets.connect", AsyncMock(return_value=upstream)):
+            await handler(downstream, "responses")
+
+        self.assertEqual(downstream.close_code, 1011)
+        self.assertEqual(
+            downstream.close_reason, "Upstream closed before response.completed",
+        )
+        record = store.write.await_args.args[0]
+        self.assertFalse(record["succeeded"])
+        self.assertEqual(record["final_status"], 1011)
 
     async def test_later_incompatible_model_is_not_forwarded(self):
         config = _config()
