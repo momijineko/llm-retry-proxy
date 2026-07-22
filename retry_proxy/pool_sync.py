@@ -62,7 +62,13 @@ class PoolSyncManager:
         pool = KeyPool([], source.get("provider") or self.config.provider)
         pool.strategy = source.get("strategy", "cost")
         pool.target_ttft_s = float(source.get("target_ttft_s", 5.0))
+        disabled_key_ids = {
+            str(value) for value in source.get("disabled_key_ids", [])
+            if value not in (None, "")
+        }
         for item in source.get("entries", []):
+            if str(item.get("source_key_id")) in disabled_key_ids:
+                continue
             pool.entries.append(KeyEntry(
                 item["key"], item.get("label", ""), item.get("models", ()),
                 item.get("paths", ()), item.get("sort", ""),
@@ -131,6 +137,10 @@ class PoolSyncManager:
                 source.setdefault("strategy", "cost")
                 source.setdefault("target_ttft_s", 5.0)
                 source.setdefault("check_model", "")
+                source["disabled_key_ids"] = [
+                    str(value) for value in source.get("disabled_key_ids", [])
+                    if value not in (None, "")
+                ]
                 try:
                     source["pool_url"] = self._resolve_pool_url(source)
                 except ValueError as exc:
@@ -159,7 +169,7 @@ class PoolSyncManager:
             return
         directory = os.path.dirname(os.path.abspath(self.state_file))
         os.makedirs(directory, exist_ok=True)
-        state = {"version": 3, "interval": self.config.key_pool_sync_interval,
+        state = {"version": 4, "interval": self.config.key_pool_sync_interval,
                  "sources": self._persistent_sources()}
         fd, temp_path = tempfile.mkstemp(prefix=".pool_sync_", suffix=".json", dir=directory)
         try:
@@ -247,7 +257,7 @@ class PoolSyncManager:
                 "id": source_id, "adapter": adapter_name, "base_url": base_url,
                 "provider": requested_provider, "session": {}, "entries": [],
                 "route_prefix": "", "strategy": "cost", "target_ttft_s": 5.0,
-                "check_model": "",
+                "check_model": "", "disabled_key_ids": [],
                 "last_sync_at": "", "last_attempt_at": "", "last_error": "",
             })
             source["provider"] = requested_provider
@@ -646,6 +656,35 @@ class PoolSyncManager:
             )
             return self.status()
 
+    async def set_key_enabled(self, source_id, source_key_id, enabled):
+        if not isinstance(enabled, bool):
+            raise PoolSyncError("enabled 必须是布尔值")
+        async with self._lock:
+            source = self.sources.get(source_id)
+            if source is None:
+                raise PoolSyncError("号池同步连接不存在")
+            item = next((entry for entry in source.get("entries") or []
+                         if str(entry.get("source_key_id")) == str(source_key_id)), None)
+            if item is None:
+                raise PoolSyncError("Key 不存在或已被上游删除")
+            key_id = str(source_key_id)
+            disabled = {
+                str(value) for value in source.get("disabled_key_ids", [])
+                if value not in (None, "")
+            }
+            if enabled:
+                disabled.discard(key_id)
+            else:
+                disabled.add(key_id)
+            source["disabled_key_ids"] = sorted(disabled)
+            self._activate(source)
+            self._save_state()
+            logger.info(
+                f"号池 Key 已手动{'启用' if enabled else '停用'}: "
+                f"upstream={source['base_url']} source_key_id={key_id}"
+            )
+            return self.status()
+
     async def delete(self, source_id):
         async with self._lock:
             source = self.sources.get(source_id)
@@ -699,12 +738,17 @@ class PoolSyncManager:
             if not route_prefix and self.route_registry is not None:
                 route_prefix = self.route_registry.environment_prefix_for_url(source["base_url"])
             runtime = {entry.key: entry for entry in pool.entries} if pool else {}
+            disabled_key_ids = {
+                str(value) for value in source.get("disabled_key_ids", [])
+                if value not in (None, "")
+            }
             visible_entries = []
             for item in source.get("entries") or []:
                 raw_key = item.get("key", "")
                 entry = runtime.get(raw_key)
                 visible_entries.append({
                     "source_key_id": item.get("source_key_id"),
+                    "enabled": str(item.get("source_key_id")) not in disabled_key_ids,
                     "key_masked": raw_key[:7] + "..." + raw_key[-4:],
                     "label": item.get("label", ""), "sort": item.get("sort", ""),
                     "group_id": str(item.get("group_id") or ""),

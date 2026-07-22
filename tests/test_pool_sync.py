@@ -687,6 +687,49 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.consecutive_failures, 0)
         self.assertEqual(entry.total_fail, 1)
 
+    async def test_disabled_key_is_excluded_and_persists_across_sync_and_restart(self):
+        pools = {"https://upstream.test": KeyPool([])}
+        manager = PoolSyncManager(pools, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+
+        status = await manager.set_key_enabled(source_id, 11, False)
+
+        self.assertEqual(pools["https://upstream.test"].entries, [])
+        self.assertIsNone(pools["https://upstream.test"].for_request())
+        self.assertFalse(status["sources"][0]["keys"][0]["enabled"])
+        await manager.sync_now(source_id)
+        self.assertEqual(pools["https://upstream.test"].entries, [])
+
+        restored_pools = {}
+        restored = PoolSyncManager(
+            restored_pools, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()},
+        )
+        restored.load_state()
+        self.assertEqual(restored_pools["https://upstream.test"].entries, [])
+        self.assertFalse(restored.status()["sources"][0]["keys"][0]["enabled"])
+
+        status = await restored.set_key_enabled(source_id, 11, True)
+        self.assertEqual(
+            [entry.key for entry in restored_pools["https://upstream.test"].entries],
+            ["sk-secret-one"],
+        )
+        self.assertTrue(status["sources"][0]["keys"][0]["enabled"])
+
+    async def test_set_key_enabled_validates_key_and_boolean(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+
+        with self.assertRaisesRegex(PoolSyncError, "enabled 必须是布尔值"):
+            await manager.set_key_enabled(source_id, 11, "false")
+        with self.assertRaisesRegex(PoolSyncError, "Key 不存在"):
+            await manager.set_key_enabled(source_id, 999, False)
+
     async def test_clear_selected_groups_deletes_remote_keys_and_resyncs(self):
         client = FakeClient()
         pools = {"https://upstream.test": KeyPool([])}
