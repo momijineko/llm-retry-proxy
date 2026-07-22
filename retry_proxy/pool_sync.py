@@ -73,7 +73,7 @@ class PoolSyncManager:
                 item["key"], item.get("label", ""), item.get("models", ()),
                 item.get("paths", ()), item.get("sort", ""),
                 item.get("group_id", ""), item.get("group_name", ""),
-                item.get("routing_capabilities"),
+                self._routing_capabilities(source, item),
                 item.get("auth"),
             ))
         pool.finalize_entries()
@@ -94,6 +94,17 @@ class PoolSyncManager:
 
     def _activate(self, source):
         replace_key_pool(self._pool_url(source), self._pool_from_source(source), self.pools)
+
+    @staticmethod
+    def _routing_capabilities(source, item):
+        capabilities = dict(item.get("routing_capabilities") or {})
+        group_id = str(item.get("group_id") or "")
+        raw_rejections = source.get("group_model_rejections")
+        rejections = raw_rejections if isinstance(raw_rejections, dict) else {}
+        rejected = rejections.get(group_id, [])
+        if rejected:
+            capabilities["rejected_models"] = list(rejected)
+        return capabilities
 
     def _restore_static(self, base_url):
         base_url = base_url.rstrip("/")
@@ -134,6 +145,9 @@ class PoolSyncManager:
                 source["base_url"] = source["base_url"].rstrip("/")
                 source.setdefault("route_prefix", "")
                 source.setdefault("group_rules", {})
+                source.setdefault("group_model_cache", {})
+                if not isinstance(source.get("group_model_rejections"), dict):
+                    source["group_model_rejections"] = {}
                 source.setdefault("strategy", "cost")
                 source.setdefault("target_ttft_s", 5.0)
                 source.setdefault("check_model", "")
@@ -257,7 +271,8 @@ class PoolSyncManager:
                 "id": source_id, "adapter": adapter_name, "base_url": base_url,
                 "provider": requested_provider, "session": {}, "entries": [],
                 "route_prefix": "", "strategy": "cost", "target_ttft_s": 5.0,
-                "check_model": "", "disabled_key_ids": [],
+                "check_model": "", "disabled_key_ids": [], "group_model_cache": {},
+                "group_model_rejections": {},
                 "last_sync_at": "", "last_attempt_at": "", "last_error": "",
             })
             source["provider"] = requested_provider
@@ -352,6 +367,9 @@ class PoolSyncManager:
                     rule = (source.get("group_rules") or {}).get(str(group.get("id")))
                     group["models"] = list((rule or {}).get("models") or [])
                     group["paths"] = list((rule or {}).get("paths") or [])
+                    group["routing_capabilities"] = self._routing_capabilities(source, {
+                        **group, "group_id": group.get("id"),
+                    })
                 self._save_state()
                 return {"source_id": source_id, "groups": groups}
             except PoolSyncError:
@@ -372,6 +390,33 @@ class PoolSyncManager:
             self._activate(source)
             self._save_state()
             return self.status()
+
+    async def mark_model_unsupported(self, upstream, group_id, model):
+        upstream = (upstream or "").rstrip("/")
+        group_id = str(group_id or "")
+        model = str(model or "").strip().lower()
+        if not upstream or not group_id or not model:
+            return False
+        async with self._lock:
+            source = next((item for item in self.sources.values()
+                           if self._pool_url(item) == upstream), None)
+            if source is None:
+                return False
+            rejections = source.get("group_model_rejections")
+            if not isinstance(rejections, dict):
+                rejections = source["group_model_rejections"] = {}
+            models = rejections.setdefault(group_id, [])
+            if model in models:
+                return False
+            models.append(model)
+            models.sort()
+            self._activate(source)
+            self._save_state()
+            logger.warning(
+                f"上游模型能力已由真实请求修正: upstream={source['base_url']} "
+                f"group={group_id} model={model}"
+            )
+            return True
 
     async def create_keys(self, source_id, group_ids=None, only_missing=False, options=None):
         async with self._lock:
@@ -767,7 +812,7 @@ class PoolSyncManager:
                     "key_name": item.get("key_name", ""), "group_name": item.get("group_name", ""),
                     "platform": item.get("platform", ""),
                     "allow_image_generation": bool(item.get("allow_image_generation")),
-                    "routing_capabilities": dict(item.get("routing_capabilities") or {}),
+                    "routing_capabilities": self._routing_capabilities(source, item),
                     "models": item.get("models", []),
                     "paths": item.get("paths", []),
                     "cooled": bool(entry and entry.cooldown_until > now),

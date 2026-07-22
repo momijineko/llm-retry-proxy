@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 
+from ..config import logger
 from .base import PoolSyncAdapter, PoolSyncError
 
 
@@ -53,6 +54,37 @@ def _number_text(value):
         return format(float(value), ".12g")
     except (TypeError, ValueError):
         return ""
+
+
+def _model_ids(payload):
+    if isinstance(payload, dict):
+        items = payload.get("data")
+        if items is None:
+            items = payload.get("models")
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        items = None
+    if not isinstance(items, list):
+        raise PoolSyncError("模型列表响应格式无法识别")
+    models = []
+    seen = set()
+    for item in items:
+        if isinstance(item, str):
+            value = item
+        elif isinstance(item, dict):
+            value = item.get("id") or item.get("name")
+        else:
+            continue
+        value = str(value or "").strip()
+        if value.startswith("models/"):
+            value = value[7:]
+        normalized = value.lower()
+        if not value or normalized in seen:
+            continue
+        seen.add(normalized)
+        models.append(value)
+    return models
 
 
 class Sub2APIAdapter(PoolSyncAdapter):
@@ -156,6 +188,48 @@ class Sub2APIAdapter(PoolSyncAdapter):
             return await self._get(client, source, session, path, params, retry=False)
         return session, _unwrap(response)
 
+    async def _get_group_models(self, client, source, api_key):
+        response = await client.get(
+            source["base_url"] + "/v1/models",
+            headers=self._headers(api_key), timeout=20,
+        )
+        return _model_ids(_unwrap(response))
+
+    async def _apply_group_model_cache(self, client, source, entries):
+        raw_cache = source.get("group_model_cache")
+        cache = raw_cache if isinstance(raw_cache, dict) else {}
+        cache = {
+            str(group_id): list(models)
+            for group_id, models in cache.items()
+            if isinstance(models, list)
+        }
+        source["group_model_cache"] = cache
+        representatives = {}
+        for item in entries:
+            group_id = str(item.get("group_id") or "")
+            if group_id and item.get("routing_capabilities"):
+                representatives.setdefault(group_id, item)
+        for group_id, item in representatives.items():
+            if group_id in cache:
+                continue
+            try:
+                cache[group_id] = await self._get_group_models(
+                    client, source, item["key"],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "分组模型列表读取失败: upstream=%s group=%s error=%s",
+                    source["base_url"], item.get("group_name") or group_id, exc,
+                )
+        for item in entries:
+            group_id = str(item.get("group_id") or "")
+            capabilities = item.get("routing_capabilities")
+            if group_id not in cache or not capabilities:
+                continue
+            capabilities["model_patterns"] = list(cache[group_id])
+            capabilities["model_list_known"] = True
+        return entries
+
     async def _authorized_post(self, client, source, session, path, body, headers=None, retry=True):
         if not session.get("access_token"):
             session = await self._refresh(client, source, session)
@@ -234,6 +308,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
                 "allow_image_generation": bool(group.get("allow_image_generation")),
                 "routing_capabilities": self.routing_capabilities(group),
             })
+        await self._apply_group_model_cache(client, source, entries)
         return session, entries
 
     async def catalog(self, client, source, session):
@@ -252,16 +327,22 @@ class Sub2APIAdapter(PoolSyncAdapter):
             if item.get("status") == "active":
                 active_counts[key] = active_counts.get(key, 0) + 1
         catalog = []
+        model_cache = source.get("group_model_cache")
+        model_cache = model_cache if isinstance(model_cache, dict) else {}
         for group in groups or []:
             if not isinstance(group, dict) or group.get("status") not in (None, "", "active"):
                 continue
             group_id = group.get("id")
             key = str(group_id)
+            capabilities = self.routing_capabilities(group)
+            if key in model_cache and capabilities and isinstance(model_cache[key], list):
+                capabilities["model_patterns"] = list(model_cache[key])
+                capabilities["model_list_known"] = True
             catalog.append({
                 "id": group_id, "name": group.get("name", ""),
                 "platform": group.get("platform", ""),
                 "allow_image_generation": bool(group.get("allow_image_generation")),
-                "routing_capabilities": self.routing_capabilities(group),
+                "routing_capabilities": capabilities,
                 "rate_multiplier": _number_text(rates.get(key, group.get("rate_multiplier"))),
                 "key_count": counts.get(key, 0), "active_key_count": active_counts.get(key, 0),
             })

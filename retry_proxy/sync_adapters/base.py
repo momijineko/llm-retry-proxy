@@ -9,7 +9,7 @@ class PoolSyncAdapter(ABC):
     """Provider-specific authentication and key normalization contract.
 
     Normalized entries may include ``routing_capabilities`` with ``platform``,
-    ``endpoint_families``, ``model_patterns``, ``model_scopes`` and
+    ``endpoint_families``, ``model_patterns``, ``model_scopes``, ``model_list_known`` and
     ``image_generation``. They may also include ``auth`` with ``header`` and
     ``scheme`` for per-entry upstream authentication. Adapters should omit
     either object when the upstream does not expose reliable metadata so

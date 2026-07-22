@@ -1,7 +1,9 @@
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from fastapi import HTTPException
 from starlette.requests import Request
 
@@ -75,6 +77,60 @@ class ProxyPoolAuthTests(unittest.TestCase):
 
 
 class ProxyPoolRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_model_not_found_response_updates_the_used_group(self):
+        config = SimpleNamespace(
+            proxy_api_key="", dlp_mode="off", dlp_max_body_bytes=1024,
+            image_upstream_user_agent="", image_upstream_originator="",
+        )
+        entry = KeyEntry("group-key", "group", sort="0.01", group_id="free",
+                         routing_capabilities={
+                             "platform": "openai", "endpoint_families": ["responses"],
+                             "model_patterns": ["gpt-example"], "model_list_known": True,
+                         })
+        pool = KeyPool([])
+        pool.entries = [entry]
+        pool.finalize_entries()
+        upstream_response = httpx.Response(
+            404, json={"error": {"code": "model_not_found",
+                                  "message": "The model does not exist"}},
+            request=httpx.Request("POST", "https://upstream.test/responses"),
+        )
+        result = SimpleNamespace(
+            response=upstream_response, winner_attempt=1, total_sent=1,
+            last_status=404, retry_codes=[], first_ok=True,
+            key_id=entry.key_id, key_attempts=[], started_at=time.time(),
+            key_entry=entry, response_started_mono=time.monotonic(),
+        )
+        service = SimpleNamespace(
+            request=lambda *args, **kwargs: None,
+            hedge_mode_for=lambda request_pool: "off",
+        )
+        store = SimpleNamespace(write=AsyncMock())
+        pool_sync = SimpleNamespace(mark_model_unsupported=AsyncMock(return_value=True))
+        proxy = create_handlers(service, store, pool_sync)[-1]
+        request = Request({
+            "type": "http", "method": "POST", "path": "/responses",
+            "headers": [(b"content-type", b"application/json")],
+            "query_string": b"", "server": ("test", 80), "client": ("127.0.0.1", 1),
+        }, receive=AsyncMock(return_value={
+            "type": "http.request", "body": b'{"model":"gpt-example"}',
+            "more_body": False,
+        }))
+
+        with patch("retry_proxy.api.settings", config), \
+                patch("retry_proxy.config.settings", config), \
+                patch("retry_proxy.api.KEY_POOLS", {"https://upstream.test": pool}), \
+                patch("retry_proxy.api.match_route",
+                      return_value=("https://upstream.test", "test", "responses")), \
+                patch("retry_proxy.api._run_until_disconnect", AsyncMock(return_value=result)):
+            response = await proxy("responses", request)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn(b"model_not_found", response.body)
+        pool_sync.mark_model_unsupported.assert_awaited_once_with(
+            "https://upstream.test", "free", "gpt-example",
+        )
+
     async def test_matching_proxy_key_is_not_forwarded_when_pool_is_missing(self):
         config = SimpleNamespace(
             proxy_api_key="pool-secret", dlp_mode="off", dlp_max_body_bytes=1024,

@@ -131,13 +131,15 @@ KEY_AUTH_SCHEME=           # 空值，直接放裸 key，不加 Bearer 前缀
 
 ### 自动端点与模型能力隔离
 
-在线同步适配器可以为分组返回结构化的路由能力。`sub2api` 会同步分组的 `platform`、支持的模型范围、启用的模型列表、生图权限和 OpenAI Messages 调度权限，并据此生成自动能力约束。代理先根据去掉代理前缀后的请求路径识别 `chat`、`responses`、`messages`、`images`、`embeddings`、`audio` 或 Gemini 原生端点，再解析正文或 Gemini 路径中的模型名。
+在线同步适配器可以为分组返回结构化的路由能力。`sub2api` 会同步分组的 `platform`、生图权限和 OpenAI Messages 调度权限，并在每个分组首次出现可用 Key 时使用该 Key 请求上游 `/v1/models`。成功取得的模型列表按上游连接和分组 ID 持久化，后续普通同步不再重复请求；首次读取失败则在下次同步重试。代理据此生成自动能力约束，并先根据去掉代理前缀后的请求路径识别 `chat`、`responses`、`messages`、`images`、`embeddings`、`audio` 或 Gemini 原生端点，再解析正文或 Gemini 路径中的模型名。
 
 自动能力是硬约束：代理先排除端点协议、模型范围或生图能力不兼容的分组，再应用管理页中的手工 `models`、`paths` 通配符。手工规则只能进一步缩小候选范围，不能将已被自动能力排除的分组重新加入。所有重试、熔断、粘性和倍率/首 Token 调度都只在最终候选分组内进行。
 
+上游 `/v1/models` 可能声明了实际不可用的模型。代理不会额外探测；当真实业务请求收到明确的 `model_not_found`、`unsupported_model` 等模型不存在响应时，会按连接和分组持久记录该模型。管理页仍保留上游声明的模型名并加删除线，以便看出上游数据有误；后续同名模型会跳过该分组，其他模型及其他分组不受影响。普通参数错误或只有状态码、没有明确模型错误信息的 `400/404` 不会触发排除。
+
 当在线号池包含能力元数据、请求端点可识别，但没有兼容 Key 时，代理返回 HTTP 403 和 `key_pool_no_compatible_route`，不会向上游发送请求。错误体同时包含请求模型、端点族、供应商、上游和未匹配原因。静态 CSV、旧同步快照以及未返回可靠能力元数据的适配器继续沿用原有 `models`、`paths` 与默认池行为。
 
-当前 `sub2api` 平台映射如下：`openai` 使用 Chat、Responses、Embeddings 和 Audio；开启 Messages 调度后也可使用 Messages；`anthropic` 使用 Messages；`gemini` 使用 Gemini 原生端点；`antigravity` 使用 Chat、Messages 和 Gemini 原生端点；`grok` 使用 Chat 和 Responses。开启生图权限的分组额外获得 Images 能力。未知平台不根据名称猜测，保持旧选择行为。
+当前 `sub2api` 平台映射如下：`openai` 使用 Chat、Responses、Embeddings 和 Audio；开启 Messages 调度后也可使用 Messages；`anthropic` 使用 Messages；`gemini` 使用 Gemini 原生端点；`antigravity` 使用 Chat、Messages 和 Gemini 原生端点；`grok` 使用 Chat 和 Responses。开启生图权限的分组额外获得 Images 能力；即使上游 `/v1/models` 错误列出了 `gpt-image-*`、`imagen*` 等生图模型，没有生图权限的分组也会被自动排除。未知平台不根据名称猜测，保持旧选择行为。
 
 通用调度配置：
 

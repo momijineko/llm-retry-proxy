@@ -111,7 +111,9 @@ async def lifespan(_app):
 
 app = FastAPI(title="llm-retry-proxy", lifespan=lifespan)
 service = RetryProxy(client=None, pools=KEY_POOLS, log_store=store)
-health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy = create_handlers(service, store)
+health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy = create_handlers(
+    service, store, pool_sync,
+)
 
 
 def _login_page(next_path="/stats", failed=False):

@@ -64,6 +64,48 @@ def classify_model_scope(model, endpoint_family=""):
     return ""
 
 
+_MODEL_REJECTION_CODES = {
+    "invalid_model", "model_not_found", "unsupported_model",
+    "model_not_supported", "model_unsupported",
+}
+_MODEL_REJECTION_MESSAGE = re.compile(
+    r"(?:\bmodel\b.{0,160}\b(?:does not exist|not found|is not supported|unsupported)\b"
+    r"|\b(?:invalid|unsupported)\s+model\b|模型(?:不存在|不支持|无效)|不支持(?:该|此)?模型)",
+    re.IGNORECASE,
+)
+
+
+def is_model_rejection_response(status_code, body):
+    """Recognize only explicit model capability failures from request-level 4xx."""
+    if status_code not in (400, 404, 422) or not body:
+        return False
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+
+    error = payload.get("error", payload)
+    stack = [error]
+    messages = []
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if isinstance(item, (dict, list)):
+                    stack.append(item)
+                elif isinstance(item, str):
+                    normalized = re.sub(r"[\s-]+", "_", item.strip().lower())
+                    if key.lower() in ("code", "type", "reason") and normalized in _MODEL_REJECTION_CODES:
+                        return True
+                    if key.lower() in ("message", "detail", "error_description"):
+                        messages.append(item)
+        elif isinstance(value, list):
+            stack.extend(value)
+    return any(_MODEL_REJECTION_MESSAGE.search(message) for message in messages)
+
+
 def _sse_has_token(buffer):
     while b"\n\n" in buffer:
         event, buffer = buffer.split(b"\n\n", 1)
@@ -170,7 +212,7 @@ def _key_pool_secrets():
     return tuple(entry.key for pool in KEY_POOLS.values() for entry in pool.entries)
 
 
-def create_handlers(service, store):
+def create_handlers(service, store, pool_sync=None):
     async def health():
         return {"status": "ok"}
 
@@ -396,6 +438,20 @@ def create_handlers(service, store):
             payload = json.dumps({"error": {"message": message, "type": "upstream_error", "code": "503"}}, ensure_ascii=False)
             return Response(payload, status_code=503, media_type="application/json", headers={"X-Forward-Attempts": str(total_sent)})
         headers = filter_headers(response.headers, SKIP_RESPONSE_HEADERS); headers["X-Forward-Attempts"] = str(winner_attempt)
+        entry = getattr(result, "key_entry", None)
+        if (pool_sync is not None and request_pool is not None and entry is not None
+                and entry.group_id and model_name and 400 <= response.status_code < 500):
+            try:
+                error_body = await response.aread()
+            except (httpx.HTTPError, httpx.TransportError):
+                error_body = None
+            if error_body is not None:
+                if is_model_rejection_response(response.status_code, error_body):
+                    await pool_sync.mark_model_unsupported(
+                        upstream, entry.group_id, model_name,
+                    )
+                await response.aclose()
+                return Response(error_body, status_code=response.status_code, headers=headers)
         # 流式响应禁用反向代理缓冲，否则 nginx/群晖反代会攒批 flush 导致远程访问"一顿一顿"
         if "event-stream" in response.headers.get("content-type", "") or response.headers.get("content-length") is None:
             headers["X-Accel-Buffering"] = "no"; headers["Cache-Control"] = "no-cache"
@@ -415,7 +471,6 @@ def create_handlers(service, store):
                             found = True
                         if found:
                             ttft_recorded = True
-                            entry = getattr(result, "key_entry", None)
                             sent_at = getattr(result, "response_started_mono", 0.0)
                             if request_pool is not None and entry is not None and sent_at > 0:
                                 request_pool.record_ttft(entry, time.monotonic() - sent_at)

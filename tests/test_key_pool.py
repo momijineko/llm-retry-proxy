@@ -1,10 +1,12 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from retry_proxy.api import classify_endpoint, classify_model_scope, parse_request_model
+from retry_proxy.api import (classify_endpoint, classify_model_scope,
+                             is_model_rejection_response, parse_request_model)
 from retry_proxy.key_pool import KeyEntry, KeyPool, headers_with_key, replace_key_pool
 from retry_proxy.retry import (KeyPoolWaitTimeout, RetryProxy, _key_available_for_status,
                                _key_failure_policy, _mark_key_failure, _pick_key,
@@ -406,6 +408,80 @@ class KeyPoolStickyTests(unittest.TestCase):
             "gemini", "gemini_text",
         ))
 
+    def test_known_empty_model_list_rejects_modeled_requests(self):
+        pool = KeyPool([])
+        pool.entries = [KeyEntry("free", "free", routing_capabilities={
+            "platform": "openai", "endpoint_families": ["chat"],
+            "model_patterns": [], "model_list_known": True,
+        })]
+
+        self.assertIsNone(pool.for_request(
+            "gpt-5.4", "v1/chat/completions", "chat",
+        ))
+        self.assertIsNotNone(pool.for_request(
+            "", "v1/chat/completions", "chat",
+        ))
+
+    def test_group_model_lists_keep_paid_fallback(self):
+        pool = KeyPool([])
+        free = KeyEntry("free", "free", sort="0", routing_capabilities={
+            "platform": "openai", "endpoint_families": ["chat"],
+            "model_patterns": ["gpt-5.4-mini"], "model_list_known": True,
+        })
+        paid = KeyEntry("paid", "paid", sort="1", routing_capabilities={
+            "platform": "openai", "endpoint_families": ["chat"],
+            "model_patterns": ["gpt-5.4-mini", "gpt-5.4"], "model_list_known": True,
+        })
+        pool.entries = [free, paid]
+
+        mini = pool.for_request("gpt-5.4-mini", "v1/chat/completions", "chat")
+        full = pool.for_request("gpt-5.4", "v1/chat/completions", "chat")
+
+        self.assertEqual([entry.key_id for entry in mini.entries], ["free|0", "paid|1"])
+        self.assertEqual([entry.key_id for entry in full.entries], ["paid|1"])
+        free.cooldown_until = 999
+        with patch("retry_proxy.key_pool.time.time", return_value=100):
+            self.assertEqual(mini.pick().key_id, "paid|1")
+
+    def test_rejected_model_skips_only_the_rejected_group(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("free", "free", sort="0", routing_capabilities={
+                "platform": "openai", "endpoint_families": ["chat"],
+                "model_patterns": ["gpt-5.4"], "model_list_known": True,
+                "rejected_models": ["gpt-5.4"],
+            }),
+            KeyEntry("paid", "paid", sort="1", routing_capabilities={
+                "platform": "openai", "endpoint_families": ["chat"],
+                "model_patterns": ["gpt-5.4"], "model_list_known": True,
+            }),
+        ]
+        pool.finalize_entries()
+
+        selected = pool.for_request("GPT-5.4", "v1/chat/completions", "chat")
+
+        self.assertEqual([entry.key for entry in selected.entries], ["paid"])
+
+    def test_image_models_require_image_generation_permission(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("text-only", "text-only", routing_capabilities={
+                "platform": "openai", "endpoint_families": ["responses"],
+                "model_patterns": ["gpt-image-1"], "model_list_known": True,
+                "image_generation": False,
+            }),
+            KeyEntry("image-enabled", "image-enabled", routing_capabilities={
+                "platform": "openai", "endpoint_families": ["responses"],
+                "model_patterns": ["gpt-image-1"], "model_list_known": True,
+                "image_generation": True,
+            }),
+        ]
+        pool.finalize_entries()
+
+        selected = pool.for_request("gpt-image-1", "v1/responses", "responses")
+
+        self.assertEqual([entry.key for entry in selected.entries], ["image-enabled"])
+
     def test_pool_without_capabilities_preserves_legacy_default(self):
         pool = KeyPool([("legacy", "legacy")])
 
@@ -415,6 +491,29 @@ class KeyPoolStickyTests(unittest.TestCase):
 
 
 class RequestClassificationTests(unittest.TestCase):
+    def test_explicit_model_rejection_errors_are_recognized(self):
+        self.assertTrue(is_model_rejection_response(404, json.dumps({
+            "error": {"type": "invalid_request_error", "code": "model_not_found",
+                      "message": "The model does not exist"},
+        }).encode()))
+        self.assertTrue(is_model_rejection_response(400, json.dumps({
+            "error": {"message": "Unsupported model: gpt-example"},
+        }).encode()))
+
+    def test_generic_request_errors_are_not_model_rejections(self):
+        cases = [
+            (404, {"error": {"type": "not_found_error", "message": "Route not found"}}),
+            (400, {"error": {"type": "invalid_request_error",
+                              "message": "max_tokens must be positive"}}),
+            (403, {"error": {"code": "model_not_found",
+                              "message": "The model does not exist"}}),
+        ]
+        for status, payload in cases:
+            with self.subTest(status=status, payload=payload):
+                self.assertFalse(is_model_rejection_response(
+                    status, json.dumps(payload).encode(),
+                ))
+
     def test_endpoint_families(self):
         cases = {
             "v1/chat/completions": "chat",

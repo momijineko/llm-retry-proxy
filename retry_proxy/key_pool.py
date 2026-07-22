@@ -20,6 +20,16 @@ _RUNTIME_FIELDS = (
 KEY_POOL_STRATEGIES = {"cost", "ttft", "balanced"}
 
 
+def _is_image_model(model):
+    value = (model or "").strip().lower()
+    return (
+        value.startswith(("gpt-image-", "image", "imagen", "nano-banana"))
+        or value.startswith("gemini") and any(
+            marker in value for marker in ("image", "imagen", "nano-banana")
+        )
+    )
+
+
 class KeyEntry:
     __slots__ = ("key", "key_id", "legacy_key_id", "label", "sort", "group_id", "group_name",
                  "models", "paths", "routing_capabilities", "auth_header", "auth_scheme",
@@ -47,10 +57,15 @@ class KeyEntry:
                 str(value).strip().lower() for value in capabilities.get("model_patterns", ())
                 if str(value).strip()
             ),
+            "rejected_models": tuple(
+                str(value).strip().lower() for value in capabilities.get("rejected_models", ())
+                if str(value).strip()
+            ),
             "model_scopes": tuple(
                 str(value).strip().lower() for value in capabilities.get("model_scopes", ())
                 if str(value).strip()
             ),
+            "model_list_known": bool(capabilities.get("model_list_known")),
             "image_generation": bool(capabilities.get("image_generation")),
         } if capabilities else {}
         auth = auth if isinstance(auth, dict) else {}
@@ -129,8 +144,15 @@ class KeyPool:
         families = capabilities.get("endpoint_families", ())
         if endpoint_family and endpoint_family not in families:
             return False
+        if model and model in capabilities.get("rejected_models", ()):
+            return False
+        if model and _is_image_model(model) and not capabilities.get("image_generation"):
+            return False
         patterns = capabilities.get("model_patterns", ())
-        if patterns and (not model or not any(
+        if capabilities.get("model_list_known"):
+            if model and not any(fnmatch.fnmatchcase(model, pattern) for pattern in patterns):
+                return False
+        elif patterns and (not model or not any(
                 fnmatch.fnmatchcase(model, pattern) for pattern in patterns)):
             return False
         scopes = capabilities.get("model_scopes", ())

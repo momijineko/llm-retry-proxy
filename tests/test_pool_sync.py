@@ -12,7 +12,7 @@ from retry_proxy.key_pool import KeyEntry, KeyPool
 from retry_proxy.pool_sync import PoolSyncManager
 from retry_proxy.routes import RouteRegistry
 from retry_proxy.sync_adapters import PoolSyncError
-from retry_proxy.sync_adapters.sub2api import Sub2APIAdapter, _unwrap
+from retry_proxy.sync_adapters.sub2api import Sub2APIAdapter, _model_ids, _unwrap
 
 
 def response(payload, status=200):
@@ -30,6 +30,7 @@ class FakeClient:
     def __init__(self):
         self.calls = []
         self.created = []
+        self.fail_models = False
 
     async def post(self, url, json=None, headers=None, timeout=None):
         self.calls.append(("POST", url, json, headers))
@@ -53,6 +54,19 @@ class FakeClient:
 
     async def get(self, url, params=None, headers=None, timeout=None):
         self.calls.append(("GET", url, params, headers))
+        if url.endswith("/v1/models"):
+            if self.fail_models:
+                return response({"error": {"message": "temporarily unavailable"}}, 503)
+            key = (headers or {}).get("Authorization", "").removeprefix("Bearer ")
+            models = {
+                "sk-secret-one": ["gpt-5.4", "gpt-4.1"],
+                "sk-created-3": ["gpt-5.4-mini"],
+            }.get(key, [])
+            return response({
+                "object": "list", "data": [
+                    {"id": model, "object": "model"} for model in models
+                ],
+            })
         if url.endswith("/keys"):
             items = [
                 {"id": 11, "key": "sk-secret-one", "name": "A011", "group_id": 2,
@@ -104,6 +118,14 @@ class QueuedProbeClient:
 
 
 class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def test_model_ids_parse_openai_and_gemini_shapes(self):
+        self.assertEqual(_model_ids({"data": [
+            {"id": "gpt-5.4"}, {"id": "gpt-5.4"},
+        ]}), ["gpt-5.4"])
+        self.assertEqual(_model_ids({"models": [
+            {"name": "models/gemini-2.5-pro"},
+        ]}), ["gemini-2.5-pro"])
+
     def test_non_json_cloudflare_403_has_actionable_message_without_body(self):
         upstream = text_response(
             "<html>request id secret-response-body</html>", 403,
@@ -153,6 +175,44 @@ class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
             entries[0]["routing_capabilities"]["endpoint_families"],
             ["audio", "chat", "embeddings", "responses"],
         )
+        self.assertEqual(
+            entries[0]["routing_capabilities"]["model_patterns"],
+            ["gpt-5.4", "gpt-4.1"],
+        )
+        self.assertTrue(entries[0]["routing_capabilities"]["model_list_known"])
+        self.assertEqual(source["group_model_cache"]["2"], ["gpt-5.4", "gpt-4.1"])
+
+    async def test_fetch_requests_models_once_per_group(self):
+        adapter = Sub2APIAdapter()
+        client = FakeClient()
+        source = {"base_url": "https://upstream.test"}
+        session = {"access_token": "access-1", "refresh_token": "refresh-1"}
+
+        _, first = await adapter.fetch(client, source, session)
+        _, second = await adapter.fetch(client, source, session)
+
+        model_calls = [call for call in client.calls if call[1].endswith("/v1/models")]
+        self.assertEqual(len(model_calls), 1)
+        self.assertEqual(
+            first[0]["routing_capabilities"]["model_patterns"],
+            second[0]["routing_capabilities"]["model_patterns"],
+        )
+
+    async def test_failed_model_request_retries_on_next_sync(self):
+        adapter = Sub2APIAdapter()
+        client = FakeClient()
+        client.fail_models = True
+        source = {"base_url": "https://upstream.test"}
+        session = {"access_token": "access-1", "refresh_token": "refresh-1"}
+
+        await adapter.fetch(client, source, session)
+        client.fail_models = False
+        _, entries = await adapter.fetch(client, source, session)
+
+        model_calls = [call for call in client.calls if call[1].endswith("/v1/models")]
+        self.assertEqual(len(model_calls), 2)
+        self.assertEqual(source["group_model_cache"]["2"], ["gpt-5.4", "gpt-4.1"])
+        self.assertTrue(entries[0]["routing_capabilities"]["model_list_known"])
 
     def test_sub2api_routing_capabilities_use_structured_group_fields(self):
         capabilities = Sub2APIAdapter.routing_capabilities({
@@ -238,6 +298,69 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("refresh-1", persisted)
         if os.name != "nt":
             self.assertEqual(os.stat(self.state_file).st_mode & 0o777, 0o600)
+
+    async def test_group_model_cache_survives_restart(self):
+        manager = PoolSyncManager(
+            {}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()},
+        )
+        status = await manager.connect(
+            "sub2api", "https://upstream.test", "custom-provider",
+            {"email": "user@example.com", "password": "secret"},
+        )
+        source_id = status["sources"][0]["id"]
+
+        restored_client = FakeClient()
+        restored = PoolSyncManager(
+            {}, self.config, restored_client, {"sub2api": Sub2APIAdapter()},
+        )
+        restored.load_state()
+        status = await restored.sync_now(source_id)
+
+        model_calls = [
+            call for call in restored_client.calls if call[1].endswith("/v1/models")
+        ]
+        self.assertEqual(model_calls, [])
+        self.assertEqual(
+            status["sources"][0]["keys"][0]["routing_capabilities"]["model_patterns"],
+            ["gpt-5.4", "gpt-4.1"],
+        )
+
+    async def test_real_request_model_rejection_survives_sync_and_restart(self):
+        manager = PoolSyncManager(
+            {}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()},
+        )
+        status = await manager.connect(
+            "sub2api", "https://upstream.test", "custom-provider",
+            {"email": "user@example.com", "password": "secret"},
+        )
+        source_id = status["sources"][0]["id"]
+
+        recorded = await manager.mark_model_unsupported(
+            "https://upstream.test", "2", "GPT-5.4",
+        )
+
+        self.assertTrue(recorded)
+        self.assertFalse(await manager.mark_model_unsupported(
+            "https://upstream.test", "2", "gpt-5.4",
+        ))
+        capabilities = manager.status()["sources"][0]["keys"][0]["routing_capabilities"]
+        self.assertIn("gpt-5.4", capabilities["model_patterns"])
+        self.assertEqual(capabilities["rejected_models"], ["gpt-5.4"])
+        self.assertIsNone(manager.pools["https://upstream.test"].for_request(
+            "gpt-5.4", "v1/chat/completions", "chat",
+        ))
+
+        restored = PoolSyncManager(
+            {}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()},
+        )
+        restored.load_state()
+        status = await restored.sync_now(source_id)
+
+        capabilities = status["sources"][0]["keys"][0]["routing_capabilities"]
+        self.assertEqual(capabilities["rejected_models"], ["gpt-5.4"])
+        self.assertIsNone(restored.pools["https://upstream.test"].for_request(
+            "gpt-5.4", "v1/chat/completions", "chat",
+        ))
 
     async def test_managed_route_is_persisted_and_restored(self):
         route_config = SimpleNamespace(
