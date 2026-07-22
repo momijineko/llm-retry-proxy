@@ -10,7 +10,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from .api import create_handlers
+from .api import create_handlers, create_websocket_handler
 from .pool_sync import PoolSyncManager
 from .sync_adapters import PoolSyncError
 from .config import admin_session_value, log_capture, logger, require_admin, settings
@@ -112,6 +112,7 @@ async def lifespan(_app):
 app = FastAPI(title="llm-retry-proxy", lifespan=lifespan)
 service = RetryProxy(client=None, pools=KEY_POOLS, log_store=store)
 health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy = create_handlers(service, store)
+websocket_proxy = create_websocket_handler(store)
 
 
 def _login_page(next_path="/stats", failed=False):
@@ -335,3 +336,4 @@ app.add_api_route("/logs", logs_page, methods=["GET"], dependencies=admin_depend
 app.add_api_route("/logs/history", logs_history, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/logs/stream", logs_stream, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/{path:path}", proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+app.add_api_websocket_route("/{path:path}", websocket_proxy)

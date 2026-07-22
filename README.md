@@ -1,6 +1,6 @@
 # llm-retry-proxy
 
-一个面向 LLM API 的本地反向代理转发工具。它对客户端透明透传请求、响应和 SSE 流式响应，在上游临时过载或限流时自动重试；也支持多上游路由、号池故障转移、JSONL 日志和可视化分析。
+一个面向 LLM API 的本地反向代理转发工具。它对客户端透明透传请求、响应、SSE 流式响应和 Responses WebSocket 双向消息，在上游临时过载或限流时自动重试；也支持多上游路由、号池故障转移、JSONL 日志和可视化分析。
 
 ## TL;DR
 
@@ -19,7 +19,7 @@
 ## 特性
 
 - 通用反向代理：透传所有路径、Header、Body、Query
-- 支持 SSE 流式响应；重试只发生在首字节之前
+- 支持 SSE 流式响应和 Responses WebSocket 双向透传；HTTP 重试只发生在首字节之前
 - 503/502/504/529/429 自动重试，支持固定间隔、指数退避和 `Retry-After`
 - 默认有最大重试次数保护，可设置为无限重试
 - 响应头附带 `X-Forward-Attempts`，告知客户端本次请求尝试次数
@@ -96,6 +96,17 @@ docker compose up -d --build
 | `LOG_DIR` | `logs` | 日志目录 |
 
 完整配置表和默认值见[配置项](docs/configuration.md)。
+
+Codex 桌面端使用自定义 `model_provider` 指向本代理时，可以为 Responses API 开启 WebSocket：
+
+```toml
+[model_providers.local]
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+supports_websockets = true
+```
+
+代理会把 `http://` / `https://` 上游自动转换为对应的 `ws://` / `wss://`，透传 Responses WebSocket 帧，并在握手失败或连接中断时由 Codex 客户端执行其内置的 HTTP/SSE 回退。
 
 ## 文档导航
 
