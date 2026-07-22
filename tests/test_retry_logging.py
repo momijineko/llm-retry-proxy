@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 
 from retry_proxy.config import log_capture, logger
+from retry_proxy.key_pool import KeyEntry, KeyPool
 from retry_proxy.retry import RetryProxy
 
 
@@ -59,6 +60,67 @@ class RetryLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.response)
         self.assertEqual(result.total_sent, 1)
         self.assertIn("within 0.0s", result.failure_reason)
+
+    async def test_streaming_responses_attempt_timeout_switches_pool_key(self):
+        config = SimpleNamespace(
+            responses_header_timeout=1, responses_attempt_header_timeout=0.01,
+            hedge_mode="off", max_retries=2, retry_interval=0,
+            key_cooldown=30, key_cooldown_5xx=30,
+            key_cooldown_backoff=False, key_cooldown_max=60,
+            key_pool_wait_timeout=1,
+        )
+        pool = KeyPool([])
+        pool.entries = [KeyEntry("slow", "slow"), KeyEntry("good", "good")]
+        pool.finalize_entries()
+        proxy = RetryProxy(config=config, client=object())
+        cancelled = asyncio.Event()
+
+        async def send(_method, _url, headers, _body):
+            if headers.get("authorization") == "Bearer slow":
+                try:
+                    await asyncio.Future()
+                finally:
+                    cancelled.set()
+            return httpx.Response(
+                200, request=httpx.Request("POST", "https://upstream.test"),
+            )
+
+        proxy._send = send
+        result = await proxy.request(
+            "POST", "https://upstream.test/responses", {},
+            b'{"model":"model","stream":true}',
+            "aihub/responses", "test", "model", pool,
+        )
+
+        self.assertEqual(result.response.status_code, 200)
+        self.assertEqual(result.total_sent, 2)
+        self.assertEqual(result.key_id, "good")
+        self.assertTrue(cancelled.is_set())
+        self.assertGreater(pool.entries[0].cooldown_until, time.time())
+
+    async def test_non_streaming_responses_does_not_use_attempt_timeout(self):
+        config = SimpleNamespace(
+            responses_header_timeout=1, responses_attempt_header_timeout=0.001,
+            hedge_mode="off", max_retries=1,
+        )
+        pool = KeyPool([("only", "only")])
+        proxy = RetryProxy(config=config, client=object())
+
+        async def delayed_response(*_args):
+            await asyncio.sleep(0.01)
+            return httpx.Response(
+                200, request=httpx.Request("POST", "https://upstream.test"),
+            )
+
+        proxy._send = delayed_response
+        result = await proxy.request(
+            "POST", "https://upstream.test/responses", {},
+            b'{"model":"model","stream":false}',
+            "responses", "test", "model", pool,
+        )
+
+        self.assertEqual(result.response.status_code, 200)
+        self.assertEqual(result.total_sent, 1)
 
     async def test_stagger_retries_are_spacing_gated_after_503(self):
         config = SimpleNamespace(

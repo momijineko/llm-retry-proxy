@@ -37,6 +37,7 @@
 | `CONNECT_TIMEOUT` | `10` | 连接上游超时（秒） |
 | `TIMEOUT` | `300` | 普通读写超时（秒）；流式响应中表示相邻两次数据之间的最大间隔 |
 | `RESPONSES_HEADER_TIMEOUT` | `120` | Responses API 整笔请求从开始处理到收到响应头的硬上限（秒）；预算内正常重试，`0` = 不限制 |
+| `RESPONSES_ATTEMPT_HEADER_TIMEOUT` | `15` | 流式 Responses 号池请求中单个 key 等待响应头的上限（秒）；超时后取消该次请求、熔断并换 key，`0` = 不限制 |
 
 ## 重试与退避
 

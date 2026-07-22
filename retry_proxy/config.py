@@ -140,6 +140,7 @@ class Settings:
     timeout: float = float(os.getenv("TIMEOUT", "300"))
     connect_timeout: float = float(os.getenv("CONNECT_TIMEOUT", "10"))
     responses_header_timeout: float = float(os.getenv("RESPONSES_HEADER_TIMEOUT", "120"))
+    responses_attempt_header_timeout: float = float(os.getenv("RESPONSES_ATTEMPT_HEADER_TIMEOUT", "15"))
     provider: str = os.getenv("PROVIDER", "xfyun")
     extra_upstreams: str = os.getenv("EXTRA_UPSTREAMS", "")
     log_dir: str = os.getenv("LOG_DIR", "logs")

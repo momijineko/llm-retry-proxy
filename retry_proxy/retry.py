@@ -30,6 +30,10 @@ class KeyPoolWaitTimeout(Exception):
         )
 
 
+class ResponsesAttemptHeaderTimeout(Exception):
+    """Raised when one streaming Responses key stalls before response headers."""
+
+
 def set_client_ip(value):
     return _client_ip.set(value)
 
@@ -87,6 +91,15 @@ def filter_headers(headers, skip): return {k: v for k, v in headers.items() if k
 
 def _is_responses_path(path):
     return "/responses/" in f"/{(path or '').strip('/')}/"
+
+
+def _is_streaming_request(body):
+    if not body:
+        return False
+    try:
+        return json.loads(body).get("stream") is True
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def calc_backoff_wait(consecutive, base, cap, enabled, ra_wait=None):
@@ -526,9 +539,48 @@ class RetryProxy:
             cycle_mono = time.monotonic()
             self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{attempt} 发出上游 总{cycle - start:.2f}s")
             try:
-                response = await self._send_upstream(method, url, send_headers, body)
+                attempt_timeout = getattr(
+                    self.config, "responses_attempt_header_timeout", 0,
+                )
+                if (pool is not None and attempt_timeout > 0
+                        and _is_responses_path(path) and _is_streaming_request(body)):
+                    try:
+                        response = await asyncio.wait_for(
+                            self._send_upstream(method, url, send_headers, body),
+                            timeout=attempt_timeout,
+                        )
+                    except asyncio.TimeoutError as exc:
+                        raise ResponsesAttemptHeaderTimeout from exc
+                else:
+                    response = await self._send_upstream(
+                        method, url, send_headers, body,
+                    )
                 now = time.time()
                 self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{attempt} 收到响应头 {response.status_code} 本次{now - cycle:.2f}s 总{now - start:.2f}s")
+            except ResponsesAttemptHeaderTimeout:
+                elapsed = time.time() - cycle
+                last_status = 0
+                retry_codes.append(0)
+                _record_key_attempt(key_attempts, entry, False)
+                _mark_key_failure(pool, entry, self.config, 0)
+                self.logger.warning(
+                    f"{_tag(method, path, provider, model)}{key_tag} "
+                    f"响应头超时 #{attempt}({elapsed:.2f}s)"
+                    f" 上限={attempt_timeout:.1f}s"
+                )
+                if pool and pool.has_fresh():
+                    self.logger.warning(
+                        f"{_tag(method, path, provider, model)}{key_tag} "
+                        f"响应头超时 #{attempt} 换key 总{time.time() - start:.1f}s"
+                    )
+                    continue
+                pool_wait = pool.next_available_in() if pool else 0.0
+                sleep_for = max(self.config.retry_interval, pool_wait)
+                await _sleep_before_retry(
+                    sleep_for, pool, pool_wait,
+                    getattr(self.config, "key_pool_wait_timeout", None),
+                )
+                continue
             except (httpx.RequestError, httpx.HTTPError) as exc:
                 _record_key_attempt(key_attempts, entry, None if is_host_level_error(exc) else False)
                 last_status = 0; retry_codes.append(0); elapsed = time.time() - cycle
