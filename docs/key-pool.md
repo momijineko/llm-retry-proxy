@@ -93,7 +93,7 @@ KEY_AUTH_SCHEME=           # 空值，直接放裸 key，不加 Bearer 前缀
 
 ## 网站同步号池
 
-配置 `ADMIN_PASSWORD` 后访问 `/admin/key-pools`，可添加一个或多个上游连接。每个连接使用统一配置：
+配置 `ADMIN_PASSWORD` 后访问 `/key-pools`，可添加一个或多个上游连接。每个连接使用统一配置：
 
 | 字段 | 说明 |
 |---|---|

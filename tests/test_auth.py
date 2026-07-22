@@ -54,9 +54,9 @@ class AdminAuthTests(unittest.TestCase):
     def test_key_pool_page_redirects_to_login(self):
         with patch("retry_proxy.config.settings", SimpleNamespace(admin_password="correct")):
             with self.assertRaises(HTTPException) as raised:
-                require_admin(_request(path="/admin/key-pools"))
+                require_admin(_request(path="/key-pools"))
         self.assertEqual(raised.exception.status_code, 303)
-        self.assertEqual(raised.exception.headers["Location"], "/admin/login?next=/admin/key-pools")
+        self.assertEqual(raised.exception.headers["Location"], "/admin/login?next=/key-pools")
 
 
 class ProxyPoolAuthTests(unittest.TestCase):

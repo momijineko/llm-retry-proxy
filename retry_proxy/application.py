@@ -115,7 +115,7 @@ health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy = cre
 
 
 def _login_page(next_path="/stats", failed=False):
-    next_path = next_path if next_path in ("/stats", "/logs", "/admin/key-pools") else "/stats"
+    next_path = next_path if next_path in ("/stats", "/logs", "/key-pools") else "/stats"
     error = '<p class="error">密码不正确</p>' if failed else ""
     disabled = "" if settings.admin_password else "disabled"
     message = "" if settings.admin_password else '<p class="error">管理员密码尚未配置</p>'
@@ -132,7 +132,7 @@ async def admin_login(request: Request):
     values = parse_qs((await request.body()).decode("utf-8", errors="replace"))
     password = values.get("password", [""])[0]
     next_path = values.get("next", ["/stats"])[0]
-    next_path = next_path if next_path in ("/stats", "/logs", "/admin/key-pools") else "/stats"
+    next_path = next_path if next_path in ("/stats", "/logs", "/key-pools") else "/stats"
     if not settings.admin_password or not secrets.compare_digest(password, settings.admin_password):
         return _login_page(next_path, failed=True)
     response = RedirectResponse(next_path, status_code=303)
@@ -153,6 +153,10 @@ async def key_pools_page():
         with open(path, encoding="utf-8") as f:
             return HTMLResponse(f.read())
     return HTMLResponse("key_pool.html not found", status_code=404)
+
+
+async def legacy_key_pools_page():
+    return RedirectResponse("/key-pools", status_code=308)
 
 
 async def key_pools_status():
@@ -326,7 +330,8 @@ app.add_api_route("/admin/login", admin_login_page, methods=["GET"])
 app.add_api_route("/admin/login", admin_login, methods=["POST"])
 app.add_api_route("/admin/logout", admin_logout, methods=["POST"])
 admin_dependencies = [Depends(require_admin)]
-app.add_api_route("/admin/key-pools", key_pools_page, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/key-pools", key_pools_page, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/admin/key-pools", legacy_key_pools_page, methods=["GET"])
 app.add_api_route("/admin/key-pools/api/status", key_pools_status, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/connect", key_pools_connect, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/sync", key_pools_sync, methods=["POST"], dependencies=admin_dependencies)

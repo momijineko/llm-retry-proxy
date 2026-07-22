@@ -227,7 +227,7 @@ def require_admin(request: Request):
     cookie_ok = bool(session and secrets.compare_digest(session, admin_session_value()))
     if bearer_ok or cookie_ok:
         return
-    if request.url.path in ("/stats", "/logs", "/admin/key-pools"):
+    if request.url.path in ("/stats", "/logs", "/key-pools"):
         raise HTTPException(status_code=303, headers={"Location": f"/admin/login?next={request.url.path}"})
     raise HTTPException(status_code=401, detail="invalid_admin_credentials",
                         headers={"WWW-Authenticate": "Bearer"})
