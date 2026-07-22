@@ -12,11 +12,18 @@ from retry_proxy.key_pool import KeyEntry, KeyPool
 from retry_proxy.pool_sync import PoolSyncManager
 from retry_proxy.routes import RouteRegistry
 from retry_proxy.sync_adapters import PoolSyncError
-from retry_proxy.sync_adapters.sub2api import Sub2APIAdapter
+from retry_proxy.sync_adapters.sub2api import Sub2APIAdapter, _unwrap
 
 
 def response(payload, status=200):
     return httpx.Response(status, json=payload, request=httpx.Request("GET", "https://upstream.test"))
+
+
+def text_response(body, status=200, headers=None):
+    return httpx.Response(
+        status, text=body, headers=headers,
+        request=httpx.Request("GET", "https://upstream.test"),
+    )
 
 
 class FakeClient:
@@ -97,6 +104,34 @@ class QueuedProbeClient:
 
 
 class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def test_non_json_cloudflare_403_has_actionable_message_without_body(self):
+        upstream = text_response(
+            "<html>request id secret-response-body</html>", 403,
+            {
+                "content-type": "text/html; charset=UTF-8",
+                "server": "cloudflare",
+                "cf-ray": "ray-id",
+            },
+        )
+
+        with self.assertRaises(PoolSyncError) as raised:
+            _unwrap(upstream)
+
+        message = str(raised.exception)
+        self.assertIn("Cloudflare/CDN", message)
+        self.assertIn("HTTP 403", message)
+        self.assertIn("站点根地址", message)
+        self.assertNotIn("secret-response-body", message)
+
+    def test_non_json_html_403_identifies_rejection_page(self):
+        upstream = text_response(
+            "<html><title>Forbidden</title></html>", 403,
+            {"content-type": "text/html"},
+        )
+
+        with self.assertRaisesRegex(PoolSyncError, "HTML 拒绝页.*HTTP 403"):
+            _unwrap(upstream)
+
     async def test_connect_and_fetch_normalize_keys_and_custom_rates(self):
         adapter = Sub2APIAdapter()
         client = FakeClient()
@@ -105,6 +140,9 @@ class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
         session = await adapter.connect(client, source, {"email": "user@example.com", "password": "secret"})
         session, entries = await adapter.fetch(client, source, session)
 
+        self.assertEqual(client.calls[0][3]["Accept"], "application/json")
+        self.assertEqual(client.calls[1][3]["Accept"], "application/json")
+        self.assertEqual(client.calls[1][3]["Authorization"], "Bearer access-1")
         self.assertEqual(session["refresh_token"], "refresh-1")
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["key"], "sk-secret-one")

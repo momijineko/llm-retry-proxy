@@ -4,13 +4,40 @@ import uuid
 from .base import PoolSyncAdapter, PoolSyncError
 
 
+def _response_error_message(response):
+    status = response.status_code
+    content_type = (
+        response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    )
+    server = response.headers.get("server", "").lower()
+    behind_cloudflare = bool(response.headers.get("cf-ray")) or "cloudflare" in server
+
+    if status == 403:
+        reason = (
+            "请求被 Cloudflare/CDN 拦截"
+            if behind_cloudflare else "上游拒绝了号池同步请求"
+        )
+        if content_type == "text/html" and not behind_cloudflare:
+            reason = "上游返回了 HTML 拒绝页"
+        return (
+            f"{reason} (HTTP 403)；请确认填写的是站点根地址，并检查来源 IP、"
+            "CDN/WAF 规则及人机验证设置"
+        )
+    if content_type == "text/html":
+        return (
+            f"上游返回了 HTML 而不是 API JSON (HTTP {status})；"
+            "请确认填写的是站点根地址且 Sub2API 接口可访问"
+        )
+    return f"上游返回了非 JSON 响应 (HTTP {status})"
+
+
 def _unwrap(response):
     if response.status_code == 204:
         return {}
     try:
         payload = response.json()
     except (ValueError, TypeError) as exc:
-        raise PoolSyncError(f"上游返回了非 JSON 响应 (HTTP {response.status_code})") from exc
+        raise PoolSyncError(_response_error_message(response)) from exc
     if response.status_code >= 400:
         message = payload.get("message") if isinstance(payload, dict) else None
         raise PoolSyncError(message or f"上游请求失败 (HTTP {response.status_code})")
@@ -70,8 +97,18 @@ class Sub2APIAdapter(PoolSyncAdapter):
             "image_generation": image_generation,
         }
 
+    @staticmethod
+    def _headers(access_token="", extra=None):
+        headers = {"Accept": "application/json"}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+        headers.update(extra or {})
+        return headers
+
     async def _post(self, client, source, path, body):
-        response = await client.post(source["base_url"] + path, json=body, timeout=20)
+        response = await client.post(
+            source["base_url"] + path, json=body, headers=self._headers(), timeout=20,
+        )
         return _unwrap(response)
 
     async def connect(self, client, source, credentials):
@@ -111,7 +148,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
             session = await self._refresh(client, source, session)
         response = await client.get(
             source["base_url"] + path, params=params,
-            headers={"Authorization": f"Bearer {session['access_token']}"}, timeout=20,
+            headers=self._headers(session["access_token"]), timeout=20,
         )
         if response.status_code == 401 and retry:
             session["access_token"] = ""
@@ -122,8 +159,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
     async def _authorized_post(self, client, source, session, path, body, headers=None, retry=True):
         if not session.get("access_token"):
             session = await self._refresh(client, source, session)
-        request_headers = {"Authorization": f"Bearer {session['access_token']}"}
-        request_headers.update(headers or {})
+        request_headers = self._headers(session["access_token"], headers)
         response = await client.post(
             source["base_url"] + path, json=body, headers=request_headers, timeout=20,
         )
@@ -140,7 +176,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
             session = await self._refresh(client, source, session)
         response = await client.delete(
             source["base_url"] + path,
-            headers={"Authorization": f"Bearer {session['access_token']}"}, timeout=20,
+            headers=self._headers(session["access_token"]), timeout=20,
         )
         if response.status_code == 401 and retry:
             session["access_token"] = ""
