@@ -286,18 +286,14 @@ def create_handlers(service, store, pool_sync=None):
         return Response("logs.html not found", status_code=404)
 
     async def logs_history(since: int = 0):
-        entries = log_capture.history()
-        if since > 0:
-            entries = [e for e in entries if e.get("seq", 0) > since]
-        return entries
+        return log_capture.history(since)
 
     async def logs_stream(request: Request, since: int = 0):
         async def event_gen():
             q = log_capture.subscribe()
             try:
-                for entry in log_capture.history():
-                    if entry.get("seq", 0) > since:
-                        yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
+                for entry in log_capture.history(since):
+                    yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
                 while True:
                     if await request.is_disconnected():
                         break

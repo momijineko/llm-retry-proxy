@@ -63,10 +63,10 @@ class LogCaptureHandler(logging.Handler):
 
     _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-    def __init__(self, maxlen: int = 2000):
+    def __init__(self, maxlen: int | None = None):
         super().__init__()
         self._maxlen = maxlen
-        self._buffer: collections.deque = collections.deque(maxlen=maxlen)
+        self._buffer = [] if maxlen is None else collections.deque(maxlen=maxlen)
         self._subscribers: set[asyncio.Queue] = set()
         self._lock = threading.Lock()
         self._loop = None
@@ -76,9 +76,6 @@ class LogCaptureHandler(logging.Handler):
         self._loop = loop
 
     def emit(self, record):
-        with self._lock:
-            self._seq += 1
-            seq = self._seq
         message = self._ANSI_RE.sub("", record.getMessage())
         if record.exc_info:
             message += "\n" + logging.Formatter().formatException(record.exc_info)
@@ -86,9 +83,10 @@ class LogCaptureHandler(logging.Handler):
             "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created)),
             "level": record.levelname,
             "message": message,
-            "seq": seq,
         }
         with self._lock:
+            self._seq += 1
+            entry["seq"] = self._seq
             self._buffer.append(entry)
             if self._loop is None:
                 return
@@ -110,12 +108,18 @@ class LogCaptureHandler(logging.Handler):
         with self._lock:
             self._subscribers.discard(q)
 
-    def history(self):
+    def history(self, since: int = 0):
         with self._lock:
+            if since > 0 and self._buffer:
+                first_seq = self._buffer[0]["seq"]
+                start = max(0, since - first_seq + 1)
+                if isinstance(self._buffer, list):
+                    return self._buffer[start:].copy()
+                return list(self._buffer)[start:]
             return list(self._buffer)
 
 
-log_capture = LogCaptureHandler(maxlen=2000)
+log_capture = LogCaptureHandler()
 logging.getLogger().addHandler(log_capture)
 
 

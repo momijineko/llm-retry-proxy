@@ -260,6 +260,7 @@
   }
 
   .terminal {
+    position: relative;
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
@@ -282,24 +283,19 @@
 
   /* ── Log Line ── */
   .log-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 26px;
     display: flex;
     gap: 10px;
     padding: 2px 0;
     border-radius: 3px;
     transition: background 0.08s;
-    word-break: break-word;
-    animation: fadeInLine 0.15s ease;
-  }
-
-  @keyframes fadeInLine {
-    from { opacity: 0; transform: translateY(2px); }
-    to { opacity: 1; transform: translateY(0); }
+    overflow: hidden;
   }
 
   .log-line:hover { background: rgba(255,255,255,0.03); }
-
-  .log-line.hidden-level,
-  .log-line.hidden-search { display: none; }
 
   .log-ts {
     color: #6e7681;
@@ -350,13 +346,17 @@
   .log-message {
     flex: 1;
     color: var(--text-bright);
-    white-space: pre-wrap;
-    word-break: break-word;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     user-select: text;
   }
 
   /* ── Empty State ── */
   .empty-state {
+    position: absolute;
+    inset: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -367,6 +367,12 @@
     gap: 8px;
     text-align: center;
     padding: 40px;
+  }
+
+  .virtual-list {
+    position: relative;
+    width: 100%;
+    contain: layout style;
   }
 
   .empty-state .icon {
@@ -482,6 +488,7 @@
 
   <div class="terminal-wrapper">
     <div class="terminal" id="terminal">
+      <div class="virtual-list" id="virtualList"></div>
       <div class="empty-state" id="emptyState">
         <span class="icon">$</span>
         <span>等待日志数据...</span>
@@ -500,6 +507,7 @@
 
   // ── DOM refs ──
   const terminal = document.getElementById('terminal');
+  const virtualList = document.getElementById('virtualList');
   const emptyState = document.getElementById('emptyState');
   const pauseBtn = document.getElementById('pauseBtn');
   const pauseIcon = document.getElementById('pauseIcon');
@@ -518,10 +526,13 @@
   let pollTimer = null;
   let isPaused = false;
   let isUserScrolledUp = false;
-  let totalReceived = 0;
   let lastSeq = 0;
-  const MAX_DOM_LINES = 3000;
-  const BATCH_SIZE = 50;
+  let entries = [];
+  let filteredIndexes = [];
+  let searchTimer = null;
+  let renderFrame = null;
+  const ROW_HEIGHT = 26;
+  const OVERSCAN = 12;
   const LEVELS = { DEBUG: 'debug', INFO: 'info', WARNING: 'warning', ERROR: 'error' };
 
   // ── Connection status ──
@@ -537,25 +548,24 @@
   }
 
   // ── Create log line element (efficient, no innerHTML) ──
-  function createLogLine(entry) {
+  function createLogLine(entry, virtualIndex) {
     const line = document.createElement('div');
     line.className = 'log-line';
-    line.dataset.ts = entry.ts || '';
-    line.dataset.msg = entry.message || '';
-    line.dataset.level = (entry.level || 'INFO').toUpperCase();
+    line.style.transform = 'translateY(' + (virtualIndex * ROW_HEIGHT) + 'px)';
 
     const ts = document.createElement('span');
     ts.className = 'log-ts';
     ts.textContent = entry.ts || '';
 
-    const levelClass = LEVELS[line.dataset.level] || 'info';
+    const levelClass = LEVELS[entry.level] || 'info';
     const lvl = document.createElement('span');
     lvl.className = 'log-level ' + levelClass;
-    lvl.textContent = line.dataset.level;
+    lvl.textContent = entry.level;
 
     const msg = document.createElement('span');
     msg.className = 'log-message';
-    msg.textContent = entry.message || '';
+    msg.textContent = entry.message;
+    msg.title = entry.message;
 
     line.appendChild(ts);
     line.appendChild(lvl);
@@ -564,44 +574,71 @@
     return line;
   }
 
-  // ── Append entries ──
+  // ── Virtual list ──
   const pendingBatch = [];
   let batchTimer = null;
 
+  function normalizeEntry(entry) {
+    const message = String(entry.message || '');
+    return {
+      ts: String(entry.ts || ''),
+      level: String(entry.level || 'INFO').toUpperCase(),
+      message,
+      searchText: message.toLowerCase(),
+      seq: Number(entry.seq || 0),
+    };
+  }
+
+  function entryMatches(entry, activeLevels, query) {
+    return activeLevels.has(entry.level) && (!query || entry.searchText.includes(query));
+  }
+
+  function scheduleRender() {
+    if (renderFrame) return;
+    renderFrame = requestAnimationFrame(() => {
+      renderFrame = null;
+      renderVisibleRows();
+    });
+  }
+
+  function renderVisibleRows() {
+    virtualList.style.height = (filteredIndexes.length * ROW_HEIGHT) + 'px';
+    emptyState.style.display = filteredIndexes.length ? 'none' : 'flex';
+    const start = Math.max(0, Math.floor(terminal.scrollTop / ROW_HEIGHT) - OVERSCAN);
+    const count = Math.ceil(terminal.clientHeight / ROW_HEIGHT) + OVERSCAN * 2;
+    const end = Math.min(filteredIndexes.length, start + count);
+    const frag = document.createDocumentFragment();
+    for (let virtualIndex = start; virtualIndex < end; virtualIndex++) {
+      const entry = entries[filteredIndexes[virtualIndex]];
+      frag.appendChild(createLogLine(entry, virtualIndex));
+    }
+    virtualList.replaceChildren(frag);
+  }
+
+  function updateLineCount() {
+    lineCountEl.textContent = entries.length + ' / ' + filteredIndexes.length;
+  }
+
   function flushBatch() {
     if (pendingBatch.length === 0) return;
-    const frag = document.createDocumentFragment();
-    for (const entry of pendingBatch) {
-      frag.appendChild(createLogLine(entry));
+    const activeLevels = getActiveLevels();
+    const query = (searchInput.value || '').trim().toLowerCase();
+    for (const rawEntry of pendingBatch) {
+      const entry = normalizeEntry(rawEntry);
+      const index = entries.push(entry) - 1;
+      if (entryMatches(entry, activeLevels, query)) filteredIndexes.push(index);
     }
     pendingBatch.length = 0;
-
-    emptyState.style.display = 'none';
-    terminal.appendChild(frag);
-
-    // Cap DOM lines
-    const excess = terminal.children.length - MAX_DOM_LINES;
-    if (excess > 0) {
-      for (let i = 0; i < excess; i++) {
-        if (terminal.firstElementChild && terminal.firstElementChild !== emptyState) {
-          terminal.removeChild(terminal.firstElementChild);
-        }
-      }
-    }
-
-    // Re-apply filters on new lines
-    applyFilters();
     updateLineCount();
-
-    // Auto-scroll
+    renderVisibleRows();
     if (!isUserScrolledUp) {
       terminal.scrollTop = terminal.scrollHeight;
+      renderVisibleRows();
     }
   }
 
   function queueEntry(entry) {
     pendingBatch.push(entry);
-    totalReceived++;
     if (!batchTimer) {
       batchTimer = requestAnimationFrame(() => {
         batchTimer = null;
@@ -685,34 +722,13 @@
       const data = await res.json();
       if (!Array.isArray(data) || data.length === 0) return;
 
-      // Render history entries
-      const frag = document.createDocumentFragment();
-      for (const entry of data) {
-        frag.appendChild(createLogLine(entry));
-      }
-      emptyState.style.display = 'none';
-      terminal.appendChild(frag);
-
-      // Cap and filter
-      const excess = terminal.children.length - MAX_DOM_LINES;
-      if (excess > 0) {
-        for (let i = 0; i < excess; i++) {
-          if (terminal.firstElementChild && terminal.firstElementChild !== emptyState) {
-            terminal.removeChild(terminal.firstElementChild);
-          }
-        }
-      }
-
-      // Track lastSeq for incremental SSE
       for (const entry of data) {
         if (entry.seq && entry.seq > lastSeq) lastSeq = entry.seq;
       }
-      totalReceived += data.length;
+      entries = data.map(normalizeEntry);
       applyFilters();
-      updateLineCount();
-
-      // Scroll to bottom after history load
       terminal.scrollTop = terminal.scrollHeight;
+      renderVisibleRows();
     } catch (e) {
       console.error('Failed to load history:', e);
     }
@@ -728,33 +744,13 @@
   function applyFilters() {
     const activeLevels = getActiveLevels();
     const query = (searchInput.value || '').trim().toLowerCase();
-    let visible = 0;
-
-    for (const child of terminal.children) {
-      if (child === emptyState) continue;
-      const level = child.dataset.level;
-      const msg = child.dataset.msg || '';
-
-      const levelHidden = !activeLevels.has(level);
-      const searchHidden = query && !msg.toLowerCase().includes(query);
-
-      if (levelHidden) {
-        child.classList.add('hidden-level');
-        child.classList.remove('hidden-search');
-      } else if (searchHidden) {
-        child.classList.remove('hidden-level');
-        child.classList.add('hidden-search');
-      } else {
-        child.classList.remove('hidden-level', 'hidden-search');
-        visible++;
-      }
+    filteredIndexes = [];
+    for (let index = 0; index < entries.length; index++) {
+      if (entryMatches(entries[index], activeLevels, query)) filteredIndexes.push(index);
     }
-    return visible;
-  }
-
-  function updateLineCount() {
-    const visible = applyFilters();
-    lineCountEl.innerHTML = totalReceived + ' <span class="sep">/</span> ' + visible;
+    terminal.scrollTop = 0;
+    updateLineCount();
+    renderVisibleRows();
   }
 
   // ── Scroll detection ──
@@ -770,7 +766,11 @@
     }
   }
 
-  terminal.addEventListener('scroll', checkScroll, { passive: true });
+  terminal.addEventListener('scroll', () => {
+    checkScroll();
+    scheduleRender();
+  }, { passive: true });
+  window.addEventListener('resize', scheduleRender);
 
   // ── Event listeners ──
   pauseBtn.addEventListener('click', () => {
@@ -790,25 +790,28 @@
   });
 
   clearBtn.addEventListener('click', () => {
-    terminal.innerHTML = '';
-    terminal.appendChild(emptyState);
-    emptyState.style.display = 'flex';
-    totalReceived = 0;
+    entries = [];
+    filteredIndexes = [];
+    pendingBatch.length = 0;
+    terminal.scrollTop = 0;
     updateLineCount();
+    renderVisibleRows();
   });
 
   searchInput.addEventListener('input', () => {
-    updateLineCount();
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(applyFilters, 200);
   });
 
   levelCheckboxes.forEach(cb => {
-    cb.addEventListener('change', updateLineCount);
+    cb.addEventListener('change', applyFilters);
   });
 
   resumeHint.addEventListener('click', () => {
     isUserScrolledUp = false;
     resumeHint.classList.remove('show');
     terminal.scrollTop = terminal.scrollHeight;
+    renderVisibleRows();
   });
 
   // ── Init ──

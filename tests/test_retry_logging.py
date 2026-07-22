@@ -7,12 +7,30 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 
-from retry_proxy.config import log_capture, logger
+from retry_proxy.config import LogCaptureHandler, log_capture, logger
 from retry_proxy.key_pool import KeyEntry, KeyPool
 from retry_proxy.retry import RetryProxy
 
 
 class RetryLoggingTests(unittest.IsolatedAsyncioTestCase):
+    def test_log_capture_keeps_all_entries_for_process_lifetime(self):
+        capture = LogCaptureHandler()
+
+        for index in range(2100):
+            record = logging.LogRecord(
+                "test", logging.INFO, __file__, 1, "entry %d", (index,), None,
+            )
+            capture.emit(record)
+
+        history = capture.history()
+        self.assertEqual(len(history), 2100)
+        self.assertEqual(history[0]["message"], "entry 0")
+        self.assertEqual(history[-1]["message"], "entry 2099")
+        self.assertEqual(
+            [entry["message"] for entry in capture.history(since=2098)],
+            ["entry 2098", "entry 2099"],
+        )
+
     def test_forward_debug_reaches_log_page_capture(self):
         marker = "retry-debug-capture-test"
 
