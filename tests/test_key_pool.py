@@ -25,23 +25,23 @@ class KeyPoolStickyTests(unittest.TestCase):
 
         self.assertEqual(pool.pick().group_id, "fast")
 
-    def test_balanced_strategy_selects_cheapest_group_within_target(self):
+    def test_balanced_strategy_upgrades_after_two_slow_samples(self):
         pool = KeyPool([])
         pool.entries = [
             KeyEntry("slow-cheap", "slow-cheap", sort="0.01", group_id="slow"),
             KeyEntry("good", "good", sort="0.03", group_id="good"),
-            KeyEntry("fast", "fast", sort="0.20", group_id="fast"),
         ]
         pool.finalize_entries()
         pool.strategy = "balanced"
         pool.target_ttft_s = 5
-        pool.record_ttft(pool.entries[0], 9.0)
-        pool.record_ttft(pool.entries[1], 4.0)
-        pool.record_ttft(pool.entries[2], 1.0)
 
+        first = pool.pick()
+        pool.record_ttft(first, 5.6)
+        self.assertEqual(pool.pick().group_id, "slow")
+        pool.record_ttft(first, 5.7)
         self.assertEqual(pool.pick().group_id, "good")
 
-    def test_balanced_cold_start_stops_after_cheapest_group_meets_target(self):
+    def test_balanced_strategy_keeps_group_inside_hysteresis_band(self):
         pool = KeyPool([])
         pool.entries = [
             KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
@@ -52,63 +52,102 @@ class KeyPoolStickyTests(unittest.TestCase):
         pool.target_ttft_s = 5
 
         selected = pool.pick()
-        pool.record_ttft(selected, 4.0)
+        pool.record_ttft(selected, 5.2)
+        pool.record_ttft(selected, 5.3)
 
         self.assertEqual(selected.group_id, "cheap")
         self.assertEqual(pool.pick().group_id, "cheap")
-        self.assertEqual(pool.entries[1].ttft_samples, 0)
 
-    def test_balanced_cold_start_explores_higher_rate_until_one_meets_target(self):
+    def test_balanced_retests_and_recovers_cheaper_group(self):
         pool = KeyPool([])
         pool.entries = [
             KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
             KeyEntry("good", "good", sort="0.05", group_id="good"),
-            KeyEntry("premium", "premium", sort="0.20", group_id="premium"),
         ]
         pool.finalize_entries()
         pool.strategy = "balanced"
         pool.target_ttft_s = 5
-        pool.record_ttft(pool.entries[0], 9.0)
-
-        selected = pool.pick()
-        pool.record_ttft(selected, 4.0)
-
-        self.assertEqual(selected.group_id, "good")
+        cheap = pool.pick()
+        pool.record_ttft(cheap, 6.0)
+        pool.record_ttft(cheap, 6.0)
         self.assertEqual(pool.pick().group_id, "good")
-        self.assertEqual(pool.entries[2].ttft_samples, 0)
 
-    def test_balanced_periodic_retest_only_selects_cheaper_group(self):
-        pool = KeyPool([])
-        pool.entries = [
-            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
-            KeyEntry("good", "good", sort="0.05", group_id="good"),
-            KeyEntry("premium", "premium", sort="0.20", group_id="premium"),
-        ]
-        pool.finalize_entries()
-        pool.strategy = "balanced"
-        pool.target_ttft_s = 5
-        pool.record_ttft(pool.entries[0], 9.0)
-        pool.record_ttft(pool.entries[1], 4.0)
-        pool.record_ttft(pool.entries[2], 1.0)
+        cheap_metric = pool._metric("cheap")
+        cheap_metric["last_ts"] -= 301
+        cheap_metric["next_probe_at"] = 0
+        probe = pool.pick()
+        self.assertEqual(probe.group_id, "cheap")
+        pool.record_ttft(probe, 4.4)
+        self.assertEqual(pool.pick().group_id, "good")
 
-        first_nineteen = [pool.pick().group_id for _ in range(19)]
-
-        self.assertEqual(set(first_nineteen), {"good"})
+        cheap_metric["next_probe_at"] = 0
+        second_probe = pool.pick()
+        pool.record_ttft(second_probe, 4.3)
         self.assertEqual(pool.pick().group_id, "cheap")
 
-    def test_balanced_periodic_retest_never_selects_more_expensive_group(self):
+    def test_balanced_allows_only_one_inflight_cheaper_probe(self):
         pool = KeyPool([])
         pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
             KeyEntry("good", "good", sort="0.05", group_id="good"),
-            KeyEntry("premium", "premium", sort="0.20", group_id="premium"),
         ]
         pool.finalize_entries()
         pool.strategy = "balanced"
-        pool.target_ttft_s = 5
-        pool.record_ttft(pool.entries[0], 4.0)
-        pool.record_ttft(pool.entries[1], 1.0)
+        pool._balanced_group = "good"
 
-        self.assertEqual({pool.pick().group_id for _ in range(40)}, {"good"})
+        self.assertEqual(pool.pick().group_id, "cheap")
+        self.assertEqual(pool.pick().group_id, "good")
+
+    def test_failed_cheaper_probe_resets_recovery_and_defers_retest(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("good", "good", sort="0.05", group_id="good"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool._balanced_group = "good"
+        metric = pool._metric("cheap")
+        metric["recovery_streak"] = 1
+
+        with patch("retry_proxy.key_pool.time.time", return_value=100):
+            pool.mark_cooldown(pool.entries[0], 30, status=503)
+
+        self.assertEqual(metric["recovery_streak"], 0)
+        self.assertEqual(metric["next_probe_at"], 400)
+        self.assertEqual(metric["probe_reserved_until"], 0)
+
+    def test_request_views_isolate_ttft_by_endpoint_and_model(self):
+        pool = KeyPool(["one", "two"])
+        pool.strategy = "ttft"
+        chat = pool.for_request("model-a", "v1/chat/completions", "chat")
+        responses = pool.for_request("model-a", "v1/responses", "responses")
+
+        chat.record_ttft(chat.entries[0], 1.0)
+
+        self.assertEqual(chat._metric("one")["samples"], 1)
+        self.assertEqual(responses._metrics, {})
+
+    def test_scheduler_status_reports_workload_and_recovery_state(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap", group_name="Cheap"),
+            KeyEntry("good", "good", sort="0.05", group_id="good", group_name="Good"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        view = pool.for_request("model-a", "v1/chat/completions", "chat")
+        cheap = view.pick()
+        view.record_ttft(cheap, 6.0)
+        view.record_ttft(cheap, 6.0)
+
+        status = pool.scheduler_status()
+
+        self.assertEqual(len(status), 1)
+        self.assertEqual(status[0]["endpoint_family"], "chat")
+        self.assertEqual(status[0]["model"], "model-a")
+        self.assertEqual(status[0]["current_group_name"], "Good")
+        self.assertEqual(status[0]["cheaper_groups"][0]["group_name"], "Cheap")
 
     def test_group_members_share_ttft_samples(self):
         pool = KeyPool([])
@@ -309,12 +348,13 @@ class KeyPoolStickyTests(unittest.TestCase):
 
         self.assertEqual([entry.key_id for entry in normal.entries], ["normal-1", "normal-2"])
         self.assertEqual([entry.key_id for entry in image_by_model.entries], ["image-1", "image-2"])
-        self.assertIs(image_by_model, image_by_path)
+        self.assertIsNot(image_by_model, image_by_path)
         self.assertIsNot(normal, image_by_model)
 
         image_by_model._current = image_by_model.entries[1]
         image_by_model._sticky_until = 999
         self.assertIsNone(normal._current)
+        self.assertIsNone(image_by_path._current)
 
     def test_specific_pool_never_falls_back_to_default_entries(self):
         pool = KeyPool([])

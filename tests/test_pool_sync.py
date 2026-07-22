@@ -499,6 +499,8 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         source = status["sources"][0]
         self.assertEqual(source["strategy"], "balanced")
         self.assertEqual(source["target_ttft_s"], 4.5)
+        self.assertEqual(source["ttft_policy"]["confirmations"], 2)
+        self.assertIn("scheduler_views", source)
         self.assertEqual(source["check_model"], "test-model")
         self.assertEqual(pool.strategy, "balanced")
         self.assertEqual(pool.target_ttft_s, 4.5)
@@ -539,7 +541,8 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         manager.client.post = AsyncMock(return_value=response({"choices": []}, 200))
         result = await manager.check_availability(source_id)
         self.assertTrue(result["checks"][0]["available"])
-        self.assertEqual(entry.ttft_samples, 1)
+        self.assertEqual(entry.ttft_samples, 0)
+        self.assertIsNotNone(entry.probe_latency_s)
 
     async def test_availability_check_does_not_cool_model_rejection(self):
         manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
@@ -619,8 +622,8 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         result = await task
 
         checks = {item["group_id"]: item for item in result["checks"]}
-        first_batch_min = min(checks[str(index)]["ttft_s"] for index in range(2))
-        self.assertLess(checks["2"]["ttft_s"], first_batch_min / 2)
+        first_batch_min = min(checks[str(index)]["response_s"] for index in range(2))
+        self.assertLess(checks["2"]["response_s"], first_batch_min / 2)
 
     async def test_catalog_and_one_click_create_only_missing_groups(self):
         client = FakeClient()

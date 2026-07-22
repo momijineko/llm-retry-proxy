@@ -246,6 +246,7 @@ class RetryResult:
     failure_reason: str = ""
     key_entry: object = None
     response_started_at: float = 0.0
+    response_started_mono: float = 0.0
 
 
 class RetryProxy:
@@ -522,6 +523,7 @@ class RetryProxy:
                 self.logger.error(f"{_tag(method, path, provider, model)}{key_tag} 放弃({self.config.max_retries}次) {time.time() - start:.1f}s")
                 break
             cycle = time.time()
+            cycle_mono = time.monotonic()
             self.logger.debug(f"{_tag(method, path, provider, model)}{key_tag} #{attempt} 发出上游 总{cycle - start:.2f}s")
             try:
                 response = await self._send_upstream(method, url, send_headers, body)
@@ -563,7 +565,8 @@ class RetryProxy:
                     self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(response.status_code)} #{attempt} 无其它可用Key，立即返回{detail_tag} 总{time.time() - start:.1f}s")
                     return RetryResult(response, attempt, attempt, response.status_code, retry_codes,
                                        False, last_key_id, start, key_attempts, key_entry=entry,
-                                       response_started_at=cycle)
+                                       response_started_at=cycle,
+                                       response_started_mono=cycle_mono)
                 await response.aclose()
                 if response.status_code == 429: c429 += 1; cother = 0; wait, src = calc_backoff_wait(c429, self.config.retry_interval_429, self.config.retry_backoff_max_429, self.config.retry_backoff_429, ra)
                 else: cother += 1; c429 = 0; wait, src = calc_backoff_wait(cother, self.config.retry_interval, self.config.retry_backoff_max, self.config.retry_backoff)
@@ -580,5 +583,6 @@ class RetryProxy:
             _mark_key_outcome(pool, entry, self.config, response.status_code)
             return RetryResult(response, attempt, attempt, response.status_code, retry_codes,
                                attempt == 1, last_key_id, start, key_attempts,
-                               key_entry=entry, response_started_at=cycle)
+                               key_entry=entry, response_started_at=cycle,
+                               response_started_mono=cycle_mono)
         return RetryResult(None, 0, attempt - 1, last_status, retry_codes, False, last_key_id, start, key_attempts)

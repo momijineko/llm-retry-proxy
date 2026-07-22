@@ -478,10 +478,22 @@ class PoolSyncManager:
                 pool.strategy = strategy
                 pool.target_ttft_s = target
                 pool._selection_count = 0
+                pool._balanced_group = None
+                for metric in pool._metrics.values():
+                    metric.update({
+                        "slow_streak": 0, "recovery_streak": 0,
+                        "next_probe_at": 0.0, "probe_reserved_until": 0.0,
+                    })
                 for view in pool._views.values():
                     view.strategy = strategy
                     view.target_ttft_s = target
                     view._selection_count = 0
+                    view._balanced_group = None
+                    for metric in view._metrics.values():
+                        metric.update({
+                            "slow_streak": 0, "recovery_streak": 0,
+                            "next_probe_at": 0.0, "probe_reserved_until": 0.0,
+                        })
             self._save_state()
             return self.status()
 
@@ -540,7 +552,7 @@ class PoolSyncManager:
                     elapsed = time.monotonic() - started
                 available = self._probe_status(response.status_code)
                 if available:
-                    pool.record_ttft(entry, elapsed)
+                    pool.record_probe(entry, elapsed)
                 reason, circuit_failure = (
                     ("available", False) if available
                     else self._probe_failure(response.status_code)
@@ -583,8 +595,8 @@ class PoolSyncManager:
                 "circuit_opened": circuit_opened,
                 "reason": "available" if available else attempts[-1][4],
                 "statuses": [item[1] for item in attempts],
-                "ttft_s": min((item[3] for item in attempts if item[2] and item[3] is not None),
-                               default=None),
+                "response_s": min((item[3] for item in attempts if item[2] and item[3] is not None),
+                                  default=None),
             })
         unavailable = sum(item["available"] is False for item in summary)
         rejected = sum(
@@ -764,6 +776,13 @@ class PoolSyncManager:
                     "last_failure_kind": entry.last_failure_kind if entry else "",
                     "ttft_ewma": round(entry.ttft_ewma, 3) if entry and entry.ttft_ewma is not None else None,
                     "ttft_samples": entry.ttft_samples if entry else 0,
+                    "ttft_last_ts": entry.ttft_last_ts if entry else 0,
+                    "ttft_stale": bool(entry and entry.ttft_last_ts and
+                                       now - entry.ttft_last_ts >= getattr(
+                                           self.config, "key_ttft_stale_after", 300)),
+                    "probe_latency_s": (round(entry.probe_latency_s, 3)
+                                        if entry and entry.probe_latency_s is not None else None),
+                    "probe_last_ts": entry.probe_last_ts if entry else 0,
                 })
             public_sources.append({
                 "id": source["id"], "adapter": source["adapter"], "adapter_label": adapter.label,
@@ -776,6 +795,13 @@ class PoolSyncManager:
                 "last_error": source.get("last_error", ""),
                 "strategy": source.get("strategy", "cost"),
                 "target_ttft_s": source.get("target_ttft_s", 5.0),
+                "ttft_policy": {
+                    "stale_after": getattr(self.config, "key_ttft_stale_after", 300),
+                    "retest_interval": getattr(self.config, "key_ttft_retest_interval", 60),
+                    "confirmations": getattr(self.config, "key_ttft_confirmations", 2),
+                    "hysteresis": getattr(self.config, "key_ttft_hysteresis", 0.1),
+                },
+                "scheduler_views": pool.scheduler_status(now) if pool else [],
                 "check_model": source.get("check_model", ""),
                 "key_count": len(visible_entries), "keys": visible_entries,
                 "operation": dict(self.operations.get(source["id"]) or {}),

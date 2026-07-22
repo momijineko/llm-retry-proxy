@@ -416,9 +416,9 @@ def create_handlers(service, store):
                         if found:
                             ttft_recorded = True
                             entry = getattr(result, "key_entry", None)
-                            sent_at = getattr(result, "response_started_at", 0.0)
+                            sent_at = getattr(result, "response_started_mono", 0.0)
                             if request_pool is not None and entry is not None and sent_at > 0:
-                                request_pool.record_ttft(entry, time.time() - sent_at)
+                                request_pool.record_ttft(entry, time.monotonic() - sent_at)
                     yield chunk
             except httpx.TransportError as e:
                 logger.warning(f"{_tag(request.method, path, provider, model_name, client_ip)} 流式中断 #{winner_attempt} {e!r} 总{time.time() - start:.2f}s")

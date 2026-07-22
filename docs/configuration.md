@@ -80,6 +80,10 @@
 | `KEY_COOLDOWN_BACKOFF` | `true` | 同类错误连续发生时按 `1→2→4...` 倍延长熔断；成功后清零 |
 | `KEY_STICKY` | `120` | key 粘性空闲超时（秒）；`0` = 禁用 |
 | `KEY_POOL_WAIT_TIMEOUT` | `120` | 所有候选 key 均熔断时的最长等待时间（秒）；超时返回 503，`0` = 不限制 |
+| `KEY_TTFT_STALE_AFTER` | `300` | 真实首 Token 样本的有效期，以及复测失败后再次尝试的等待时间（秒） |
+| `KEY_TTFT_RETEST_INTERVAL` | `60` | 便宜分组复测成功一次后，下一次确认复测的最小间隔（秒） |
+| `KEY_TTFT_CONFIRMATIONS` | `2` | 升级或降回分组前要求的连续慢/快样本数 |
+| `KEY_TTFT_HYSTERESIS` | `0.1` | 切换滞回比例；目标 5 秒、值为 0.1 时，超过 5.5 秒升级，低于 4.5 秒降回 |
 
 ## 在线同步
 

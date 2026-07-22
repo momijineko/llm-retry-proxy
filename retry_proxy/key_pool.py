@@ -1,6 +1,7 @@
 import csv
 import fnmatch
 import hashlib
+import math
 import os
 import time
 from decimal import Decimal, InvalidOperation
@@ -13,6 +14,7 @@ _RUNTIME_FIELDS = (
     "cooldown_until", "total_fail", "last_fail_ts", "consecutive_failures",
     "last_failure_kind", "last_failure_status", "last_cooldown_s",
     "ttft_ewma", "ttft_samples", "ttft_last_ts",
+    "probe_latency_s", "probe_last_ts",
 )
 
 KEY_POOL_STRATEGIES = {"cost", "ttft", "balanced"}
@@ -23,7 +25,8 @@ class KeyEntry:
                  "models", "paths", "routing_capabilities", "auth_header", "auth_scheme",
                  "cooldown_until", "total_fail",
                  "last_fail_ts", "consecutive_failures", "last_failure_kind", "last_failure_status",
-                 "last_cooldown_s", "ttft_ewma", "ttft_samples", "ttft_last_ts")
+                 "last_cooldown_s", "ttft_ewma", "ttft_samples", "ttft_last_ts",
+                 "probe_latency_s", "probe_last_ts")
     def __init__(self, key: str, label: str = "", models=(), paths=(), sort: str = "",
                  group_id: str = "", group_name: str = "", routing_capabilities=None, auth=None):
         self.key, self.label, self.sort = key, label, sort.strip()
@@ -64,6 +67,8 @@ class KeyEntry:
         self.ttft_ewma = None
         self.ttft_samples = 0
         self.ttft_last_ts = 0.0
+        self.probe_latency_s = None
+        self.probe_last_ts = 0.0
 
 
 class KeyPool:
@@ -73,6 +78,10 @@ class KeyPool:
         self.strategy, self.target_ttft_s = "cost", 5.0
         self._selection_count = 0
         self._views = {}
+        self._metrics = {}
+        self._balanced_group = None
+        self._view_entry_ids = ()
+        self._workload = ("other", "*")
         self.finalize_entries()
 
     def finalize_entries(self):
@@ -150,12 +159,16 @@ class KeyPool:
         selected = matched or [entry for entry in candidates if not entry.models and not entry.paths]
         if not selected:
             return None
-        signature = tuple(id(entry) for entry in selected)
+        entry_ids = tuple(id(entry) for entry in selected)
+        workload = (endpoint_family or "other", model or "*")
+        signature = (entry_ids, workload)
         if signature not in self._views:
             view = KeyPool([], self.provider)
             view.entries = selected
             view.strategy = self.strategy
             view.target_ttft_s = self.target_ttft_s
+            view._view_entry_ids = entry_ids
+            view._workload = workload
             self._views[signature] = view
         else:
             self._views[signature].strategy = self.strategy
@@ -204,52 +217,121 @@ class KeyPool:
             })
             group["entries"].append(entry)
             group["sort"] = min(group["sort"], self._sort_value(entry))
-            if entry.ttft_samples and (group["ttft"] is None or entry.ttft_last_ts > group["last_ts"]):
-                group["ttft"] = entry.ttft_ewma
-                group["samples"] = entry.ttft_samples
-                group["last_ts"] = entry.ttft_last_ts
+        for key, group in groups.items():
+            metric = self._metrics.get(key)
+            if metric:
+                group["ttft"] = metric["ewma"]
+                group["samples"] = metric["samples"]
+                group["last_ts"] = metric["last_ts"]
+                group["slow_streak"] = metric["slow_streak"]
+                group["recovery_streak"] = metric["recovery_streak"]
+                group["next_probe_at"] = metric["next_probe_at"]
+                group["probe_reserved_until"] = metric["probe_reserved_until"]
         return groups
+
+    @staticmethod
+    def _setting(name, default):
+        return getattr(settings, name, default)
+
+    def _metric(self, group_key):
+        return self._metrics.setdefault(group_key, {
+            "ewma": None, "samples": 0, "last_ts": 0.0,
+            "slow_streak": 0, "recovery_streak": 0,
+            "next_probe_at": 0.0, "probe_reserved_until": 0.0,
+        })
+
+    def _balanced_pick(self, groups):
+        now = time.time()
+        ordered = sorted(groups.items(), key=lambda pair: (pair[1]["sort"], pair[1]["index"]))
+        available_keys = {key for key, _ in ordered}
+        if self._balanced_group not in available_keys:
+            self._balanced_group = ordered[0][0]
+        current = groups[self._balanced_group]
+        stale_after = max(float(self._setting("key_ttft_stale_after", 300)), 0.0)
+        reserve_for = max(float(self._setting("key_ttft_retest_interval", 60)), 1.0)
+        cheaper = [(key, item) for key, item in ordered
+                   if item["sort"] < current["sort"]]
+        for key, item in cheaper:
+            metric = self._metric(key)
+            stale = not metric["last_ts"] or now - metric["last_ts"] >= stale_after
+            confirmation_due = bool(metric["recovery_streak"]
+                                    and now >= metric["next_probe_at"])
+            if ((stale or confirmation_due) and now >= metric["next_probe_at"]
+                    and now >= metric["probe_reserved_until"]):
+                metric["probe_reserved_until"] = now + reserve_for
+                return key
+        return self._balanced_group
 
     def _pick_group(self, entries):
         groups = self._group_metrics(entries)
         self._selection_count += 1
         unknown = [(key, item) for key, item in groups.items() if item["ttft"] is None]
         if self.strategy == "ttft":
-            if unknown:
-                return min(unknown, key=lambda pair: (pair[1]["sort"], pair[1]["index"]))[0]
-            if self._selection_count % 20 == 0:
-                return min(groups.items(),
-                           key=lambda pair: (pair[1]["samples"], pair[1]["last_ts"]))[0]
+            stale_after = max(float(self._setting("key_ttft_stale_after", 300)), 0.0)
+            stale = [(key, item) for key, item in groups.items()
+                     if item["last_ts"] and time.time() - item["last_ts"] >= stale_after]
+            if unknown or stale:
+                candidates = unknown or stale
+                return min(candidates, key=lambda pair: (pair[1]["last_ts"], pair[1]["sort"]))[0]
             return min(groups.items(), key=lambda pair: (pair[1]["ttft"], pair[1]["sort"]))[0]
-        within_target = [(key, item) for key, item in groups.items()
-                         if item["ttft"] is not None
-                         and item["ttft"] <= self.target_ttft_s]
-        if within_target:
-            preferred = min(within_target,
-                            key=lambda pair: (pair[1]["sort"], pair[1]["ttft"]))
-            cheaper_unknown = [(key, item) for key, item in unknown
-                               if item["sort"] < preferred[1]["sort"]]
-            if cheaper_unknown:
-                return min(cheaper_unknown,
-                           key=lambda pair: (pair[1]["sort"], pair[1]["index"]))[0]
-        else:
-            if unknown:
-                return min(unknown, key=lambda pair: (pair[1]["sort"], pair[1]["index"]))[0]
-            preferred = min(groups.items(),
-                            key=lambda pair: (pair[1]["ttft"], pair[1]["sort"]))
-        if self._selection_count % 20 == 0:
-            cheaper = [(key, item) for key, item in groups.items()
-                       if item["sort"] < preferred[1]["sort"]]
-            if cheaper:
-                return min(cheaper,
-                           key=lambda pair: (pair[1]["samples"], pair[1]["last_ts"]))[0]
-        return preferred[0]
+        return self._balanced_pick(groups)
 
     def record_ttft(self, entry, seconds, alpha=0.3):
         if entry is None or seconds < 0:
             return
         group_key = self._group_key(entry)
         now = time.time()
+        metric = self._metric(group_key)
+        elapsed = max(now - metric["last_ts"], 0.0) if metric["last_ts"] else 0.0
+        stale_after = max(float(self._setting("key_ttft_stale_after", 300)), 1.0)
+        dynamic_alpha = max(alpha, 1 - math.exp(-elapsed / stale_after)) if elapsed else 1.0
+        metric["ewma"] = (seconds if metric["ewma"] is None
+                          else dynamic_alpha * seconds + (1 - dynamic_alpha) * metric["ewma"])
+        metric["samples"] += 1
+        metric["last_ts"] = now
+        metric["probe_reserved_until"] = 0.0
+
+        if self.strategy == "balanced":
+            hysteresis = max(float(self._setting("key_ttft_hysteresis", 0.1)), 0.0)
+            upper = self.target_ttft_s * (1 + hysteresis)
+            lower = self.target_ttft_s * max(1 - hysteresis, 0.0)
+            confirmations = max(int(self._setting("key_ttft_confirmations", 2)), 1)
+            stale_wait = max(float(self._setting("key_ttft_stale_after", 300)), 0.0)
+            retest_wait = max(float(self._setting("key_ttft_retest_interval", 60)), 0.0)
+            if group_key == self._balanced_group:
+                metric["slow_streak"] = metric["slow_streak"] + 1 if seconds > upper else 0
+                if metric["slow_streak"] >= confirmations:
+                    groups = self._group_metrics([
+                        candidate for candidate in self.entries
+                        if candidate.cooldown_until <= now
+                    ])
+                    current = groups.get(group_key)
+                    more_expensive = sorted(
+                        ((key, item) for key, item in groups.items()
+                         if current is not None and item["sort"] > current["sort"]),
+                        key=lambda pair: (pair[1]["sort"], pair[1]["index"]),
+                    )
+                    if more_expensive:
+                        metric["slow_streak"] = 0
+                        metric["recovery_streak"] = 0
+                        metric["next_probe_at"] = now + stale_wait
+                        self._balanced_group = more_expensive[0][0]
+            else:
+                current_groups = self._group_metrics(self.entries)
+                current = current_groups.get(self._balanced_group)
+                candidate = current_groups.get(group_key)
+                is_cheaper = bool(current and candidate and candidate["sort"] < current["sort"])
+                if is_cheaper and seconds < lower:
+                    metric["recovery_streak"] += 1
+                    metric["next_probe_at"] = now + retest_wait
+                    if metric["recovery_streak"] >= confirmations:
+                        metric["recovery_streak"] = 0
+                        metric["slow_streak"] = 0
+                        self._balanced_group = group_key
+                elif is_cheaper:
+                    metric["recovery_streak"] = 0
+                    metric["next_probe_at"] = now + stale_wait
+
         peers = [candidate for candidate in self.entries if self._group_key(candidate) == group_key]
         prior = next((candidate.ttft_ewma for candidate in peers if candidate.ttft_samples), None)
         samples = max((candidate.ttft_samples for candidate in peers), default=0) + 1
@@ -258,6 +340,74 @@ class KeyPool:
             candidate.ttft_ewma = value
             candidate.ttft_samples = samples
             candidate.ttft_last_ts = now
+
+    def record_probe(self, entry, seconds):
+        if entry is None or seconds < 0:
+            return
+        group_key = self._group_key(entry)
+        now = time.time()
+        for candidate in self.entries:
+            if self._group_key(candidate) == group_key:
+                candidate.probe_latency_s = seconds
+                candidate.probe_last_ts = now
+
+    def scheduler_status(self, now=None):
+        now = time.time() if now is None else now
+        stale_after = max(float(self._setting("key_ttft_stale_after", 300)), 0.0)
+        confirmations = max(int(self._setting("key_ttft_confirmations", 2)), 1)
+        result = []
+        for view in self._views.values():
+            groups = view._group_metrics(view.entries)
+            if not groups:
+                continue
+            current_key = view._balanced_group
+            if current_key not in groups and view._current is not None:
+                current_key = view._group_key(view._current)
+            current = groups.get(current_key)
+            current_metric = view._metrics.get(current_key, {}) if current_key else {}
+            current_last_ts = current_metric.get("last_ts", 0.0)
+            current_stale = bool(current_last_ts and now - current_last_ts >= stale_after)
+            if current is None or not current_metric.get("samples"):
+                state = "learning"
+            elif current_metric.get("slow_streak"):
+                state = "slow_confirming"
+            elif current_stale:
+                state = "stale"
+            else:
+                state = "active"
+            cheaper = []
+            if current is not None:
+                for key, group in groups.items():
+                    if group["sort"] >= current["sort"]:
+                        continue
+                    metric = view._metrics.get(key, {})
+                    cheaper.append({
+                        "group_id": key,
+                        "group_name": group["entries"][0].group_name or group["entries"][0].label,
+                        "sort": str(group["entries"][0].sort),
+                        "recovery_streak": metric.get("recovery_streak", 0),
+                        "next_probe_at": metric.get("next_probe_at", 0.0),
+                        "probe_inflight": metric.get("probe_reserved_until", 0.0) > now,
+                    })
+            endpoint_family, model = view._workload
+            result.append({
+                "endpoint_family": endpoint_family,
+                "model": model,
+                "current_group_id": current_key or "",
+                "current_group_name": (current["entries"][0].group_name
+                                       or current["entries"][0].label) if current else "",
+                "current_sort": str(current["entries"][0].sort) if current else "",
+                "ttft_ewma": (round(current_metric["ewma"], 3)
+                              if current_metric.get("ewma") is not None else None),
+                "samples": current_metric.get("samples", 0),
+                "last_ts": current_last_ts,
+                "stale": current_stale,
+                "state": state,
+                "slow_streak": current_metric.get("slow_streak", 0),
+                "confirmations": confirmations,
+                "cheaper_groups": cheaper,
+            })
+        return sorted(result, key=lambda item: (item["endpoint_family"], item["model"]))
 
     def has_fresh(self):
         return any(e.cooldown_until <= time.time() for e in self.entries)
@@ -270,6 +420,14 @@ class KeyPool:
     def mark_cooldown(self, entry, seconds, ra_wait=None, failure_kind="upstream", backoff=False,
                       max_seconds=None, status=None):
         now = time.time()
+        group_key = self._group_key(entry)
+        if self.strategy == "balanced" and group_key != self._balanced_group:
+            metric = self._metric(group_key)
+            metric["recovery_streak"] = 0
+            metric["probe_reserved_until"] = 0.0
+            metric["next_probe_at"] = now + max(
+                float(self._setting("key_ttft_stale_after", 300)), 0.0,
+            )
         already = entry.cooldown_until > now
         if not already:
             entry.consecutive_failures = (entry.consecutive_failures + 1
@@ -313,6 +471,10 @@ class KeyPool:
                  "group_id": e.group_id, "group_name": e.group_name,
                  "ttft_ewma": round(e.ttft_ewma, 3) if e.ttft_ewma is not None else None,
                  "ttft_samples": e.ttft_samples, "ttft_last_ts": e.ttft_last_ts,
+                 "ttft_stale": bool(e.ttft_last_ts and
+                                    now - e.ttft_last_ts >= self._setting("key_ttft_stale_after", 300)),
+                 "probe_latency_s": round(e.probe_latency_s, 3) if e.probe_latency_s is not None else None,
+                 "probe_last_ts": e.probe_last_ts,
                  "models": list(e.models), "paths": list(e.paths),
                  "routing_capabilities": {
                      key: list(value) if isinstance(value, tuple) else value
@@ -467,7 +629,7 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
     live_entry_ids = {id(entry) for entry in merged}
     previous._views = {
         signature: view for signature, view in previous._views.items()
-        if all(entry_id in live_entry_ids for entry_id in signature)
+        if all(entry_id in live_entry_ids for entry_id in view._view_entry_ids)
     }
     for view in previous._views.values():
         view.provider = replacement.provider
