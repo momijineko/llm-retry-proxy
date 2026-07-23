@@ -38,7 +38,10 @@ class RetryLogStore:
                 if r.get("first_ok", r.get("retries", 0) == 0): b["first_ok"] += 1
             else: b["failed"] += 1
             b["max_retries"] = max(b["max_retries"], r.get("retries", 0))
-        for code in [r.get("upstream_status", 0), *r.get("retry_codes", [])]:
+        statuses = [r.get("upstream_status", 0), *r.get("retry_codes", [])]
+        if r.get("stream_error_status"):
+            statuses.append(r["stream_error_status"])
+        for code in statuses:
             summary["by_status"][str(code)] = summary["by_status"].get(str(code), 0) + 1
 
     def _save(self):

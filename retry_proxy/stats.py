@@ -30,7 +30,9 @@ def _status_category(s) -> str:
 
 
 def _req_succeeded(r: dict) -> bool:
-    """请求是否成功：final_status < 400（2xx/3xx 成功，4xx/5xx 失败）"""
+    """Prefer the recorded stream outcome, falling back to the HTTP status."""
+    if "succeeded" in r:
+        return bool(r["succeeded"])
     return r.get("final_status", 0) < 400
 
 
@@ -72,7 +74,8 @@ def _agg_by(records: list, key: str, label: str, key_fn=None):
             for code in rc:
                 b["fail_statuses"][code] += 1
         elif not _req_succeeded(r):
-            b["fail_statuses"][r.get("upstream_status", 0)] += 1
+            failure_status = r.get("stream_error_status") or r.get("upstream_status", 0)
+            b["fail_statuses"][failure_status] += 1
         b["max_retries"] = max(b["max_retries"], r.get("retries", 0))
         d = r.get("duration_s")
         if isinstance(d, (int, float)):

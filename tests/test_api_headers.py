@@ -22,10 +22,12 @@ class OutboundRequestHeadersTests(unittest.TestCase):
 
     def test_text_request_preserves_client_identity(self):
         headers = outbound_request_headers(
-            {"user-agent": "client/1.0"}, "responses", "gpt-5.6", self.config,
+            {"user-agent": "client/1.0", "accept-encoding": "gzip, br, zstd"},
+            "responses", "gpt-5.6", self.config,
         )
 
         self.assertEqual(headers["user-agent"], "client/1.0")
+        self.assertEqual(headers["accept-encoding"], "gzip, deflate")
         self.assertNotIn("originator", headers)
 
 

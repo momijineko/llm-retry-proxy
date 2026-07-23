@@ -60,6 +60,22 @@ class RetryLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("#1 发出上游" in message for message in messages))
         self.assertTrue(any("#1 收到响应头 200" in message for message in messages))
 
+    async def test_streaming_responses_does_not_log_headers_as_completed(self):
+        config = SimpleNamespace(hedge_mode="off", max_retries=1)
+        trace_logger = Mock()
+        response = SimpleNamespace(status_code=200, headers={})
+        proxy = RetryProxy(config=config, client=object(), logger_=trace_logger)
+        proxy._send = AsyncMock(return_value=response)
+
+        await proxy.request(
+            "POST", "https://upstream.test/responses", {},
+            b'{"model":"model","stream":true}',
+            "v1/responses", "test", "model",
+        )
+
+        messages = [call.args[0] for call in trace_logger.info.call_args_list]
+        self.assertTrue(any("响应头已建立，等待Responses流结束" in message for message in messages))
+
     async def test_responses_header_wait_has_a_hard_timeout(self):
         config = SimpleNamespace(
             responses_header_timeout=0.01, hedge_mode="off", max_retries=1,

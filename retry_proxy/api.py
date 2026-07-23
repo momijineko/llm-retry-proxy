@@ -14,10 +14,21 @@ from .config import can_use_key_pool, log_capture, logger, settings
 from .dlp import inspect_json_body
 from .routes import ROUTES, is_excluded_path, match_route
 from .key_pool import KEY_POOLS
-from .retry import filter_headers, parse_model, reset_client_ip, set_client_ip, _tag
+from .retry import (
+    _mark_key_failure,
+    _tag,
+    filter_headers,
+    parse_model,
+    reset_client_ip,
+    set_client_ip,
+)
 from .stats import _normalize_provider, _req_succeeded, _upstream_window_stats, compute_key_pool_stats, compute_stats
 
-SKIP_REQUEST_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade"}
+SKIP_REQUEST_HEADERS = {
+    "host", "content-length", "transfer-encoding", "connection", "keep-alive",
+    "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade",
+    "accept-encoding",
+}
 SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "keep-alive", "content-encoding"}
 
 _GEMINI_MODEL_PATH = re.compile(
@@ -143,8 +154,96 @@ def _sse_has_token(buffer):
     return False, buffer
 
 
+def _new_responses_stream_state():
+    return {
+        "terminal": "",
+        "error": False,
+        "error_status": None,
+        "buffer": b"",
+    }
+
+
+def _response_event_status(payload):
+    candidates = []
+    if isinstance(payload, dict):
+        candidates.extend((payload.get("status_code"), payload.get("status")))
+        error = payload.get("error")
+        if isinstance(error, dict):
+            candidates.extend((error.get("status_code"), error.get("status"), error.get("code")))
+        response = payload.get("response")
+        if isinstance(response, dict):
+            nested_error = response.get("error")
+            if isinstance(nested_error, dict):
+                candidates.extend((nested_error.get("status_code"), nested_error.get("status"), nested_error.get("code")))
+    for value in candidates:
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 400 <= status <= 599:
+            return status
+    return None
+
+
+def _consume_responses_sse(state, chunk):
+    state["buffer"] = (state["buffer"] + chunk).replace(b"\r\n", b"\n")
+    while b"\n\n" in state["buffer"]:
+        frame, state["buffer"] = state["buffer"].split(b"\n\n", 1)
+        event_name = ""
+        data_lines = []
+        for line in frame.splitlines():
+            if line.startswith(b"event:"):
+                event_name = line[6:].strip().decode("utf-8", errors="replace")
+            elif line.startswith(b"data:"):
+                data_lines.append(line[5:].strip())
+        if not data_lines:
+            continue
+        data = b"\n".join(data_lines)
+        if data == b"[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except (TypeError, ValueError, UnicodeDecodeError):
+            continue
+        event_type = payload.get("type") if isinstance(payload, dict) else ""
+        event_type = event_type or event_name
+        if event_type in ("response.completed", "response.incomplete"):
+            state["terminal"] = event_type
+        elif event_type in ("error", "response.failed", "response.error") or (
+            isinstance(payload, dict) and isinstance(payload.get("error"), dict)
+        ):
+            state["error"] = True
+            state["error_status"] = state["error_status"] or _response_event_status(payload)
+    if len(state["buffer"]) > 1_048_576:
+        state["buffer"] = state["buffer"][-65_536:]
+
+
+def _finish_responses_stream_state(state, content_type, saw_html=False):
+    if "text/event-stream" not in (content_type or "").lower():
+        return "invalid_content_type", (502 if saw_html else None), False
+    if state["error"]:
+        return "error", state["error_status"], False
+    if state["terminal"] == "response.completed":
+        return "completed", None, True
+    if state["terminal"] == "response.incomplete":
+        return "incomplete", None, True
+    return "missing_terminal", None, False
+
+
+def _is_streaming_json(body):
+    try:
+        return json.loads(body).get("stream") is True
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def outbound_request_headers(request_headers, path, model, config=settings):
     headers = filter_headers(request_headers, SKIP_REQUEST_HEADERS)
+    # httpx decodes response bodies before ``aiter_bytes`` yields them, and
+    # the proxy consequently removes Content-Encoding downstream. Only offer
+    # encodings supported by the installed httpx decoders so compressed SSE
+    # bytes can never be forwarded as if they were plain UTF-8.
+    headers["accept-encoding"] = "gzip, deflate"
     image_request = ("/images/" in f"/{(path or '').lower()}"
                      or (model or "").lower().startswith(("gpt-image-", "image")))
     if image_request and config.image_upstream_user_agent:
@@ -419,15 +518,25 @@ def create_handlers(service, store, pool_sync=None):
         key_id = result.key_id
         key_attempts = getattr(result, "key_attempts", None) or []
         start = result.started_at
-        await store.write({"ts": datetime.now().isoformat(timespec="milliseconds"), "method": request.method,
-                           "path": "/" + path, "provider": provider, "model": model_name,
-                           "upstream_status": last_status, "final_status": response.status_code if response else 503,
-                           "attempts": total_sent, "retries": max(total_sent - 1, 0),
-                           "duration_s": round(time.time() - start, 3), "succeeded": bool(response and response.status_code < 400),
-                           "retry_codes": retry_codes, "mode": service.hedge_mode_for(request_pool), "first_ok": first_ok,
-                           "key_id": key_id, "key_pool": key_pool, "key_attempts": key_attempts,
-                           "client_ip": client_ip})
+        log_record = {"method": request.method, "path": "/" + path,
+                      "provider": provider, "model": model_name,
+                      "upstream_status": last_status, "attempts": total_sent,
+                      "retries": max(total_sent - 1, 0), "retry_codes": retry_codes,
+                      "mode": service.hedge_mode_for(request_pool), "first_ok": first_ok,
+                      "key_id": key_id, "key_pool": key_pool, "key_attempts": key_attempts,
+                      "client_ip": client_ip}
+
+        async def write_log(final_status, succeeded, **extra):
+            record = dict(log_record)
+            record.update({"ts": datetime.now().isoformat(timespec="milliseconds"),
+                           "final_status": final_status,
+                           "duration_s": round(time.time() - start, 3),
+                           "succeeded": succeeded})
+            record.update(extra)
+            await store.write(record)
+
         if response is None:
+            await write_log(503, False)
             logger.error(f"{_tag(request.method, path, provider, model_name, client_ip)} 放弃({total_sent}发) {time.time() - start:.1f}s")
             reason = getattr(result, "failure_reason", "")
             message = reason or f"upstream overloaded after {total_sent} attempts"
@@ -435,6 +544,12 @@ def create_handlers(service, store, pool_sync=None):
             return Response(payload, status_code=503, media_type="application/json", headers={"X-Forward-Attempts": str(total_sent)})
         headers = filter_headers(response.headers, SKIP_RESPONSE_HEADERS); headers["X-Forward-Attempts"] = str(winner_attempt)
         entry = getattr(result, "key_entry", None)
+        responses_stream = (
+            endpoint_family == "responses" and _is_streaming_json(body)
+            and response.status_code < 400
+        )
+        if not responses_stream:
+            await write_log(response.status_code, response.status_code < 400)
         if (pool_sync is not None and request_pool is not None and entry is not None
                 and entry.group_id and model_name and 400 <= response.status_code < 500):
             try:
@@ -454,9 +569,22 @@ def create_handlers(service, store, pool_sync=None):
         async def body_gen():
             probe_buffer = b""
             ttft_recorded = False
-            is_sse = "event-stream" in response.headers.get("content-type", "")
+            content_type = response.headers.get("content-type", "")
+            is_sse = "event-stream" in content_type
+            stream_state = _new_responses_stream_state()
+            bad_gateway_body = False
+            stream_override = ""
             try:
                 async for chunk in response.aiter_bytes():
+                    if responses_stream and chunk:
+                        _consume_responses_sse(stream_state, chunk)
+                        if not is_sse:
+                            lower = chunk[:8192].lower()
+                            bad_gateway_body = bad_gateway_body or (
+                                b"502" in lower and (
+                                    b"bad gateway" in lower or b"<html" in lower
+                                )
+                            )
                     if not ttft_recorded and response.status_code < 400 and chunk:
                         if is_sse:
                             probe_buffer += chunk.replace(b"\r\n", b"\n")
@@ -472,8 +600,49 @@ def create_handlers(service, store, pool_sync=None):
                                 request_pool.record_ttft(entry, time.monotonic() - sent_at)
                     yield chunk
             except httpx.TransportError as e:
+                stream_override = "transport_error"
                 logger.warning(f"{_tag(request.method, path, provider, model_name, client_ip)} 流式中断 #{winner_attempt} {e!r} 总{time.time() - start:.2f}s")
+            except asyncio.CancelledError:
+                stream_override = "cancelled"
+                raise
             finally:
-                await response.aclose()
+                try:
+                    await response.aclose()
+                finally:
+                    if responses_stream:
+                        stream_status, stream_error_status, succeeded = _finish_responses_stream_state(
+                            stream_state, content_type, bad_gateway_body,
+                        )
+                        if stream_override:
+                            stream_status = stream_override
+                            succeeded = False
+                        if not succeeded and entry is not None:
+                            availability = None if stream_status == "cancelled" else False
+                            for attempt in reversed(key_attempts):
+                                if attempt.get("key_id") == entry.key_id:
+                                    attempt["available"] = availability
+                                    break
+                            if stream_status != "cancelled":
+                                _mark_key_failure(
+                                    request_pool, entry, settings,
+                                    stream_error_status or 0,
+                                )
+                        error_tag = f" 内嵌HTTP={stream_error_status}" if stream_error_status else ""
+                        if succeeded:
+                            logger.info(
+                                f"{_tag(request.method, path, provider, model_name, client_ip)} "
+                                f"Responses流结束 status={stream_status} HTTP={response.status_code} "
+                                f"总{time.time() - start:.2f}s"
+                            )
+                        else:
+                            logger.warning(
+                                f"{_tag(request.method, path, provider, model_name, client_ip)} "
+                                f"Responses流失败 status={stream_status} HTTP={response.status_code}"
+                                f"{error_tag} 总{time.time() - start:.2f}s"
+                            )
+                        extra = {"stream_status": stream_status}
+                        if stream_error_status:
+                            extra["stream_error_status"] = stream_error_status
+                        await write_log(response.status_code, succeeded, **extra)
         return StreamingResponse(body_gen(), status_code=response.status_code, headers=headers, media_type=response.headers.get("content-type"))
     return health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy

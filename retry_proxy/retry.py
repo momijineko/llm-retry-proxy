@@ -218,6 +218,13 @@ def _sc(status):
     return f"\033[31m{status}\033[0m"
 
 
+def _response_status_log(status, path, body):
+    value = f"-> {_sc(status)}"
+    if status < 400 and _is_responses_path(path) and _is_streaming_request(body):
+        return value + " 响应头已建立，等待Responses流结束"
+    return value
+
+
 def _record_key_attempt(attempts, entry, available):
     if entry is not None:
         attempts.append({"key_id": entry.key_id, "available": available})
@@ -354,7 +361,7 @@ class RetryProxy:
                 except Exception: pass
             if winner is not None:
                 _mark_key_outcome(pool, entry, self.config, winner.status_code)
-                self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} -> {_sc(winner.status_code)} #{winner_attempt}胜出(R{round_num},{total_sent}发) {time.time() - t0:.2f}s")
+                self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} {_response_status_log(winner.status_code, path, body)} #{winner_attempt}胜出(R{round_num},{total_sent}发) {time.time() - t0:.2f}s")
                 return RetryResult(winner, winner_attempt, total_sent, last_status, retry_codes, round_num == 1, last_key_id, t0, key_attempts)
             exhausted = self.config.max_retries > 0 and total_sent >= self.config.max_retries
             key_failure_status = _select_key_failure_status(key_failure_statuses)
@@ -467,7 +474,7 @@ class RetryProxy:
                     _mark_key_outcome(pool, entry, self.config, result.status_code)
                     winner, winner_attempt, last_status = result, attempt, result.status_code
                     last_key_id = entry.key_id if entry is not None else ""
-                    self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} -> {_sc(result.status_code)} #{attempt}胜出({total_sent}发) {now - t0:.2f}s")
+                    self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} {_response_status_log(result.status_code, path, body)} #{attempt}胜出({total_sent}发) {now - t0:.2f}s")
                     break
             if winner:
                 for task in all_tasks:
@@ -630,7 +637,7 @@ class RetryProxy:
                     sleep_for, pool, pool_wait, getattr(self.config, "key_pool_wait_timeout", None),
                 ); continue
             key_tag = f"[{last_key_id}]" if pool and last_key_id else ""
-            self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} -> {_sc(response.status_code)} #{attempt} {time.time() - start:.2f}s")
+            self.logger.info(f"{_tag(method, path, provider, model)}{key_tag} {_response_status_log(response.status_code, path, body)} #{attempt} {time.time() - start:.2f}s")
             _record_key_attempt(key_attempts, entry, _key_available_for_status(response.status_code))
             _mark_key_outcome(pool, entry, self.config, response.status_code)
             return RetryResult(response, attempt, attempt, response.status_code, retry_codes,

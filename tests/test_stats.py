@@ -1,9 +1,26 @@
 import unittest
 
-from retry_proxy.stats import _agg_by_key, compute_key_pool_stats
+from retry_proxy.stats import _agg_by, _agg_by_key, compute_key_pool_stats
 
 
 class KeyAvailabilityStatsTests(unittest.TestCase):
+    def test_stream_failure_overrides_successful_http_status(self):
+        records = [{
+            "provider": "test",
+            "model": "model",
+            "final_status": 200,
+            "upstream_status": 200,
+            "stream_error_status": 502,
+            "succeeded": False,
+            "retries": 0,
+        }]
+
+        result = _agg_by(records, "model", "model")[0]
+
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["availability_pct"], 0)
+        self.assertEqual(result["dominant_fail_status"], 502)
+
     def test_attempt_trace_attributes_failures_to_the_key_that_was_used(self):
         records = [{
             "key_id": "premium",

@@ -77,6 +77,65 @@ class ProxyPoolAuthTests(unittest.TestCase):
 
 
 class ProxyPoolRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_responses_stream_logs_embedded_502_after_body_finishes(self):
+        config = SimpleNamespace(
+            proxy_api_key="", dlp_mode="off", dlp_max_body_bytes=1024,
+            image_upstream_user_agent="", image_upstream_originator="",
+        )
+        stream_body = (
+            b'event: response.created\ndata: {"type":"response.created"}\n\n'
+            b'event: error\ndata: {"type":"error","error":{"status_code":502}}\n\n'
+        )
+        upstream_response = httpx.Response(
+            200, content=stream_body, headers={"content-type": "text/event-stream"},
+            request=httpx.Request("POST", "https://upstream.test/responses"),
+        )
+        pool = KeyPool([("pool-key", "pool-key")])
+        entry = pool.entries[0]
+        result = SimpleNamespace(
+            response=upstream_response, winner_attempt=1, total_sent=1,
+            last_status=200, retry_codes=[], first_ok=True,
+            key_id=entry.key_id,
+            key_attempts=[{"key_id": entry.key_id, "available": True}],
+            started_at=time.time(), key_entry=entry,
+            response_started_mono=time.monotonic(),
+        )
+        service = SimpleNamespace(
+            request=lambda *args, **kwargs: None,
+            hedge_mode_for=lambda request_pool: "off",
+        )
+        store = SimpleNamespace(write=AsyncMock())
+        proxy = create_handlers(service, store)[-1]
+        request = Request({
+            "type": "http", "method": "POST", "path": "/responses",
+            "headers": [(b"content-type", b"application/json")],
+            "query_string": b"", "server": ("test", 80), "client": ("127.0.0.1", 1),
+        }, receive=AsyncMock(return_value={
+            "type": "http.request",
+            "body": b'{"model":"grok-test","stream":true}',
+            "more_body": False,
+        }))
+
+        with patch("retry_proxy.api.settings", config), \
+                patch("retry_proxy.config.settings", config), \
+                patch("retry_proxy.api.KEY_POOLS", {"https://upstream.test": pool}), \
+                patch("retry_proxy.api.match_route",
+                      return_value=("https://upstream.test", "test", "responses")), \
+                patch("retry_proxy.api._run_until_disconnect", AsyncMock(return_value=result)):
+            response = await proxy("responses", request)
+            store.write.assert_not_awaited()
+            body = b"".join([chunk async for chunk in response.body_iterator])
+
+        self.assertEqual(body, stream_body)
+        store.write.assert_awaited_once()
+        record = store.write.await_args.args[0]
+        self.assertEqual(record["final_status"], 200)
+        self.assertFalse(record["succeeded"])
+        self.assertEqual(record["stream_status"], "error")
+        self.assertEqual(record["stream_error_status"], 502)
+        self.assertFalse(record["key_attempts"][-1]["available"])
+        self.assertGreater(entry.cooldown_until, time.time())
+
     async def test_real_model_not_found_response_updates_the_used_group(self):
         config = SimpleNamespace(
             proxy_api_key="", dlp_mode="off", dlp_max_body_bytes=1024,
