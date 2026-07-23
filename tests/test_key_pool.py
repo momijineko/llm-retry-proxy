@@ -179,6 +179,72 @@ class KeyPoolStickyTests(unittest.TestCase):
         self.assertIs(pool._current, entry)
         self.assertEqual(pool._sticky_until, 220)
 
+    def test_failed_sticky_group_only_fails_over_to_same_or_higher_rate(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("current", "current", sort="0.05", group_id="current"),
+            KeyEntry("premium", "premium", sort="0.08", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool._balanced_group = "current"
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            pool.mark_success(pool.entries[1])
+            current = pool.pick()
+            pool.mark_cooldown(current, 30, status=503)
+            fallback = pool.pick()
+
+        self.assertEqual(fallback.group_id, "premium")
+        self.assertEqual(pool._failover_floor, pool._sort_value(current))
+        self.assertEqual(pool._sticky_until, 0.0)
+
+    def test_failed_cheaper_recovery_probe_returns_to_current_rate(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("current", "current", sort="0.05", group_id="current"),
+            KeyEntry("premium", "premium", sort="0.08", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool._balanced_group = "current"
+        pool._current = pool.entries[1]
+        pool._sticky_until = 90
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            probe = pool.pick()
+            self.assertEqual(probe.group_id, "cheap")
+            pool.mark_cooldown(probe, 30, status=503)
+            fallback = pool.pick()
+
+        self.assertEqual(fallback.group_id, "current")
+        self.assertEqual(pool._failover_floor, pool._sort_value(fallback))
+
+    def test_successful_failover_clears_rate_floor(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("premium", "premium", sort="0.08", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool._failover_floor = pool._sort_value(pool.entries[1])
+        fake_settings = SimpleNamespace(key_sticky=120)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            pool.mark_success(pool.entries[1])
+
+        self.assertIsNone(pool._failover_floor)
+        self.assertIs(pool._current, pool.entries[1])
+
     def test_failed_cheaper_probe_resets_recovery_and_defers_retest(self):
         pool = KeyPool([])
         pool.entries = [

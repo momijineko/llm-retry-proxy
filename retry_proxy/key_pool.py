@@ -95,6 +95,7 @@ class KeyPool:
         self._views = {}
         self._metrics = {}
         self._balanced_group = None
+        self._failover_floor = None
         self._view_entry_ids = ()
         self._workload = ("other", "*")
         self.finalize_entries()
@@ -199,9 +200,10 @@ class KeyPool:
 
     def pick(self):
         now = time.time()
-        available = [entry for entry in self.entries if entry.cooldown_until <= now]
+        eligible = self._eligible_entries()
+        available = [entry for entry in eligible if entry.cooldown_until <= now]
         if not available:
-            best = min(self.entries, key=lambda e: e.cooldown_until) if self.entries else None
+            best = min(eligible, key=lambda e: e.cooldown_until) if eligible else None
             return best
         if (self._current is not None and now < self._sticky_until
                 and self._current in available):
@@ -226,6 +228,12 @@ class KeyPool:
             return value if value.is_finite() else Decimal("Infinity")
         except InvalidOperation:
             return Decimal("Infinity")
+
+    def _eligible_entries(self):
+        if self._failover_floor is None:
+            return self.entries
+        return [entry for entry in self.entries
+                if self._sort_value(entry) >= self._failover_floor]
 
     def _group_metrics(self, entries):
         groups = {}
@@ -429,17 +437,25 @@ class KeyPool:
         return sorted(result, key=lambda item: (item["endpoint_family"], item["model"]))
 
     def has_fresh(self):
-        return any(e.cooldown_until <= time.time() for e in self.entries)
+        return any(e.cooldown_until <= time.time() for e in self._eligible_entries())
 
     def next_available_in(self):
-        if not self.entries:
+        eligible = self._eligible_entries()
+        if not eligible:
             return 0.0
-        return max(min(e.cooldown_until for e in self.entries) - time.time(), 0.0)
+        return max(min(e.cooldown_until for e in eligible) - time.time(), 0.0)
 
     def mark_cooldown(self, entry, seconds, ra_wait=None, failure_kind="upstream", backoff=False,
                       max_seconds=None, status=None):
         now = time.time()
         group_key = self._group_key(entry)
+        if self._current is not None:
+            current_sort = self._sort_value(self._current)
+            if entry is self._current:
+                self._failover_floor = current_sort
+                self._sticky_until = 0.0
+            elif self._sort_value(entry) < current_sort:
+                self._failover_floor = current_sort
         if self.strategy == "balanced" and group_key != self._balanced_group:
             metric = self._metric(group_key)
             metric["recovery_streak"] = 0
@@ -481,6 +497,7 @@ class KeyPool:
         entry.last_cooldown_s = 0.0
         self._current = entry
         self._sticky_until = time.time() + settings.key_sticky
+        self._failover_floor = None
 
     def status(self):
         now = time.time()
@@ -606,6 +623,7 @@ def clone_key_pool(pool: KeyPool) -> KeyPool:
         )
         if clone._current is not None:
             clone._sticky_until = pool._sticky_until
+    clone._failover_floor = pool._failover_floor
     return clone
 
 
