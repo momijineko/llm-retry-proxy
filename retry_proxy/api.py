@@ -63,6 +63,28 @@ def parse_request_model(body, path=""):
     return unquote(match.group(1)) if match else ""
 
 
+def parse_request_session_id(body):
+    """Extract Codex thread affinity without trusting it for authorization."""
+    try:
+        payload = json.loads(body or b"")
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    metadata = payload.get("client_metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    for value in (
+        metadata.get("thread_id"),
+        metadata.get("session_id"),
+        payload.get("prompt_cache_key"),
+    ):
+        value = str(value or "").strip()
+        if value and len(value) <= 200 and all(ord(char) >= 0x20 for char in value):
+            return value
+    return ""
+
+
 def classify_model_scope(model, endpoint_family=""):
     value = (model or "").strip().lower()
     if value.startswith("claude"):
@@ -463,6 +485,7 @@ def create_handlers(service, store, pool_sync=None):
                     logger.info(f"{_tag(request.method, path, provider, '', client_ip)} DLP豁免 count={dlp.exemptions}")
         endpoint_family = classify_endpoint(remaining)
         model_name = parse_request_model(body, remaining)
+        session_id = parse_request_session_id(body)
         model_scope = classify_model_scope(model_name, endpoint_family)
         outbound_headers = outbound_request_headers(request.headers, remaining, model_name)
         base_pool = KEY_POOLS.get(upstream)
@@ -503,7 +526,7 @@ def create_handlers(service, store, pool_sync=None):
             result = await _run_until_disconnect(
                 request,
                 service.request(request.method, url, outbound_headers,
-                                body, path, provider, model_name, request_pool),
+                                body, path, provider, model_name, request_pool, session_id),
             )
         finally:
             reset_client_ip(ip_token)
@@ -626,6 +649,7 @@ def create_handlers(service, store, pool_sync=None):
                                 _mark_key_failure(
                                     request_pool, entry, settings,
                                     stream_error_status or 0,
+                                    session_id=session_id,
                                 )
                         error_tag = f" 内嵌HTTP={stream_error_status}" if stream_error_status else ""
                         if succeeded:

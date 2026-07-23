@@ -268,7 +268,7 @@ async def key_pools_source_settings(request: Request):
         body = await _json_object(request)
         return await pool_sync.set_source_settings(
             body.get("source_id"), body.get("strategy"), body.get("target_ttft_s", 5.0),
-            body.get("check_model", ""),
+            body.get("check_model", ""), body.get("session_affinity"),
         )
     except PoolSyncError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

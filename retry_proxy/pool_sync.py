@@ -62,6 +62,7 @@ class PoolSyncManager:
         pool = KeyPool([], source.get("provider") or self.config.provider)
         pool.strategy = source.get("strategy", "cost")
         pool.target_ttft_s = float(source.get("target_ttft_s", 5.0))
+        pool.session_affinity = bool(source.get("session_affinity", False))
         disabled_key_ids = {
             str(value) for value in source.get("disabled_key_ids", [])
             if value not in (None, "")
@@ -150,6 +151,7 @@ class PoolSyncManager:
                     source["group_model_rejections"] = {}
                 source.setdefault("strategy", "cost")
                 source.setdefault("target_ttft_s", 5.0)
+                source.setdefault("session_affinity", False)
                 source.setdefault("check_model", "")
                 source["disabled_key_ids"] = [
                     str(value) for value in source.get("disabled_key_ids", [])
@@ -271,6 +273,7 @@ class PoolSyncManager:
                 "id": source_id, "adapter": adapter_name, "base_url": base_url,
                 "provider": requested_provider, "session": {}, "entries": [],
                 "route_prefix": "", "strategy": "cost", "target_ttft_s": 5.0,
+                "session_affinity": False,
                 "check_model": "", "disabled_key_ids": [], "group_model_cache": {},
                 "group_model_rejections": {},
                 "last_sync_at": "", "last_attempt_at": "", "last_error": "",
@@ -502,7 +505,7 @@ class PoolSyncManager:
             return self.status()
 
     async def set_source_settings(self, source_id, strategy, target_ttft_s=5.0,
-                                  check_model=""):
+                                  check_model="", session_affinity=None):
         if strategy not in KEY_POOL_STRATEGIES:
             raise PoolSyncError("号池策略必须是 cost、ttft 或 balanced")
         try:
@@ -518,10 +521,15 @@ class PoolSyncManager:
             source["strategy"] = strategy
             source["target_ttft_s"] = target
             source["check_model"] = str(check_model or "").strip()
+            if session_affinity is not None:
+                source["session_affinity"] = bool(session_affinity)
             pool = self.pools.get(self._pool_url(source))
             if pool is not None:
                 pool.strategy = strategy
                 pool.target_ttft_s = target
+                pool.session_affinity = bool(source.get("session_affinity", False))
+                if not pool.session_affinity:
+                    pool._session_routes.clear()
                 pool._selection_count = 0
                 pool._balanced_group = None
                 for metric in pool._metrics.values():
@@ -532,6 +540,9 @@ class PoolSyncManager:
                 for view in pool._views.values():
                     view.strategy = strategy
                     view.target_ttft_s = target
+                    view.session_affinity = pool.session_affinity
+                    if not view.session_affinity:
+                        view._session_routes.clear()
                     view._selection_count = 0
                     view._balanced_group = None
                     for metric in view._metrics.values():
@@ -840,6 +851,7 @@ class PoolSyncManager:
                 "last_error": source.get("last_error", ""),
                 "strategy": source.get("strategy", "cost"),
                 "target_ttft_s": source.get("target_ttft_s", 5.0),
+                "session_affinity": bool(source.get("session_affinity", False)),
                 "ttft_policy": {
                     "stale_after": getattr(self.config, "key_ttft_stale_after", 300),
                     "retest_interval": getattr(self.config, "key_ttft_retest_interval", 60),

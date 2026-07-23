@@ -616,16 +616,18 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         view._selection_count = 19
 
         status = await manager.set_source_settings(
-            source_id, "balanced", 4.5, "test-model",
+            source_id, "balanced", 4.5, "test-model", True,
         )
 
         source = status["sources"][0]
         self.assertEqual(source["strategy"], "balanced")
         self.assertEqual(source["target_ttft_s"], 4.5)
+        self.assertTrue(source["session_affinity"])
         self.assertEqual(source["ttft_policy"]["confirmations"], 2)
         self.assertIn("scheduler_views", source)
         self.assertEqual(source["check_model"], "test-model")
         self.assertEqual(pool.strategy, "balanced")
+        self.assertTrue(pool.session_affinity)
         self.assertEqual(pool.target_ttft_s, 4.5)
         self.assertEqual(pool._selection_count, 0)
         self.assertEqual(view._selection_count, 0)
@@ -633,6 +635,7 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
             persisted = json.load(f)
         self.assertEqual(persisted["sources"][0]["strategy"], "balanced")
         self.assertEqual(persisted["sources"][0]["check_model"], "test-model")
+        self.assertTrue(persisted["sources"][0]["session_affinity"])
 
     async def test_availability_check_cools_failed_group_and_reset_clears_it(self):
         manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})

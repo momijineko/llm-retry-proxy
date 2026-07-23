@@ -18,6 +18,8 @@ _RUNTIME_FIELDS = (
 )
 
 KEY_POOL_STRATEGIES = {"cost", "ttft", "balanced"}
+_SESSION_ROUTE_LIMIT = 10000
+_SESSION_ROUTE_IDLE = 3600.0
 
 
 def _is_image_model(model):
@@ -91,6 +93,8 @@ class KeyPool:
         self.entries = [KeyEntry(k[0], k[1] if len(k) > 1 else "") if isinstance(k, tuple) else KeyEntry(k) for k in keys]
         self.provider, self._current, self._sticky_until = provider, None, 0.0
         self.strategy, self.target_ttft_s = "cost", 5.0
+        self.session_affinity = False
+        self._session_routes = {}
         self._selection_count = 0
         self._views = {}
         self._metrics = {}
@@ -194,15 +198,61 @@ class KeyPool:
             view.entries = selected
             view.strategy = self.strategy
             view.target_ttft_s = self.target_ttft_s
+            view.session_affinity = self.session_affinity
             view._view_entry_ids = entry_ids
             view._workload = workload
             self._views[signature] = view
         else:
             self._views[signature].strategy = self.strategy
             self._views[signature].target_ttft_s = self.target_ttft_s
+            self._views[signature].session_affinity = self.session_affinity
         return self._views[signature]
 
-    def pick(self):
+    def _session_route(self, session_id):
+        now = time.time()
+        route = self._session_routes.get(session_id)
+        if route is None:
+            if len(self._session_routes) >= _SESSION_ROUTE_LIMIT:
+                cutoff = now - _SESSION_ROUTE_IDLE
+                self._session_routes = {
+                    key: value for key, value in self._session_routes.items()
+                    if value.get("last_used", 0.0) >= cutoff
+                }
+                if len(self._session_routes) >= _SESSION_ROUTE_LIMIT:
+                    oldest = min(
+                        self._session_routes,
+                        key=lambda key: self._session_routes[key].get("last_used", 0.0),
+                    )
+                    self._session_routes.pop(oldest, None)
+            route = {
+                "current": None, "sticky_until": 0.0,
+                "failover_floor": None, "last_used": now,
+            }
+            self._session_routes[session_id] = route
+        route["last_used"] = now
+        return route
+
+    def _pick_for_session(self, session_id):
+        route = self._session_route(session_id)
+        now = time.time()
+        if route["current"] is None and route["failover_floor"] is None:
+            return self.pick()
+        eligible = self.entries if route["failover_floor"] is None else [
+            entry for entry in self.entries
+            if self._sort_value(entry) >= route["failover_floor"]
+        ]
+        available = [entry for entry in eligible if entry.cooldown_until <= now]
+        current = route["current"]
+        if current is not None and current in available:
+            route["sticky_until"] = max(route["sticky_until"], now + settings.key_sticky)
+            return current
+        if not available:
+            return min(eligible, key=lambda entry: entry.cooldown_until) if eligible else None
+        return min(available, key=lambda entry: (self._sort_value(entry), self.entries.index(entry)))
+
+    def pick(self, session_id=None):
+        if self.session_affinity and session_id:
+            return self._pick_for_session(session_id)
         now = time.time()
         eligible = self._eligible_entries()
         available = [entry for entry in eligible if entry.cooldown_until <= now]
@@ -495,20 +545,29 @@ class KeyPool:
         return max(min(e.cooldown_until for e in eligible) - time.time(), 0.0)
 
     def mark_cooldown(self, entry, seconds, ra_wait=None, failure_kind="upstream", backoff=False,
-                      max_seconds=None, status=None):
+                      max_seconds=None, status=None, session_id=None):
         now = time.time()
         group_key = self._group_key(entry)
         if group_key == self._active_probe_group:
             self._active_probe_group = None
             self._probe_reserved_until = 0.0
-        if self._current is not None:
-            current_sort = self._sort_value(self._current)
-            if entry is self._current:
-                self._failover_floor = current_sort
-                self._sticky_until = 0.0
+        session_route = self._session_route(session_id) if self.session_affinity and session_id else None
+        current = session_route["current"] if session_route is not None else self._current
+        if current is not None:
+            current_sort = self._sort_value(current)
+            if entry is current:
+                if session_route is not None:
+                    session_route["failover_floor"] = current_sort
+                    session_route["sticky_until"] = 0.0
+                else:
+                    self._failover_floor = current_sort
+                    self._sticky_until = 0.0
             elif self._sort_value(entry) < current_sort:
-                self._failover_floor = current_sort
-        if self.strategy == "balanced" and group_key != self._balanced_group:
+                if session_route is not None:
+                    session_route["failover_floor"] = current_sort
+                else:
+                    self._failover_floor = current_sort
+        if session_route is None and self.strategy == "balanced" and group_key != self._balanced_group:
             metric = self._metric(group_key)
             metric["recovery_streak"] = 0
             metric["probe_reserved_until"] = 0.0
@@ -541,7 +600,7 @@ class KeyPool:
         entry.last_cooldown_s = max(entry.last_cooldown_s, cooldown) if already else cooldown
         entry.last_fail_ts = now
 
-    def mark_success(self, entry):
+    def mark_success(self, entry, session_id=None):
         entry.cooldown_until = 0.0
         entry.consecutive_failures = 0
         entry.last_failure_kind = ""
@@ -549,6 +608,16 @@ class KeyPool:
         entry.last_cooldown_s = 0.0
         now = time.time()
         group_key = self._group_key(entry)
+        if self.session_affinity and session_id:
+            route = self._session_route(session_id)
+            current = route["current"]
+            if (current is not None and self._sort_value(entry) < self._sort_value(current)
+                    and route["failover_floor"] is None):
+                return
+            route["current"] = entry
+            route["sticky_until"] = now + settings.key_sticky
+            route["failover_floor"] = None
+            return
         if self.strategy == "balanced" and group_key == self._active_probe_group:
             return
         previous_group = self._group_key(self._current) if self._current is not None else None
@@ -671,6 +740,7 @@ _AUTH_STRIP_HEADERS = {"authorization", settings.key_auth_header}
 def clone_key_pool(pool: KeyPool) -> KeyPool:
     """Copy pool configuration and health without sharing mutable entries."""
     clone = KeyPool([], pool.provider)
+    clone.session_affinity = pool.session_affinity
     clone.entries = []
     for entry in pool.entries:
         copied = KeyEntry(
@@ -730,6 +800,7 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
     previous.provider = replacement.provider
     previous.strategy = replacement.strategy
     previous.target_ttft_s = replacement.target_ttft_s
+    previous.session_affinity = replacement.session_affinity
     previous._current = next((entry for entry in merged if entry.key == current_key), None)
     if previous._current is None:
         previous._sticky_until = 0.0

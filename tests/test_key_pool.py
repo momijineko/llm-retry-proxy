@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from retry_proxy.api import (classify_endpoint, classify_model_scope,
-                             is_model_rejection_response, parse_request_model)
+                             is_model_rejection_response, parse_request_model,
+                             parse_request_session_id)
 from retry_proxy.key_pool import KeyEntry, KeyPool, headers_with_key, replace_key_pool
 from retry_proxy.retry import (KeyPoolWaitTimeout, RetryProxy, _key_available_for_status,
                                _key_failure_policy, _mark_key_failure, _pick_key,
@@ -14,6 +15,37 @@ from retry_proxy.retry import (KeyPoolWaitTimeout, RetryProxy, _key_available_fo
 
 
 class KeyPoolStickyTests(unittest.TestCase):
+    def test_codex_session_id_is_extracted_from_client_metadata(self):
+        body = json.dumps({
+            "model": "gpt-5.6-sol",
+            "prompt_cache_key": "cache-id",
+            "client_metadata": {"session_id": "session-id", "thread_id": "thread-id"},
+        }).encode()
+        self.assertEqual(parse_request_session_id(body), "thread-id")
+
+    def test_session_affinity_isolated_and_fails_over_by_rate(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.01", group_id="cheap"),
+            KeyEntry("premium", "premium", sort="0.20", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.session_affinity = True
+
+        session_a = pool.pick("session-a")
+        session_b = pool.pick("session-b")
+        self.assertEqual(session_a.group_id, "cheap")
+        self.assertEqual(session_b.group_id, "cheap")
+        pool.mark_success(session_a, session_id="session-a")
+        pool.mark_success(pool.entries[1], session_id="session-b")
+
+        pool.mark_cooldown(session_a, 30, status=503, session_id="session-a")
+        self.assertEqual(pool.pick("session-a").group_id, "premium")
+        self.assertEqual(pool.pick("session-b").group_id, "premium")
+        pool.mark_success(pool.entries[1], session_id="session-a")
+        pool.mark_success(pool.entries[0], session_id="session-a")
+        self.assertEqual(pool.pick("session-a").group_id, "premium")
+
     def test_ttft_strategy_selects_fastest_group(self):
         pool = KeyPool([])
         pool.entries = [
