@@ -70,28 +70,27 @@ class KeyPoolStickyTests(unittest.TestCase):
         pool.finalize_entries()
         pool.strategy = "balanced"
         pool.target_ttft_s = 5
-        cheap = pool.pick()
-        pool.record_ttft(cheap, 6.0)
-        pool.record_ttft(cheap, 6.0)
-        pool._sticky_until = 0
-        self.assertEqual(pool.pick().group_id, "good")
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60,
+                                        key_ttft_hysteresis=0.1,
+                                        key_ttft_confirmations=2)
 
-        cheap_metric = pool._metric("cheap")
-        cheap_metric["last_ts"] -= 301
-        cheap_metric["next_probe_at"] = 0
-        pool._sticky_until = 0
-        probe = pool.pick()
-        self.assertEqual(probe.group_id, "cheap")
-        pool.record_ttft(probe, 4.4)
-        pool._sticky_until = 0
-        self.assertEqual(pool.pick().group_id, "good")
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            pool.mark_success(pool.entries[1])
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=160):
+            probe = pool.pick()
+            self.assertEqual(probe.group_id, "cheap")
+            pool.mark_success(probe)
+            self.assertEqual(pool._current.group_id, "good")
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=161):
+            pool.record_ttft(probe, 4.4)
 
-        cheap_metric["next_probe_at"] = 0
-        pool._sticky_until = 0
-        second_probe = pool.pick()
-        pool.record_ttft(second_probe, 4.3)
-        pool._sticky_until = 0
-        self.assertEqual(pool.pick().group_id, "cheap")
+        self.assertEqual(pool._current.group_id, "cheap")
+        self.assertEqual(pool._balanced_group, "cheap")
+        self.assertEqual(pool._sticky_until, 281)
 
     def test_balanced_allows_only_one_inflight_cheaper_probe(self):
         pool = KeyPool([])
@@ -102,12 +101,16 @@ class KeyPoolStickyTests(unittest.TestCase):
         pool.finalize_entries()
         pool.strategy = "balanced"
         pool._balanced_group = "good"
+        pool._current = pool.entries[1]
+        pool._next_probe_at = 100
+        fake_settings = SimpleNamespace(key_ttft_retest_interval=60)
 
-        self.assertEqual(pool.pick().group_id, "cheap")
-        pool._sticky_until = 0
-        self.assertEqual(pool.pick().group_id, "good")
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            self.assertEqual(pool.pick().group_id, "cheap")
+            self.assertEqual(pool.pick().group_id, "good")
 
-    def test_balanced_sticky_window_defers_cheaper_probe_until_expiry(self):
+    def test_balanced_retests_inside_fixed_sticky_window(self):
         pool = KeyPool([])
         pool.entries = [
             KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
@@ -117,17 +120,77 @@ class KeyPoolStickyTests(unittest.TestCase):
         pool.strategy = "balanced"
         pool._balanced_group = "good"
         pool._current = pool.entries[1]
-        pool._sticky_until = 200
+        pool._sticky_until = 220
+        pool._next_probe_at = 160
         fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
                                         key_ttft_retest_interval=60)
 
         with patch("retry_proxy.key_pool.settings", fake_settings):
-            with patch("retry_proxy.key_pool.time.time", return_value=100):
+            with patch("retry_proxy.key_pool.time.time", return_value=159):
                 self.assertEqual(pool.pick().group_id, "good")
                 self.assertEqual(pool._metric("cheap")["probe_reserved_until"], 0)
-            with patch("retry_proxy.key_pool.time.time", return_value=221):
+                self.assertEqual(pool._sticky_until, 220)
+            with patch("retry_proxy.key_pool.time.time", return_value=160):
                 self.assertEqual(pool.pick().group_id, "cheap")
-                self.assertGreater(pool._metric("cheap")["probe_reserved_until"], 221)
+                self.assertGreater(pool._metric("cheap")["probe_reserved_until"], 160)
+                self.assertEqual(pool._sticky_until, 220)
+
+    def test_balanced_probe_cursor_advances_across_expired_window(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap-1", "cheap-1", sort="0.02", group_id="cheap-1"),
+            KeyEntry("cheap-2", "cheap-2", sort="0.03", group_id="cheap-2"),
+            KeyEntry("current", "current", sort="0.10", group_id="current"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool._balanced_group = "current"
+        pool._current = pool.entries[2]
+        pool._sticky_until = 150
+        pool._next_probe_at = 100
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            first_probe = pool.pick()
+            self.assertEqual(first_probe.group_id, "cheap-1")
+            pool.mark_cooldown(first_probe, 30, status=503)
+            fallback = pool.pick()
+            self.assertEqual(fallback.group_id, "current")
+            pool.mark_success(fallback)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=160):
+            self.assertLess(pool._sticky_until, 160)
+            self.assertEqual(pool.pick().group_id, "cheap-2")
+
+    def test_slow_successful_recovery_probe_keeps_current_anchor(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("current", "current", sort="0.05", group_id="current"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 5
+        pool._balanced_group = "current"
+        pool._current = pool.entries[1]
+        pool._next_probe_at = 100
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60,
+                                        key_ttft_hysteresis=0.1,
+                                        key_ttft_confirmations=2)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            probe = pool.pick()
+            pool.mark_success(probe)
+            pool.record_ttft(probe, 4.6)
+
+        self.assertEqual(pool._current.group_id, "current")
+        self.assertEqual(pool._balanced_group, "current")
+        self.assertEqual(pool._metric("cheap")["next_probe_at"], 400)
 
     def test_balanced_sticky_window_does_not_block_failed_key_failover(self):
         pool = KeyPool([])
@@ -177,6 +240,22 @@ class KeyPoolStickyTests(unittest.TestCase):
             pool.mark_success(entry)
 
         self.assertIs(pool._current, entry)
+        self.assertEqual(pool._sticky_until, 220)
+
+    def test_balanced_success_does_not_extend_fixed_window(self):
+        pool = KeyPool([("key", "key")])
+        pool.strategy = "balanced"
+        entry = pool.entries[0]
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_retest_interval=60)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            pool.mark_success(entry)
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=150):
+            self.assertIs(pool.pick(), entry)
+            pool.mark_success(entry)
+
         self.assertEqual(pool._sticky_until, 220)
 
     def test_failed_sticky_group_only_fails_over_to_same_or_higher_rate(self):
@@ -705,6 +784,45 @@ class KeyPoolCooldownWaitTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(proxy.hedge_mode_for(None), "stagger")
         self.assertEqual(proxy.hedge_mode_for(KeyPool([("key", "key")])), "off")
+
+    async def test_failed_recovery_probe_returns_to_anchor_without_scanning_other_cheap_groups(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap-1", "cheap-1", sort="0.02", group_id="cheap-1"),
+            KeyEntry("cheap-2", "cheap-2", sort="0.03", group_id="cheap-2"),
+            KeyEntry("anchor", "anchor", sort="0.10", group_id="anchor"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool._balanced_group = "anchor"
+        pool._current = pool.entries[2]
+        pool._next_probe_at = 0
+        config = SimpleNamespace(
+            hedge_mode="off", max_retries=5, retry_interval=0,
+            retry_interval_429=5, retry_backoff=False, retry_backoff_max=60,
+            retry_backoff_429=True, retry_backoff_max_429=60,
+            key_cooldown=30, key_cooldown_5xx=30, key_cooldown_429=60,
+            key_cooldown_auth=1800, key_cooldown_max=3600,
+            key_cooldown_backoff=True, key_pool_wait_timeout=120,
+        )
+        responses = [
+            httpx.Response(503, request=httpx.Request("POST", "https://upstream.test")),
+            httpx.Response(200, request=httpx.Request("POST", "https://upstream.test")),
+        ]
+        proxy = RetryProxy(config=config, client=object())
+        proxy._send = AsyncMock(side_effect=responses)
+
+        result = await proxy.request(
+            "POST", "https://upstream.test", {}, b'{}',
+            "v1/chat", "test", "model", pool,
+        )
+
+        self.assertEqual(result.total_sent, 2)
+        self.assertEqual(
+            [attempt["key_id"] for attempt in result.key_attempts],
+            ["cheap-1|0.02", "anchor|0.10"],
+        )
+        self.assertEqual(result.response.status_code, 200)
 
     async def test_pick_waits_instead_of_bypassing_an_open_circuit(self):
         pool = KeyPool([("key", "key")])

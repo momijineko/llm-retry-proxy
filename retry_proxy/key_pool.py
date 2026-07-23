@@ -96,6 +96,10 @@ class KeyPool:
         self._metrics = {}
         self._balanced_group = None
         self._failover_floor = None
+        self._probe_cursor_group = None
+        self._next_probe_at = 0.0
+        self._probe_reserved_until = 0.0
+        self._active_probe_group = None
         self._view_entry_ids = ()
         self._workload = ("other", "*")
         self.finalize_entries()
@@ -205,6 +209,10 @@ class KeyPool:
         if not available:
             best = min(eligible, key=lambda e: e.cooldown_until) if eligible else None
             return best
+        if self.strategy == "balanced":
+            selected_group = self._pick_group(available)
+            available = [entry for entry in available if self._group_key(entry) == selected_group]
+            return available[0]
         if (self._current is not None and now < self._sticky_until
                 and self._current in available):
             self._sticky_until = now + settings.key_sticky
@@ -271,23 +279,42 @@ class KeyPool:
         now = time.time()
         ordered = sorted(groups.items(), key=lambda pair: (pair[1]["sort"], pair[1]["index"]))
         available_keys = {key for key, _ in ordered}
+        current_key = self._group_key(self._current) if self._current is not None else None
         if self._balanced_group not in available_keys:
-            self._balanced_group = ordered[0][0]
-        current = groups[self._balanced_group]
-        stale_after = max(float(self._setting("key_ttft_stale_after", 300)), 0.0)
+            self._balanced_group = current_key if current_key in available_keys else ordered[0][0]
+        if current_key not in available_keys:
+            return self._balanced_group
+
+        current = groups[current_key]
+        interval = max(float(self._setting("key_ttft_retest_interval", 60)), 0.0)
         reserve_for = max(float(self._setting("key_ttft_retest_interval", 60)), 1.0)
         cheaper = [(key, item) for key, item in ordered
                    if item["sort"] < current["sort"]]
-        for key, item in cheaper:
-            metric = self._metric(key)
-            stale = not metric["last_ts"] or now - metric["last_ts"] >= stale_after
-            confirmation_due = bool(metric["recovery_streak"]
-                                    and now >= metric["next_probe_at"])
-            if ((stale or confirmation_due) and now >= metric["next_probe_at"]
-                    and now >= metric["probe_reserved_until"]):
-                metric["probe_reserved_until"] = now + reserve_for
+        if self._active_probe_group is not None and now >= self._probe_reserved_until:
+            self._active_probe_group = None
+        if (cheaper and now >= self._next_probe_at
+                and self._active_probe_group is None):
+            # Reserve one cheaper group per interval and advance the cursor immediately.
+            keys = [key for key, _ in cheaper]
+            start = 0
+            if self._probe_cursor_group in keys:
+                start = (keys.index(self._probe_cursor_group) + 1) % len(keys)
+            for offset in range(len(keys)):
+                key = keys[(start + offset) % len(keys)]
+                metric = self._metric(key)
+                if now < metric["next_probe_at"]:
+                    continue
+                self._probe_cursor_group = key
+                self._next_probe_at = now + interval
+                self._probe_reserved_until = now + reserve_for
+                self._active_probe_group = key
+                metric["probe_reserved_until"] = self._probe_reserved_until
                 return key
-        return self._balanced_group
+
+        if (self._balanced_group in groups
+                and groups[self._balanced_group]["sort"] > current["sort"]):
+            return self._balanced_group
+        return current_key
 
     def _pick_group(self, entries):
         groups = self._group_metrics(entries)
@@ -325,7 +352,29 @@ class KeyPool:
             confirmations = max(int(self._setting("key_ttft_confirmations", 2)), 1)
             stale_wait = max(float(self._setting("key_ttft_stale_after", 300)), 0.0)
             retest_wait = max(float(self._setting("key_ttft_retest_interval", 60)), 0.0)
-            if group_key == self._balanced_group:
+            is_recovery_probe = group_key == self._active_probe_group
+            if is_recovery_probe:
+                current_groups = self._group_metrics(self.entries)
+                current_key = (self._group_key(self._current)
+                               if self._current is not None else None)
+                current = current_groups.get(current_key)
+                candidate = current_groups.get(group_key)
+                is_cheaper = bool(current and candidate and candidate["sort"] < current["sort"])
+                if is_cheaper and seconds < lower:
+                    metric["recovery_streak"] = 0
+                    metric["slow_streak"] = 0
+                    self._balanced_group = group_key
+                    self._current = entry
+                    self._sticky_until = now + settings.key_sticky
+                    self._failover_floor = None
+                    self._probe_cursor_group = None
+                    self._next_probe_at = now + retest_wait
+                elif is_cheaper:
+                    metric["recovery_streak"] = 0
+                    metric["next_probe_at"] = now + stale_wait
+                self._active_probe_group = None
+                self._probe_reserved_until = 0.0
+            elif group_key == self._balanced_group:
                 metric["slow_streak"] = metric["slow_streak"] + 1 if seconds > upper else 0
                 if metric["slow_streak"] >= confirmations:
                     groups = self._group_metrics([
@@ -449,6 +498,9 @@ class KeyPool:
                       max_seconds=None, status=None):
         now = time.time()
         group_key = self._group_key(entry)
+        if group_key == self._active_probe_group:
+            self._active_probe_group = None
+            self._probe_reserved_until = 0.0
         if self._current is not None:
             current_sort = self._sort_value(self._current)
             if entry is self._current:
@@ -495,8 +547,21 @@ class KeyPool:
         entry.last_failure_kind = ""
         entry.last_failure_status = None
         entry.last_cooldown_s = 0.0
+        now = time.time()
+        group_key = self._group_key(entry)
+        if self.strategy == "balanced" and group_key == self._active_probe_group:
+            return
+        previous_group = self._group_key(self._current) if self._current is not None else None
         self._current = entry
-        self._sticky_until = time.time() + settings.key_sticky
+        if self.strategy != "balanced" or group_key != previous_group:
+            self._sticky_until = now + settings.key_sticky
+        if self.strategy == "balanced" and group_key != previous_group:
+            self._balanced_group = group_key
+            self._next_probe_at = now + max(
+                float(self._setting("key_ttft_retest_interval", 60)), 0.0,
+            )
+            if previous_group is None:
+                self._probe_cursor_group = None
         self._failover_floor = None
 
     def status(self):
@@ -624,6 +689,10 @@ def clone_key_pool(pool: KeyPool) -> KeyPool:
         if clone._current is not None:
             clone._sticky_until = pool._sticky_until
     clone._failover_floor = pool._failover_floor
+    clone._probe_cursor_group = pool._probe_cursor_group
+    clone._next_probe_at = pool._next_probe_at
+    clone._probe_reserved_until = pool._probe_reserved_until
+    clone._active_probe_group = pool._active_probe_group
     return clone
 
 
