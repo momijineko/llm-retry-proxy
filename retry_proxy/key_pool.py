@@ -202,8 +202,6 @@ class KeyPool:
         available = [entry for entry in self.entries if entry.cooldown_until <= now]
         if not available:
             best = min(self.entries, key=lambda e: e.cooldown_until) if self.entries else None
-            if best is not None:
-                self._current, self._sticky_until = best, now + settings.key_sticky
             return best
         if (self._current is not None and now < self._sticky_until
                 and self._current in available):
@@ -215,7 +213,6 @@ class KeyPool:
             selected_group = self._pick_group(available)
             available = [entry for entry in available if self._group_key(entry) == selected_group]
         entry = available[0]
-        self._current, self._sticky_until = entry, now + settings.key_sticky
         return entry
 
     @staticmethod
@@ -482,6 +479,8 @@ class KeyPool:
         entry.last_failure_kind = ""
         entry.last_failure_status = None
         entry.last_cooldown_s = 0.0
+        self._current = entry
+        self._sticky_until = time.time() + settings.key_sticky
 
     def status(self):
         now = time.time()

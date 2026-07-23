@@ -148,6 +148,37 @@ class KeyPoolStickyTests(unittest.TestCase):
                 patch("retry_proxy.key_pool.time.time", return_value=100):
             self.assertEqual(pool.pick().group_id, "good")
 
+    def test_failed_candidate_does_not_create_or_renew_sticky_window(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("good", "good", sort="0.05", group_id="good"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            candidate = pool.pick()
+            pool.mark_cooldown(candidate, 30, status=503)
+
+        self.assertIsNone(pool._current)
+        self.assertEqual(pool._sticky_until, 0.0)
+
+    def test_successful_candidate_starts_and_renews_sticky_window(self):
+        pool = KeyPool([("key", "key")])
+        entry = pool.entries[0]
+        fake_settings = SimpleNamespace(key_sticky=120)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            pool.mark_success(entry)
+
+        self.assertIs(pool._current, entry)
+        self.assertEqual(pool._sticky_until, 220)
+
     def test_failed_cheaper_probe_resets_recovery_and_defers_retest(self):
         pool = KeyPool([])
         pool.entries = [
@@ -381,6 +412,8 @@ class KeyPoolStickyTests(unittest.TestCase):
                 self.assertEqual(pool._sticky_until, 280)
             with patch("retry_proxy.key_pool.time.time", return_value=281):
                 self.assertEqual(pool.pick().key_id, "cheap")
+                self.assertEqual(pool._sticky_until, 280)
+                pool.mark_success(pool.entries[0])
                 self.assertEqual(pool._sticky_until, 401)
 
     def test_model_and_path_rules_create_isolated_pools(self):
