@@ -205,15 +205,15 @@ class KeyPool:
             if best is not None:
                 self._current, self._sticky_until = best, now + settings.key_sticky
             return best
+        if (self._current is not None and now < self._sticky_until
+                and self._current in available):
+            self._sticky_until = now + settings.key_sticky
+            return self._current
         if self.strategy == "cost":
             selected_group = None
         else:
             selected_group = self._pick_group(available)
             available = [entry for entry in available if self._group_key(entry) == selected_group]
-        if (self._current is not None and now < self._sticky_until
-                and self._current in available):
-            self._sticky_until = now + settings.key_sticky
-            return self._current
         entry = available[0]
         self._current, self._sticky_until = entry, now + settings.key_sticky
         return entry

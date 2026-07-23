@@ -41,6 +41,7 @@ class KeyPoolStickyTests(unittest.TestCase):
         pool.record_ttft(first, 5.6)
         self.assertEqual(pool.pick().group_id, "slow")
         pool.record_ttft(first, 5.7)
+        pool._sticky_until = 0
         self.assertEqual(pool.pick().group_id, "good")
 
     def test_balanced_strategy_keeps_group_inside_hysteresis_band(self):
@@ -72,19 +73,24 @@ class KeyPoolStickyTests(unittest.TestCase):
         cheap = pool.pick()
         pool.record_ttft(cheap, 6.0)
         pool.record_ttft(cheap, 6.0)
+        pool._sticky_until = 0
         self.assertEqual(pool.pick().group_id, "good")
 
         cheap_metric = pool._metric("cheap")
         cheap_metric["last_ts"] -= 301
         cheap_metric["next_probe_at"] = 0
+        pool._sticky_until = 0
         probe = pool.pick()
         self.assertEqual(probe.group_id, "cheap")
         pool.record_ttft(probe, 4.4)
+        pool._sticky_until = 0
         self.assertEqual(pool.pick().group_id, "good")
 
         cheap_metric["next_probe_at"] = 0
+        pool._sticky_until = 0
         second_probe = pool.pick()
         pool.record_ttft(second_probe, 4.3)
+        pool._sticky_until = 0
         self.assertEqual(pool.pick().group_id, "cheap")
 
     def test_balanced_allows_only_one_inflight_cheaper_probe(self):
@@ -98,7 +104,49 @@ class KeyPoolStickyTests(unittest.TestCase):
         pool._balanced_group = "good"
 
         self.assertEqual(pool.pick().group_id, "cheap")
+        pool._sticky_until = 0
         self.assertEqual(pool.pick().group_id, "good")
+
+    def test_balanced_sticky_window_defers_cheaper_probe_until_expiry(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("good", "good", sort="0.05", group_id="good"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool._balanced_group = "good"
+        pool._current = pool.entries[1]
+        pool._sticky_until = 200
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings):
+            with patch("retry_proxy.key_pool.time.time", return_value=100):
+                self.assertEqual(pool.pick().group_id, "good")
+                self.assertEqual(pool._metric("cheap")["probe_reserved_until"], 0)
+            with patch("retry_proxy.key_pool.time.time", return_value=221):
+                self.assertEqual(pool.pick().group_id, "cheap")
+                self.assertGreater(pool._metric("cheap")["probe_reserved_until"], 221)
+
+    def test_balanced_sticky_window_does_not_block_failed_key_failover(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("good", "good", sort="0.05", group_id="good"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool._balanced_group = "cheap"
+        pool._current = pool.entries[0]
+        pool._sticky_until = 200
+        pool.entries[0].cooldown_until = 150
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings), \
+                patch("retry_proxy.key_pool.time.time", return_value=100):
+            self.assertEqual(pool.pick().group_id, "good")
 
     def test_failed_cheaper_probe_resets_recovery_and_defers_retest(self):
         pool = KeyPool([])
