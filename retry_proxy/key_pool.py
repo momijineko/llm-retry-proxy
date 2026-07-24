@@ -97,6 +97,8 @@ class KeyPool:
         self._session_routes = {}
         self._selection_count = 0
         self._views = {}
+        self._view_access_sequence = 0
+        self._last_view_access = 0
         self._metrics = {}
         self._balanced_group = None
         self._failover_floor = None
@@ -206,6 +208,8 @@ class KeyPool:
             self._views[signature].strategy = self.strategy
             self._views[signature].target_ttft_s = self.target_ttft_s
             self._views[signature].session_affinity = self.session_affinity
+        self._view_access_sequence += 1
+        self._views[signature]._last_view_access = self._view_access_sequence
         return self._views[signature]
 
     def _session_route(self, session_id):
@@ -482,7 +486,12 @@ class KeyPool:
         stale_after = max(float(self._setting("key_ttft_stale_after", 300)), 0.0)
         confirmations = max(int(self._setting("key_ttft_confirmations", 2)), 1)
         result = []
+        latest_views = {}
         for view in self._views.values():
+            current = latest_views.get(view._workload)
+            if current is None or view._last_view_access >= current._last_view_access:
+                latest_views[view._workload] = view
+        for view in latest_views.values():
             groups = view._group_metrics(view.entries)
             if not groups:
                 continue

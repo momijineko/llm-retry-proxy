@@ -407,6 +407,36 @@ class KeyPoolStickyTests(unittest.TestCase):
         self.assertEqual(status[0]["current_group_name"], "Good")
         self.assertEqual(status[0]["cheaper_groups"][0]["group_name"], "Cheap")
 
+    def test_scheduler_status_keeps_latest_view_when_route_candidates_change(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("first", "first", group_id="first", group_name="First",
+                     routing_capabilities={
+                         "endpoint_families": ["chat"],
+                         "model_patterns": ["model-a"],
+                         "model_list_known": True,
+                     }),
+            KeyEntry("second", "second", group_id="second", group_name="Second",
+                     routing_capabilities={
+                         "endpoint_families": ["chat"],
+                         "model_patterns": ["model-a"],
+                         "model_list_known": True,
+                     }),
+        ]
+        pool.finalize_entries()
+        first_view = pool.for_request("model-a", "v1/chat/completions", "chat")
+        first_view.mark_success(first_view.entries[0])
+        pool.entries[0].routing_capabilities["rejected_models"] = ("model-a",)
+        latest_view = pool.for_request("model-a", "v1/chat/completions", "chat")
+        latest_view.mark_success(latest_view.entries[0])
+
+        status = pool.scheduler_status()
+
+        self.assertIsNot(first_view, latest_view)
+        self.assertEqual(len(status), 1)
+        self.assertEqual(status[0]["model"], "model-a")
+        self.assertEqual(status[0]["current_group_name"], "Second")
+
     def test_group_members_share_ttft_samples(self):
         pool = KeyPool([])
         pool.entries = [
