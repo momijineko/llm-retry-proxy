@@ -141,6 +141,8 @@ class Settings:
     retry_backoff_max_429: float = float(os.getenv("RETRY_BACKOFF_MAX_429", "60"))
     retry_backoff: bool = _bool("RETRY_BACKOFF", "false")
     retry_backoff_max: float = float(os.getenv("RETRY_BACKOFF_MAX", "60"))
+    # Retry-After 头封顶值（秒）；0 表示不封顶，完全尊重上游
+    retry_after_max: float = float(os.getenv("RETRY_AFTER_MAX", "0"))
     max_retries: int = int(os.getenv("MAX_RETRIES", "60"))
     retry_status_codes: frozenset = frozenset(int(x) for x in os.getenv("RETRY_STATUS_CODES", "503,502,504,524,529,429").split(",") if x.strip())
     retry_broad: bool = _bool("RETRY_BROAD", "false")
@@ -308,6 +310,7 @@ HOT_PARSERS = {
     "RETRY_INTERVAL_429": ("retry_interval_429", float),
     "RETRY_BACKOFF_429": ("retry_backoff_429", _parse_bool),
     "RETRY_BACKOFF_MAX_429": ("retry_backoff_max_429", float),
+    "RETRY_AFTER_MAX": ("retry_after_max", float),
     "HEDGE_MODE": ("hedge_mode", lambda v: str(v).strip().lower()),
     "MAX_CONCURRENT": ("max_concurrent", int),
     "KEY_COOLDOWN": ("key_cooldown", float),

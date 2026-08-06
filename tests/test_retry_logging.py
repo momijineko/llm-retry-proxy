@@ -3,13 +3,13 @@ import logging
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
 from retry_proxy.config import LogCaptureHandler, log_capture, logger
 from retry_proxy.key_pool import KeyEntry, KeyPool
-from retry_proxy.retry import RequestAttemptBudget, RetryProxy
+from retry_proxy.retry import RequestAttemptBudget, RetryProxy, capped_retry_after
 
 
 class RetryLoggingTests(unittest.IsolatedAsyncioTestCase):
@@ -438,6 +438,109 @@ class RetryLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.response.status_code, 200)
         self.assertEqual(len(sent_at), 3)
         self.assertGreaterEqual(min(b - a for a, b in zip(sent_at, sent_at[1:])), 0.02)
+
+
+class RetryAfterCapTests(unittest.TestCase):
+    # RETRY_AFTER_MAX 封顶逻辑：0 不封顶，正数对 Retry-After 解析值封顶
+
+    def test_cap_zero_returns_parsed_value_uncapped(self):
+        self.assertEqual(capped_retry_after("38318", 0), 38318.0)
+        self.assertEqual(capped_retry_after("5", 0), 5.0)
+
+    def test_cap_positive_limits_large_retry_after(self):
+        self.assertEqual(capped_retry_after("38318", 600), 600.0)
+        self.assertEqual(capped_retry_after("300", 600), 300.0)
+
+    def test_cap_empty_value_returns_none(self):
+        self.assertIsNone(capped_retry_after("", 600))
+        self.assertIsNone(capped_retry_after(None, 600))
+
+    def test_cap_does_not_alter_negative_retry_after(self):
+        # 负数/非法值解析失败返回 None，不因封顶而误判
+        self.assertIsNone(capped_retry_after("abc", 600))
+
+
+class RetryAfterCapRequestTests(unittest.IsolatedAsyncioTestCase):
+    # 429 带超大 Retry-After 时，RETRY_AFTER_MAX 应同时封顶重试等待与 key 熔断
+
+    async def test_large_retry_after_is_capped_for_both_wait_and_cooldown(self):
+        config = SimpleNamespace(
+            hedge_mode="off", max_retries=2, retry_interval=0,
+            retry_interval_429=5, retry_backoff=False,
+            retry_backoff_429=False, retry_backoff_max=0,
+            retry_backoff_max_429=60, retry_after_max=600,
+            key_cooldown=30, key_cooldown_5xx=30,
+            key_cooldown_429=60, key_cooldown_auth=1800,
+            key_cooldown_backoff=False, key_cooldown_max=3600,
+            key_pool_wait_timeout=0.5,
+        )
+        pool = KeyPool([("key", "key")])
+        proxy = RetryProxy(config=config, client=object())
+        sleep_wait = []
+
+        async def send(*_args):
+            return httpx.Response(
+                429, headers={"retry-after": "38318"},
+                request=httpx.Request("POST", "https://upstream.test"),
+            )
+
+        async def fake_sleep(wait, _pool=None, _pool_wait=0.0, _wait_timeout=None):
+            sleep_wait.append(wait)
+            await asyncio.sleep(0)
+
+        proxy._send = send
+        with patch("retry_proxy.retry._sleep_before_retry", new=fake_sleep), \
+                patch("retry_proxy.retry.time.time", return_value=1000):
+            result = await proxy.request(
+                "POST", "https://upstream.test", {}, b"{}",
+                "v1/chat", "test", "model", pool,
+            )
+
+        self.assertIsNone(result.response)
+        # 重试等待被封顶到 600s，而非上游的 38318s
+        self.assertTrue(sleep_wait)
+        self.assertLessEqual(sleep_wait[0], 600)
+        # key 熔断被同样封顶：cooldown_until 不超过 当前时间 + 600s
+        self.assertLessEqual(pool.entries[0].cooldown_until, 1000 + 600)
+
+    async def test_zero_cap_keeps_uncapped_retry_after(self):
+        config = SimpleNamespace(
+            hedge_mode="off", max_retries=2, retry_interval=0,
+            retry_interval_429=5, retry_backoff=False,
+            retry_backoff_429=False, retry_backoff_max=0,
+            retry_backoff_max_429=60, retry_after_max=0,
+            key_cooldown=30, key_cooldown_5xx=30,
+            key_cooldown_429=60, key_cooldown_auth=1800,
+            key_cooldown_backoff=False, key_cooldown_max=3600,
+            key_pool_wait_timeout=0.5,
+        )
+        pool = KeyPool([("key", "key")])
+        proxy = RetryProxy(config=config, client=object())
+        sleep_wait = []
+
+        async def send(*_args):
+            return httpx.Response(
+                429, headers={"retry-after": "38318"},
+                request=httpx.Request("POST", "https://upstream.test"),
+            )
+
+        async def fake_sleep(wait, _pool=None, _pool_wait=0.0, _wait_timeout=None):
+            sleep_wait.append(wait)
+            await asyncio.sleep(0)
+
+        proxy._send = send
+        with patch("retry_proxy.retry._sleep_before_retry", new=fake_sleep), \
+                patch("retry_proxy.retry.time.time", return_value=1000):
+            result = await proxy.request(
+                "POST", "https://upstream.test", {}, b"{}",
+                "v1/chat", "test", "model", pool,
+            )
+
+        self.assertIsNone(result.response)
+        self.assertTrue(sleep_wait)
+        # 默认行为保持不变：完全尊重上游
+        self.assertGreater(sleep_wait[0], 600)
+        self.assertGreater(pool.entries[0].cooldown_until, 1000 + 600)
 
 
 if __name__ == "__main__":
