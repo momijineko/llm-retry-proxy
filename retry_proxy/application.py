@@ -55,6 +55,7 @@ def _log_startup():
     logger.info(f"代理: trust_env={'是(跟随系统代理)' if settings.trust_env else '否(直连)'}")
     logger.info(f"管理端鉴权: {'已启用' if settings.admin_password else '未配置（统计与日志端点已禁用）'}")
     logger.info(f"号池访问鉴权: {'已启用' if settings.proxy_api_key else '未配置（兼容开放模式）'}")
+    logger.info(f"API文档: {'已启用' if settings.api_docs_enabled else '未启用'}")
     logger.info(
         f"IP黑名单: {len(settings.ip_blacklist)}条, "
         f"可信代理: {len(settings.trusted_proxy_ips)}条"
@@ -146,7 +147,39 @@ async def lifespan(_app):
         store.flush()
 
 
-app = FastAPI(title="llm-retry-proxy", lifespan=lifespan)
+def _api_docs_options(enabled):
+    return {
+        "docs_url": "/docs" if enabled else None,
+        "redoc_url": "/redoc" if enabled else None,
+        "openapi_url": "/openapi.json" if enabled else None,
+        "swagger_ui_oauth2_redirect_url": "/docs/oauth2-redirect" if enabled else None,
+    }
+
+
+def _register_disabled_api_docs(target_app):
+    async def api_docs_disabled():
+        return HTMLResponse("api docs disabled", status_code=404)
+
+    # 精确拦截，避免禁用 FastAPI 内置路由后这些路径落入代理 catch-all。
+    for path in (
+        "/docs", "/docs/", "/docs/oauth2-redirect",
+        "/redoc", "/redoc/", "/openapi.json", "/openapi.json/",
+    ):
+        target_app.add_api_route(
+            path,
+            api_docs_disabled,
+            methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+            include_in_schema=False,
+        )
+
+
+app = FastAPI(
+    title="llm-retry-proxy",
+    lifespan=lifespan,
+    **_api_docs_options(settings.api_docs_enabled),
+)
+if not settings.api_docs_enabled:
+    _register_disabled_api_docs(app)
 app.add_middleware(
     IPBlocklistMiddleware,
     blacklist=settings.ip_blacklist,

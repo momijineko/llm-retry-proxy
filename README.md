@@ -100,6 +100,7 @@ docker compose -f compose.yaml -f compose.legacy.yaml up -d --build
 | `LISTEN_HOST` | `0.0.0.0` | 监听地址 |
 | `LISTEN_PORT` | `8080` | 监听端口 |
 | `SETTINGS_PAGE_ENABLED` | `false` | 是否启用配置中心页面（/settings）；关闭时页面与导航入口不展示 |
+| `API_DOCS_ENABLED` | `false` | 是否公开 `/docs`、`/redoc` 和 `/openapi.json`；生产环境默认关闭 |
 | `IP_BLACKLIST` | 空 | 拒绝访问的客户端 IP/CIDR，多个值用逗号分隔 |
 | `TRUSTED_PROXY_IPS` | 本机与 Docker 172.x | 允许提供真实客户端 IP 转发头的反向代理 IP/CIDR |
 | `IP_AUTO_BAN_THRESHOLD` | `20` | 检测窗口内访问不同路径达到该数量时自动封禁；`0` 关闭 |

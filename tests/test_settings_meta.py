@@ -140,6 +140,16 @@ class SettingsMetaTests(unittest.TestCase):
         self.assertLess(keys.index("ADMIN_PASSWORD"), keys.index("SETTINGS_PAGE_ENABLED"))
         self.assertLess(keys.index("SETTINGS_PAGE_ENABLED"), keys.index("ADMIN_COOKIE_SECURE"))
 
+    def test_api_docs_enabled_metadata(self):
+        item = CONFIG_ITEMS_BY_KEY["API_DOCS_ENABLED"]
+        self.assertEqual(item.default, "false")
+        self.assertEqual(item.group, "服务与访问控制")
+        self.assertEqual(item.apply, RESTART)
+        self.assertEqual(item.type, "bool")
+        keys = [item.key for item in CONFIG_ITEMS if item.group == "服务与访问控制"]
+        self.assertLess(keys.index("SETTINGS_PAGE_ENABLED"), keys.index("API_DOCS_ENABLED"))
+        self.assertLess(keys.index("API_DOCS_ENABLED"), keys.index("ADMIN_COOKIE_SECURE"))
+
     def test_ip_ban_keys_metadata(self):
         # IP 访问控制 7 键：分组、生效方式、敏感性与类型登记正确，且顺序位于号池鉴权键之间
         ip_keys = [

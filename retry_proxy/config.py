@@ -165,6 +165,7 @@ class Settings:
     admin_password: str = (os.getenv("ADMIN_PASSWORD") or os.getenv("ADMIN_TOKEN", "")).strip()
     admin_cookie_secure: bool = _bool("ADMIN_COOKIE_SECURE", "false")
     settings_page_enabled: bool = _bool("SETTINGS_PAGE_ENABLED", "false")
+    api_docs_enabled: bool = _bool("API_DOCS_ENABLED", "false")
     proxy_api_key: str = os.getenv("PROXY_API_KEY", "").strip()
     ip_blacklist: tuple = parse_ip_networks(os.getenv("IP_BLACKLIST", ""), "IP_BLACKLIST")
     trusted_proxy_ips: tuple = parse_ip_networks(

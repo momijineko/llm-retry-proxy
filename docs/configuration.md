@@ -23,6 +23,7 @@
 | `ADMIN_PASSWORD` | 空 | 管理页面密码；未配置时 `/stats*`、`/logs*` 和 `/key-pools` 禁用。兼容旧 `ADMIN_TOKEN` |
 | `ADMIN_COOKIE_SECURE` | `false` | HTTPS 部署时设为 `true`，限制登录 Cookie 仅通过 HTTPS 发送 |
 | `SETTINGS_PAGE_ENABLED` | `false` | 是否启用配置中心页面（/settings）；关闭时页面与导航入口不展示 |
+| `API_DOCS_ENABLED` | `false` | 是否公开 FastAPI 的 `/docs`、`/redoc` 和 `/openapi.json`；关闭时这些路径直接返回 `404`，不会转发上游 |
 | `PROXY_API_KEY` | 空 | 下游使用号池的凭据；未携带或不匹配时仅作普通透传 |
 | `IP_BLACKLIST` | 空 | 拒绝访问的客户端 IP 或 CIDR，多个值用逗号分隔；同时覆盖 HTTP 和 WebSocket |
 | `TRUSTED_PROXY_IPS` | `127.0.0.0/8,::1,172.16.0.0/12` | 可信反向代理的直连 IP 或 CIDR；默认覆盖本机及 Docker 172.x 网络 |
