@@ -111,6 +111,7 @@ docker compose -f compose.yaml -f compose.legacy.yaml up -d --build
 | `MAX_RETRIES` | `60` | 单个请求的实际上游尝试总上限；`0` 表示无限重试 |
 | `RETRY_INTERVAL` | `1.0` | 非 429 错误的重试间隔/退避基数 |
 | `RETRY_INTERVAL_429` | `5.0` | 429 专用重试间隔/退避基数 |
+| `RETRY_AFTER_MAX` | `0` | 上游 `Retry-After` 头的最大贡献（秒）；`0` 表示不封顶 |
 | `RETRY_BROAD` | `off` | 是否把鉴权和网络错误也纳入重试/换 key |
 | `HEDGE_MODE` | `off` | `off` 串行；`race` / `stagger` 竞速 |
 | `KEY_POOL_FILE` | 空 | CSV 号池文件；优先于 `KEY_POOLS` |

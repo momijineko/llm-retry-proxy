@@ -459,6 +459,10 @@ class RetryAfterCapTests(unittest.TestCase):
         # 负数/非法值解析失败返回 None，不因封顶而误判
         self.assertIsNone(capped_retry_after("abc", 600))
 
+    def test_cap_ignores_non_finite_retry_after(self):
+        self.assertIsNone(capped_retry_after("nan", 600))
+        self.assertIsNone(capped_retry_after("inf", 600))
+
 
 class RetryAfterCapRequestTests(unittest.IsolatedAsyncioTestCase):
     # 429 带超大 Retry-After 时，RETRY_AFTER_MAX 应同时封顶重试等待与 key 熔断
