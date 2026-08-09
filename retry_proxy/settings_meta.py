@@ -188,6 +188,9 @@ CONFIG_ITEMS: list[ConfigItem] = [
                apply=HOT, description="429 默认启用指数退避", name="429 指数退避"),
     ConfigItem("RETRY_BACKOFF_MAX_429", "float", "60", group="重试与退避",
                apply=HOT, unit="秒", description="429 指数退避最高等待（秒）", name="429 退避上限"),
+    ConfigItem("RETRY_AFTER_MAX", "float", "0", group="重试与退避",
+               apply=HOT, unit="秒", description="上游 Retry-After 头封顶值（秒）；0 表示不封顶，完全尊重",
+               name="Retry-After 封顶"),
 
     # ---------------------------------------------------------------- 竞速模式
     ConfigItem("HEDGE_MODE", "enum", "off", ("off", "race", "stagger"), group="竞速模式",

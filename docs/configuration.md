@@ -110,6 +110,7 @@ IP 和到期时间（永久封禁使用 `0`），不保存扫描路径。
 | `RETRY_INTERVAL_429` | `5.0` | 429 基础重试间隔（秒）；优先尊重上游 `Retry-After` |
 | `RETRY_BACKOFF_429` | `true` | 是否对连续 429 启用指数退避和抖动 |
 | `RETRY_BACKOFF_MAX_429` | `60` | 429 指数退避上限（秒） |
+| `RETRY_AFTER_MAX` | `0` | 上游 `Retry-After` 头封顶值（秒）；`0` 表示不封顶，完全尊重上游。非 0 时重试等待与 key 熔断均不超过该值，用于抵御异常巨大的 `Retry-After` |
 
 ## 竞速模式
 

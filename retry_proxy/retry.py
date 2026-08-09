@@ -103,6 +103,15 @@ def parse_retry_after(value):
     except (TypeError, ValueError, OverflowError): return None
 
 
+def capped_retry_after(value, max_seconds):
+    """解析 Retry-After 头并按配置封顶；max_seconds<=0 表示不封顶"""
+    wait = parse_retry_after(value)
+    if wait is None: return None
+    if max_seconds and max_seconds > 0:
+        return min(wait, max_seconds)
+    return wait
+
+
 def is_host_level_error(exc): return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
 def filter_headers(headers, skip): return {k: v for k, v in headers.items() if k.lower() not in skip}
 
@@ -381,7 +390,7 @@ class RetryProxy:
                         last_status = result.status_code; retry_codes.append(result.status_code); close.append(result)
                         key_failure_statuses.append(result.status_code)
                         if result.status_code == 429:
-                            retry_after = parse_retry_after(result.headers.get("retry-after"))
+                            retry_after = capped_retry_after(result.headers.get("retry-after"), self.config.retry_after_max)
                             ra_max = max(ra_max, retry_after or 0)
                         self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(result.status_code)} #{attempt}({time.time() - t0:.1f}s)")
                     else:
@@ -494,7 +503,7 @@ class RetryProxy:
                     _record_key_attempt(key_attempts, entry, False)
                     last_status = result.status_code; retry_codes.append(result.status_code)
                     self.logger.warning(f"{_tag(method, path, provider, model)}{key_tag} {_sc(result.status_code)} #{attempt} 在飞{len(in_flight)}")
-                    ra = parse_retry_after(result.headers.get("retry-after")) if result.status_code == 429 else None
+                    ra = capped_retry_after(result.headers.get("retry-after"), self.config.retry_after_max) if result.status_code == 429 else None
                     _mark_key_failure(pool, entry, self.config, result.status_code, ra, session_id=session_id)
                     if pool and not pool.has_fresh(): next_allowed = max(next_allowed, now + pool.next_available_in())
                     if result.status_code == 429:
@@ -705,7 +714,7 @@ class RetryProxy:
             html_bad_request = pool is not None and _is_html_bad_request(response)
             if model and (_should_retry(response.status_code) or html_bad_request):
                 last_status = response.status_code; retry_codes.append(response.status_code)
-                ra = parse_retry_after(response.headers.get("retry-after")) if response.status_code == 429 else None
+                ra = capped_retry_after(response.headers.get("retry-after"), self.config.retry_after_max) if response.status_code == 429 else None
                 try: await response.aread()
                 except Exception: pass
                 detail = _response_error_message(response)
