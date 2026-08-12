@@ -52,6 +52,35 @@ class DlpTests(unittest.TestCase):
         self.assertIn(value, cleaned["messages"][0]["content"])
         self.assertIn(value, cleaned["messages"][2]["content"])
 
+    def test_responses_protocol_ids_are_not_redacted(self):
+        token = "sk-A1b2C3d4E5f6G7h8J9k0LmNoPqRsTuVx"
+        payload = {"input": [
+            {"type": "message", "role": "user", "id": token,
+             "content": [{"type": "input_text", "text": token}]},
+            {"type": "function_call_output", "id": token, "call_id": token,
+             "output": token},
+        ]}
+        result = self.inspect(payload)
+        cleaned = json.loads(result.body)["input"]
+
+        self.assertEqual(cleaned[0]["id"], token)
+        self.assertEqual(cleaned[1]["id"], token)
+        self.assertEqual(cleaned[1]["call_id"], token)
+        self.assertNotIn(token, cleaned[0]["content"][0]["text"])
+        self.assertNotIn(token, cleaned[1]["output"])
+
+    def test_chat_message_structure_fields_are_not_redacted(self):
+        token = "sk-A1b2C3d4E5f6G7h8J9k0LmNoPqRsTuVx"
+        payload = {"messages": [
+            {"role": "tool", "id": token, "tool_call_id": token, "content": token},
+        ]}
+        result = self.inspect(payload)
+        cleaned = json.loads(result.body)["messages"][0]
+
+        self.assertEqual(cleaned["id"], token)
+        self.assertEqual(cleaned["tool_call_id"], token)
+        self.assertNotIn(token, cleaned["content"])
+
     def test_explicit_exemption_wins(self):
         text = MARKER_START + "skipped value" + MARKER_END
         result = self.inspect({"input": text}, allow_exemptions=True)

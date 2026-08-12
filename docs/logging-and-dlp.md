@@ -38,7 +38,7 @@ DLP_MAX_BODY_BYTES=16777216
 
 DLP 默认递归检查两层 Base64/Base64URL、hex 和 percent 编码；解码后的内容命中时处理整个原始编码片段。候选数量、累计解码字节数和递归深度分别由 `DLP_DECODE_MAX_CANDIDATES`、`DLP_DECODE_MAX_BYTES` 和 `DLP_DECODE_DEPTH` 限制，避免超长或嵌套输入耗尽资源。`redact`/`block` 模式下解码预算耗尽会返回 HTTP 413，避免攻击者用伪候选挤掉真实秘密。启用号池时还会在内存中精确匹配当前 Key，未知厂商格式也能被识别；日志只记录 `known_secret`，不会记录 Key 值。
 
-对于 Chat/Responses/Anthropic 风格请求，DLP 每次都会处理所有用户消息和工具输出，确保本地文件、MCP、Shell 等工具返回的凭据也会在转发副本中脱敏；system/developer 指令、assistant 内容和 JSON Schema 不参与扫描。无法识别结构的通用 JSON 请求会回退到递归扫描全部字符串。
+对于 Chat/Responses/Anthropic 风格请求，DLP 每次都会处理所有用户消息的 `content` 和工具输出的 `content`/`output`，确保本地文件、MCP、Shell 等工具返回的凭据也会在转发副本中脱敏。协议结构字段（包括 `id`、`call_id`、`tool_call_id`、`type` 和 `status`）、system/developer 指令、assistant 内容和 JSON Schema 不参与扫描。无法识别结构的通用 JSON 请求会回退到递归扫描全部字符串。
 
 检测规则集中维护在带注释的 `retry_proxy/dlp_rules.yaml`。该文件说明了正则、标志、校验器和敏感 JSON 字段名的配置方式；需要定制时可以直接编辑，或通过 `DLP_RULE_FILE` 指向另一份 YAML/JSON 规则文件。规则文件会在启用 DLP 时随服务启动校验，格式或正则错误会阻止服务启动，避免静默失去防护。
 

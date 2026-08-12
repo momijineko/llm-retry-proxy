@@ -455,13 +455,27 @@ def inspect_json_body(body, enabled_rules, start_marker, end_marker, strip_marke
             return output
         return value
 
+    def visit_sensitive_item(item):
+        output = dict(item)
+        fields = ()
+        if item.get("role") in ("user", "tool"):
+            fields = ("content",)
+        elif item.get("type") in (
+                "function_call_output", "computer_call_output",
+                "local_shell_call_output", "mcp_call_output"):
+            fields = ("output", "content")
+        for field in fields:
+            if field in item:
+                output[field] = visit(item[field])
+        return output
+
     def visit_sensitive_items(items):
         output = list(items)
         indexes = [index for index, item in enumerate(items) if isinstance(item, dict) and (
             item.get("role") in ("user", "tool") or item.get("type") in (
                 "function_call_output", "computer_call_output", "local_shell_call_output", "mcp_call_output"))]
         if indexes:
-            for index in indexes: output[index] = visit(items[index])
+            for index in indexes: output[index] = visit_sensitive_item(items[index])
         else:
             output = [visit(item) if isinstance(item, str) else item for item in items]
         return output
