@@ -12,7 +12,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from .access_control import resolve_client_ip
 from .config import can_use_key_pool, log_capture, logger, settings
-from .dlp import inspect_json_body
+from .dlp import decode_inbound_body, inspect_json_body
 from .routes import ROUTES, is_excluded_path, match_route
 from .key_pool import KEY_POOLS
 from .retry import (
@@ -637,7 +637,21 @@ def create_handlers(service, store, pool_sync=None):
                     '"message":"Request body exceeds the maximum allowed size"}}',
                     status_code=413, media_type="application/json",
                 )
+        body_encoding = ""
         if settings.dlp_mode in ("audit", "block", "redact"):
+            if body:
+                # 压缩请求体（gzip/deflate）先受限解压再检查，否则编码正文可整体绕过 DLP
+                original_body = body
+                body, body_encoding = decode_inbound_body(
+                    body, request.headers.get("content-encoding", ""),
+                    settings.dlp_max_body_bytes,
+                )
+                if body is None:
+                    logger.warning(f"{_tag(log_method, path, provider, '', client_ip)} DLP解压请求体超限")
+                    if settings.dlp_mode in ("block", "redact"):
+                        return Response('{"error":{"type":"dlp_body_too_large","message":"Request body exceeds DLP inspection limit"}}', status_code=413, media_type="application/json")
+                    # audit 模式：保持压缩原文透传，语义不变
+                    body, body_encoding = original_body, ""
             if len(body) > settings.dlp_max_body_bytes:
                 logger.warning(f"{_tag(log_method, path, provider, '', client_ip)} DLP请求体超限 bytes={len(body)}")
                 if settings.dlp_mode in ("block", "redact"):
@@ -689,6 +703,12 @@ def create_handlers(service, store, pool_sync=None):
         session_id = parse_request_session_id(body)
         model_scope = classify_model_scope(model_name, endpoint_family)
         outbound_headers = outbound_request_headers(request.headers, remaining, model_name)
+        if body_encoding:
+            # 已按明文解压转发，移除 Content-Encoding 避免上游二次解压
+            outbound_headers = {
+                name: value for name, value in outbound_headers.items()
+                if name.lower() != "content-encoding"
+            }
         if endpoint_family == "responses":
             request_logger = logger.debug
             request_logger(

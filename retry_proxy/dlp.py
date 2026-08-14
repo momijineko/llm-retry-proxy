@@ -3,6 +3,7 @@ import binascii
 import json
 import math
 import re
+import zlib
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
@@ -26,6 +27,71 @@ _HEX_CANDIDATE = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}){16,}(?![0-9A-Fa
 _PERCENT_CANDIDATE = re.compile(
     r"(?<![A-Za-z0-9._~%-])(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2}){16,}(?![A-Za-z0-9._~%-])"
 )
+
+
+def _inflate_limited(data, wbits, max_bytes):
+    """受限解压：输出一旦超过 max_bytes 即返回 None，避免解压炸弹撑爆内存。"""
+    decompressor = zlib.decompressobj(wbits)
+    parts = []
+    total = 0
+    buffer = data
+    while buffer:
+        chunk = decompressor.decompress(buffer, max_bytes + 1 - total)
+        if total + len(chunk) > max_bytes:
+            return None
+        if chunk:
+            parts.append(chunk)
+            total += len(chunk)
+        buffer = decompressor.unconsumed_tail
+    tail = decompressor.flush()
+    if total + len(tail) > max_bytes:
+        return None
+    parts.append(tail)
+    return b"".join(parts)
+
+
+def decode_inbound_body(body, content_encoding, max_bytes):
+    """按入站 Content-Encoding 解压请求体，供 DLP 检查明文内容。
+
+    返回 ``(处理后的 body, 实际解码的编码)``：
+    - 解压成功返回 ``(明文 body, 编码)``；
+    - 解压结果超过 max_bytes 返回 ``(None, 编码)``，调用方应按
+      DLP 请求体超限语义处理（redact/block 拦截）；
+    - 不支持的编码或解压失败返回 ``(原 body, "")``，由调用方按既有
+      uninspectable/fail-closed 语义处理。
+
+    解压后请求体按明文转发，调用方需同时移除转发头中的
+    Content-Encoding，避免上游二次解压。
+    """
+    encoding = (content_encoding or "").strip().lower()
+    if not body or encoding in ("", "identity"):
+        return body, ""
+    try:
+        max_bytes = int(max_bytes)
+    except (TypeError, ValueError):
+        max_bytes = 0
+    if max_bytes <= 0:
+        return body, ""
+    if encoding in ("gzip", "x-gzip"):
+        try:
+            decoded = _inflate_limited(body, zlib.MAX_WBITS | 16, max_bytes)
+        except (zlib.error, OSError, EOFError, ValueError):
+            return body, ""
+        if decoded is None:
+            return None, encoding
+        return decoded, encoding
+    if encoding == "deflate":
+        # deflate 可能是 zlib 包装或裸流，逐一尝试
+        for wbits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+            try:
+                decoded = _inflate_limited(body, wbits, max_bytes)
+            except (zlib.error, OSError, EOFError, ValueError):
+                continue
+            if decoded is None:
+                return None, encoding
+            return decoded, encoding
+        return body, ""
+    return body, ""
 
 
 @dataclass(frozen=True)

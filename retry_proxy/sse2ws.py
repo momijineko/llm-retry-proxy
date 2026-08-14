@@ -617,6 +617,8 @@ class ResponsesWSBridge:
             else:
                 headers.pop("openai-beta", None)
         headers.pop("content-length", None)
+        # 桥接自行构造 JSON 请求体，客户端握手的压缩声明不再适用
+        headers.pop("content-encoding", None)
         headers["content-type"] = "application/json"
         return headers
 

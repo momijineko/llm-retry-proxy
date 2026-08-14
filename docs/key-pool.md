@@ -103,6 +103,12 @@ KEY_AUTH_SCHEME=           # 空值，直接放裸 key，不加 Bearer 前缀
 | `provider` | 本地日志与统计使用的供应商标签 |
 | `credentials` | 由适配器声明的认证字段；不会通过状态接口返回 |
 
+出于 SSRF 防护，`base_url` 默认只接受公网地址：私有、回环、链路本地、
+云元数据地址（如 `169.254.169.254`、`metadata.google.internal`）以及解析
+结果含非公网地址的域名都会被拒绝。自建局域网 `sub2api`/`new-api` 的场景
+设置 `KEY_POOL_ALLOW_PRIVATE_BASE_URL=true` 可关闭该校验（仅对管理端
+提交的连接生效，请自行评估内网暴露面）。
+
 ### 手动添加 Key
 
 号池页面提供“手动添加 Key”，适合没有在线同步接口、只需维护少量 Key

@@ -81,6 +81,49 @@ async def _resolve_public_url_destination(url):
     return parsed, resolved
 
 
+_CLOUD_METADATA_HOSTNAMES = (
+    "metadata.google.internal", "metadata.tencentyun.com", "metadata.goog",
+)
+
+
+async def _validate_base_url_destination(url):
+    """反 SSRF 校验号池连接的 base_url（connect / 手动添加共用）。
+
+    默认拒绝回环、链路本地、云元数据与私有网段目标（IP 字面量与域名
+    解析结果都检查），防止管理凭据被用于探测内网；自建局域网上游
+    （sub2api/new-api）需设置 KEY_POOL_ALLOW_PRIVATE_BASE_URL=true。
+    """
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise PoolSyncError("上游地址必须是有效的 http:// 或 https:// 地址")
+    host = parsed.hostname.strip().lower().rstrip(".")
+    if host == "localhost" or host in _CLOUD_METADATA_HOSTNAMES:
+        raise PoolSyncError("上游地址不能指向回环或云元数据地址")
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        address = None
+    if address is not None:
+        if not address.is_global:
+            raise PoolSyncError("上游地址不能指向私有、回环或链路本地地址")
+        return
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise PoolSyncError("上游地址端口无效") from exc
+    try:
+        resolved = await asyncio.get_running_loop().getaddrinfo(
+            parsed.hostname, port, type=socket.SOCK_STREAM,
+        )
+    except OSError as exc:
+        raise PoolSyncError(f"上游地址域名解析失败: {exc}") from exc
+    addresses = {item[4][0] for item in resolved if item[4]}
+    if not addresses:
+        raise PoolSyncError("上游地址域名未解析到地址")
+    if any(_is_private_or_loopback_host(address) for address in addresses):
+        raise PoolSyncError("上游地址域名解析到私有、回环或非公网地址")
+
+
 def _pinned_url(parsed, address):
     """Replace only the connection host while preserving path and query."""
     host = f"[{address}]" if ipaddress.ip_address(address).version == 6 else address
@@ -491,6 +534,8 @@ class PoolSyncManager:
         base_url = (base_url or self.default_url).strip().rstrip("/")
         if not base_url.startswith(("http://", "https://")):
             raise PoolSyncError("上游地址必须以 http:// 或 https:// 开头")
+        if not getattr(self.config, "key_pool_allow_private_base_url", False):
+            await _validate_base_url_destination(base_url)
         adapter = self._adapter(adapter_name)
         source_id = _source_id(adapter_name, base_url)
         existing = self.sources.get(source_id)
@@ -1386,6 +1431,8 @@ class PoolSyncManager:
         base_url = base_url.rstrip("/")
         if not base_url.startswith(("http://", "https://")):
             raise PoolSyncError("上游地址必须以 http:// 或 https:// 开头")
+        if not getattr(self.config, "key_pool_allow_private_base_url", False):
+            await _validate_base_url_destination(base_url)
         if not isinstance(keys, list) or not keys:
             raise PoolSyncError("Key 列表必须是非空数组")
         requested_provider = _manual_text(provider, "provider")

@@ -22,6 +22,8 @@
 | `LISTEN_PORT` | `8080` | 监听端口 |
 | `ADMIN_PASSWORD` | 空 | 管理页面密码；未配置时 `/stats*`、`/logs*` 和 `/key-pools` 禁用。兼容旧 `ADMIN_TOKEN` |
 | `ADMIN_COOKIE_SECURE` | `false` | HTTPS 部署时设为 `true`，限制登录 Cookie 仅通过 HTTPS 发送 |
+| `ADMIN_LOGIN_MAX_ATTEMPTS` | `5` | 登录连续失败达到该次数后触发锁定；`0` = 关闭限速 |
+| `ADMIN_LOGIN_LOCKOUT_SECONDS` | `300` | 登录锁定持续时间（秒）；重复锁定逐次翻倍，上限 8 倍 |
 | `SETTINGS_PAGE_ENABLED` | `false` | 是否启用配置中心页面（/settings）；关闭时页面与导航入口不展示 |
 | `API_DOCS_ENABLED` | `false` | 是否公开 FastAPI 的 `/docs`、`/redoc` 和 `/openapi.json`；关闭时这些路径直接返回 `404`，不会转发上游 |
 | `PROXY_API_KEY` | 空 | 下游使用号池的凭据；未携带或不匹配时仅作普通透传 |
@@ -126,6 +128,7 @@ IP 和到期时间（永久封禁使用 `0`），不保存扫描路径。
 |---|---|---|
 | `KEY_POOL_FILE` | 空 | 号池 CSV 文件，优先于 `KEY_POOLS`。详见[号池与在线同步](key-pool.md) |
 | `KEY_POOLS` | 空 | 环境变量形式的号池配置。详见[号池与在线同步](key-pool.md) |
+| `KEY_POOL_ALLOW_PRIVATE_BASE_URL` | `false` | 允许号池连接/手动添加使用私有或内网上游地址；默认禁止以防范 SSRF |
 | `KEY_AUTH_HEADER` | `authorization` | 注入上游 key 使用的 Header 名 |
 | `KEY_AUTH_SCHEME` | `Bearer` | 鉴权 scheme；设为空时只发送裸 key |
 
@@ -183,6 +186,7 @@ IP 和到期时间（永久封禁使用 `0`），不保存扫描路径。
 |---|---|---|
 | `LOG_DIR` | `logs` | 日志目录；明细按天拆分，累计汇总存 `_summary.json` |
 | `LOG_RETENTION_DAYS` | `30` | 明细日志保留天数；`0` = 不清理，累计汇总不受影响 |
+| `LOG_CAPTURE_MAXLEN` | `5000` | 进程内实时日志缓冲条数；`0` = 不限制（内存随运行持续增长） |
 | `LOG_LEVEL` | `INFO` | 控制台日志级别 |
 | `LOG_FILE` | `retry_log.jsonl` | 旧版单文件日志路径，仅用于自动迁移 |
 

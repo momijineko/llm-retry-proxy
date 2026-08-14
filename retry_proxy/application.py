@@ -1,8 +1,10 @@
 import asyncio
 import html
+import math
 import os
 import secrets
 import sys
+import time
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs
 
@@ -10,11 +12,13 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from .access_control import IPBlocklistMiddleware
+from .access_control import IPBlocklistMiddleware, resolve_client_ip
+from .admin_session import create_session as create_admin_session
+from .admin_session import revoke as revoke_admin_session
 from .api import _with_settings_nav, create_handlers
 from .pool_sync import PoolSyncManager
 from .sync_adapters import PoolSyncError
-from .config import HOT_PARSERS, admin_session_value, log_capture, logger, require_admin, settings
+from .config import HOT_PARSERS, log_capture, logger, require_admin, settings
 from .dlp import load_policy
 from .env_file import load_env_file, update_env_file
 from .key_pool import KEY_POOLS
@@ -196,14 +200,70 @@ health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy = cre
 )
 
 
-def _login_page(next_path="/stats", failed=False):
+# 登录限速状态（进程内）：按客户端 IP 记录连续失败次数与锁定到期时间。
+# 与 IP 动态封禁互补：后者按"窗口内访问不同路径"计数，无法覆盖对
+# 单一 /admin/login 路径的暴力尝试。
+_LOGIN_STATE_MAX = 10000
+_login_attempts: dict = {}  # ip -> {"failures","locked_until","multiplier","last_seen"}
+
+
+def _login_attempt_state(ip, now):
+    state = _login_attempts.get(ip)
+    if state is None:
+        if len(_login_attempts) >= _LOGIN_STATE_MAX:
+            stale = [
+                key for key, value in _login_attempts.items()
+                if value["locked_until"] <= now and now - value["last_seen"] > 3600
+            ]
+            for key in stale:
+                _login_attempts.pop(key, None)
+            if len(_login_attempts) >= _LOGIN_STATE_MAX:
+                oldest = min(_login_attempts, key=lambda key: _login_attempts[key]["last_seen"])
+                _login_attempts.pop(oldest, None)
+        state = {"failures": 0, "locked_until": 0.0, "multiplier": 1, "last_seen": now}
+        _login_attempts[ip] = state
+    state["last_seen"] = now
+    return state
+
+
+def _login_locked(ip, now):
+    """返回剩余锁定秒数；未锁定返回 0。ADMIN_LOGIN_MAX_ATTEMPTS<=0 时恒不锁定。"""
+    if settings.admin_login_max_attempts <= 0:
+        return 0.0
+    state = _login_attempt_state(ip, now)
+    remaining = state["locked_until"] - now
+    if remaining <= 0:
+        state["locked_until"] = 0.0
+        return 0.0
+    return remaining
+
+
+def _login_failure(ip, now):
+    """记录一次登录失败；达到阈值时触发锁定，锁定时长逐次翻倍（上限 8 倍）。"""
+    if settings.admin_login_max_attempts <= 0:
+        return
+    state = _login_attempt_state(ip, now)
+    state["failures"] += 1
+    if state["failures"] >= settings.admin_login_max_attempts:
+        lockout = max(settings.admin_login_lockout_seconds, 0.0) * state["multiplier"]
+        state["multiplier"] = min(state["multiplier"] * 2, 8)
+        state["failures"] = 0
+        state["locked_until"] = max(now + lockout, state["locked_until"])
+
+
+def _login_success(ip):
+    _login_attempts.pop(ip, None)
+
+
+def _login_page(next_path="/stats", failed=False, notice="", status_code=200):
     next_path = next_path if next_path in ("/stats", "/logs", "/key-pools", "/settings") else "/stats"
     error = '<p class="error">密码不正确</p>' if failed else ""
+    notice_block = f'<p class="error">{html.escape(notice)}</p>' if notice else ""
     disabled = "" if settings.admin_password else "disabled"
     message = "" if settings.admin_password else '<p class="error">管理员密码尚未配置</p>'
     return HTMLResponse(f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>管理端登录</title>
-<style>*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f8;color:#172033;font:14px system-ui,sans-serif}}main{{width:min(360px,calc(100% - 32px));background:#fff;border:1px solid #dfe3e8;border-radius:8px;padding:28px;box-shadow:0 8px 30px rgba(15,23,42,.08)}}h1{{margin:0 0 22px;font-size:20px;letter-spacing:0}}label{{display:block;margin-bottom:7px;color:#526071;font-size:12px}}input{{width:100%;height:42px;border:1px solid #cbd3dc;border-radius:6px;padding:0 12px;font:inherit;outline:none}}input:focus{{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}}button{{width:100%;height:42px;margin-top:16px;border:0;border-radius:6px;background:#2563eb;color:#fff;font:600 14px system-ui;cursor:pointer}}button:disabled{{background:#9ca3af;cursor:not-allowed}}.error{{margin:0 0 14px;color:#c2413b;font-size:12px}}</style></head><body><main><h1>管理端登录</h1>{message}{error}<form method="post" action="/admin/login"><input type="hidden" name="next" value="{html.escape(next_path)}"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required {disabled}><button type="submit" {disabled}>登录</button></form></main></body></html>""")
+<style>*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f8;color:#172033;font:14px system-ui,sans-serif}}main{{width:min(360px,calc(100% - 32px));background:#fff;border:1px solid #dfe3e8;border-radius:8px;padding:28px;box-shadow:0 8px 30px rgba(15,23,42,.08)}}h1{{margin:0 0 22px;font-size:20px;letter-spacing:0}}label{{display:block;margin-bottom:7px;color:#526071;font-size:12px}}input{{width:100%;height:42px;border:1px solid #cbd3dc;border-radius:6px;padding:0 12px;font:inherit;outline:none}}input:focus{{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}}button{{width:100%;height:42px;margin-top:16px;border:0;border-radius:6px;background:#2563eb;color:#fff;font:600 14px system-ui;cursor:pointer}}button:disabled{{background:#9ca3af;cursor:not-allowed}}.error{{margin:0 0 14px;color:#c2413b;font-size:12px}}</style></head><body><main><h1>管理端登录</h1>{message}{notice_block}{error}<form method="post" action="/admin/login"><input type="hidden" name="next" value="{html.escape(next_path)}"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" autofocus required {disabled}><button type="submit" {disabled}>登录</button></form></main></body></html>""", status_code=status_code)
 
 
 async def admin_login_page(next: str = "/stats"):
@@ -215,15 +275,31 @@ async def admin_login(request: Request):
     password = values.get("password", [""])[0]
     next_path = values.get("next", ["/stats"])[0]
     next_path = next_path if next_path in ("/stats", "/logs", "/key-pools", "/settings") else "/stats"
+    client_ip = resolve_client_ip(request.scope, settings.trusted_proxy_ips)
+    now = time.monotonic()
+    locked_for = _login_locked(client_ip, now)
+    if locked_for > 0:
+        logger.warning(f"[{client_ip}] 管理端登录被限速锁定 {locked_for:.0f}s")
+        return _login_page(
+            next_path,
+            notice=f"尝试次数过多，请 {math.ceil(locked_for)} 秒后再试",
+            status_code=429,
+        )
     if not settings.admin_password or not secrets.compare_digest(password, settings.admin_password):
+        _login_failure(client_ip, now)
         return _login_page(next_path, failed=True)
+    _login_success(client_ip)
+    token = create_admin_session()
     response = RedirectResponse(next_path, status_code=303)
-    response.set_cookie("admin_session", admin_session_value(), max_age=30 * 86400,
+    response.set_cookie("admin_session", token, max_age=30 * 86400,
                         httponly=True, samesite="strict", secure=settings.admin_cookie_secure, path="/")
     return response
 
 
-async def admin_logout():
+async def admin_logout(request: Request):
+    session = request.cookies.get("admin_session", "")
+    if session:
+        revoke_admin_session(session)
     response = RedirectResponse("/admin/login", status_code=303)
     response.delete_cookie("admin_session", path="/")
     return response
@@ -295,6 +371,8 @@ async def settings_get():
             "apply": item.apply,
             "hidden": item.hidden,
             "unit": item.unit,
+            "min": item.min,
+            "max": item.max,
             "description": item.description,
         }
         if item.secret:
@@ -308,6 +386,14 @@ async def settings_get():
 
 
 _BOOL_ACCEPTED = ("1", "true", "yes", "on", "0", "false", "no", "off")
+
+
+def _check_range(item, number):
+    """按元数据登记的 min/max（闭区间）校验数值，非法值返回 400"""
+    if item.min is not None and number < item.min:
+        raise HTTPException(status_code=400, detail=f"{item.key} 不能小于 {item.min:g}")
+    if item.max is not None and number > item.max:
+        raise HTTPException(status_code=400, detail=f"{item.key} 不能大于 {item.max:g}")
 
 
 def _validate_value(item, raw) -> str:
@@ -328,15 +414,19 @@ def _validate_value(item, raw) -> str:
         return "true" if text.lower() in ("1", "true", "yes", "on") else "false"
     if item.type == "int":
         try:
-            int(text)
+            number = int(text)
         except ValueError:
             raise HTTPException(status_code=400, detail=f"{item.key} 必须是整数")
+        _check_range(item, number)
         return text
     if item.type == "float":
         try:
-            float(text)
+            number = float(text)
         except ValueError:
             raise HTTPException(status_code=400, detail=f"{item.key} 必须是数字")
+        if not math.isfinite(number):
+            raise HTTPException(status_code=400, detail=f"{item.key} 必须是有限数字")
+        _check_range(item, number)
         return text
     if item.type == "enum":
         if text not in item.enum and text.lower() not in {e.lower() for e in item.enum}:

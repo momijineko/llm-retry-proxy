@@ -1,12 +1,15 @@
 import base64
+import gzip
 import json
 import os
 import tempfile
 import unittest
+import zlib
 
 import yaml
 
-from retry_proxy.dlp import inspect_json_body, load_policy, validate_policy
+from retry_proxy.dlp import (decode_inbound_body, inspect_json_body, load_policy,
+                             validate_policy)
 
 
 RULE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "retry_proxy", "dlp_rules.yaml")
@@ -214,6 +217,52 @@ class DlpTests(unittest.TestCase):
         finally:
             os.unlink(path)
             load_policy.cache_clear()
+
+
+class InboundBodyDecodeTests(unittest.TestCase):
+    """入站 Content-Encoding 受限解压：gzip/deflate 明文检查，防解压炸弹"""
+
+    def test_gzip_body_is_decoded(self):
+        payload = b'{"input":"secret"}'
+        decoded, encoding = decode_inbound_body(gzip.compress(payload), "gzip", 1024)
+        self.assertEqual(decoded, payload)
+        self.assertEqual(encoding, "gzip")
+
+    def test_x_gzip_and_identity(self):
+        payload = b"plain"
+        decoded, encoding = decode_inbound_body(gzip.compress(payload), "x-gzip", 1024)
+        self.assertEqual((decoded, encoding), (payload, "x-gzip"))
+        self.assertEqual(decode_inbound_body(payload, "identity", 1024), (payload, ""))
+        self.assertEqual(decode_inbound_body(payload, "", 1024), (payload, ""))
+        self.assertEqual(decode_inbound_body(b"", "gzip", 1024), (b"", ""))
+
+    def test_zlib_and_raw_deflate_are_decoded(self):
+        payload = b'{"input":"secret"}'
+        decoded, encoding = decode_inbound_body(zlib.compress(payload), "deflate", 1024)
+        self.assertEqual((decoded, encoding), (payload, "deflate"))
+        raw = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        decoded, encoding = decode_inbound_body(
+            raw.compress(payload) + raw.flush(), "deflate", 1024,
+        )
+        self.assertEqual((decoded, encoding), (payload, "deflate"))
+
+    def test_unsupported_or_corrupt_body_falls_back_to_original(self):
+        payload = b"not-gzip-at-all"
+        self.assertEqual(decode_inbound_body(payload, "gzip", 1024), (payload, ""))
+        self.assertEqual(decode_inbound_body(payload, "br", 1024), (payload, ""))
+
+    def test_oversized_decode_returns_none_without_allocating(self):
+        big = b"x" * 4096
+        compressed = gzip.compress(big)
+        decoded, encoding = decode_inbound_body(compressed, "gzip", 128)
+        self.assertIsNone(decoded)
+        self.assertEqual(encoding, "gzip")
+
+    def test_decode_respects_max_bytes_boundary(self):
+        payload = b"y" * 128
+        compressed = gzip.compress(payload)
+        decoded, encoding = decode_inbound_body(compressed, "gzip", 128)
+        self.assertEqual((decoded, encoding), (payload, "gzip"))
 
 
 if __name__ == "__main__":

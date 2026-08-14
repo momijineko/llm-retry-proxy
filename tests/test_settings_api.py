@@ -268,6 +268,51 @@ class SettingsPostTests(unittest.IsolatedAsyncioTestCase):
             await self._post({"updates": {"RETRY_INTERVAL": "abc"}})
         self.assertEqual(raised.exception.status_code, 400)
 
+    async def test_out_of_range_int_rejected(self):
+        # 启动期校验过的范围（如 DLP_DECODE_DEPTH 0-8）在页面保存路径同样拒绝，
+        # 防止热更新绕过启动校验
+        for key, value in (("DLP_DECODE_DEPTH", "9"), ("DLP_DECODE_DEPTH", "-1"),
+                           ("MAX_RETRIES", "-5"), ("MAX_REQUEST_BODY", "0"),
+                           ("MAX_CONCURRENT", "0"), ("KEY_TTFT_CONFIRMATIONS", "0"),
+                           ("DLP_KNOWN_SECRET_MIN_LENGTH", "0"),
+                           ("LISTEN_PORT", "70000")):
+            with self.subTest(key=key, value=value), \
+                    self.assertRaises(HTTPException) as raised:
+                await self._post({"updates": {key: value}})
+            self.assertEqual(raised.exception.status_code, 400, key)
+
+    async def test_out_of_range_float_rejected(self):
+        for key, value in (("RETRY_INTERVAL", "-1"), ("RETRY_BACKOFF_MAX", "-0.5"),
+                           ("SSE2WS_FIRST_EVENT_TIMEOUT", "0"),
+                           ("KEY_COOLDOWN_5XX", "-30")):
+            with self.subTest(key=key, value=value), \
+                    self.assertRaises(HTTPException) as raised:
+                await self._post({"updates": {key: value}})
+            self.assertEqual(raised.exception.status_code, 400, key)
+
+    async def test_non_finite_float_rejected(self):
+        for value in ("nan", "inf", "-inf"):
+            with self.subTest(value=value), \
+                    self.assertRaises(HTTPException) as raised:
+                await self._post({"updates": {"RETRY_INTERVAL": value}})
+            self.assertEqual(raised.exception.status_code, 400)
+
+    async def test_boundary_values_accepted(self):
+        original_retries = settings.max_retries
+        original_depth = settings.dlp_decode_depth
+        try:
+            with patch("retry_proxy.application.update_env_file", return_value=True):
+                result = await self._post({"updates": {
+                    "MAX_RETRIES": "0", "DLP_DECODE_DEPTH": "8",
+                }})
+            self.assertIn("MAX_RETRIES", result["applied"])
+            self.assertIn("DLP_DECODE_DEPTH", result["applied"])
+            self.assertEqual(settings.max_retries, 0)
+            self.assertEqual(settings.dlp_decode_depth, 8)
+        finally:
+            settings.max_retries = original_retries
+            settings.dlp_decode_depth = original_depth
+
     async def test_trailing_backslash_rejected(self):
         # 尾部反斜杠触发 python-dotenv 1.2.2 解析 bug（整个文件被丢弃），必须拒绝
         with self.assertRaises(HTTPException) as raised:

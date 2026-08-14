@@ -1,9 +1,13 @@
+import asyncio
 import base64
+import gzip
 import os
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from starlette.requests import Request
 
 from retry_proxy.api import create_handlers
@@ -39,17 +43,22 @@ def _config(**overrides):
     return SimpleNamespace(**values)
 
 
-def _request(body, content_length=True):
-    headers = [(b"content-type", b"application/json")]
+def _request(body, content_length=True, extra_headers=()):
+    headers = [(b"content-type", b"application/json"), *list(extra_headers)]
     if content_length:
         headers.append((b"content-length", str(len(body)).encode()))
+
+    async def receive():
+        # 立即返回的协程会让 _run_until_disconnect 的断连监视器零让步忙等，
+        # 事件循环永远轮不到转发任务；显式让出一次控制权
+        await asyncio.sleep(0)
+        return {"type": "http.request", "body": body, "more_body": False}
+
     return Request({
         "type": "http", "method": "POST", "path": "/responses",
         "headers": headers,
         "query_string": b"", "server": ("test", 80), "client": ("127.0.0.1", 1),
-    }, receive=AsyncMock(return_value={
-        "type": "http.request", "body": body, "more_body": False,
-    }))
+    }, receive=receive)
 
 
 class DlpApiTests(ThreadedAsyncTestCase):
@@ -157,6 +166,82 @@ class DlpApiTests(ThreadedAsyncTestCase):
 
         self.assertEqual(response.status_code, 413)
         self.assertEqual(receive.await_count, 2)
+        service.request.assert_not_awaited()
+
+    async def test_gzip_body_is_decoded_before_dlp_and_blocked(self):
+        token = "sk-A1b2C3d4E5f6G7h8J9k0LmNoPqRsTuVx"
+        payload = ('{"input":"' + token + '"}').encode()
+        body = gzip.compress(payload)
+        service = SimpleNamespace(request=AsyncMock())
+        proxy = create_handlers(service, SimpleNamespace())[-1]
+        with patch("retry_proxy.api.settings", _config()), \
+                patch("retry_proxy.config.settings", _config()), \
+                patch("retry_proxy.api.KEY_POOLS", {}), \
+                patch("retry_proxy.api.match_route",
+                      return_value=("https://upstream.test", "test", "responses")):
+            response = await proxy(
+                "responses",
+                _request(body, extra_headers=[(b"content-encoding", b"gzip")]),
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn(b"sensitive_data_blocked", response.body)
+        service.request.assert_not_awaited()
+
+    async def test_gzip_body_is_forwarded_plain_without_encoding_header(self):
+        payload = b'{"input":"benign-content"}'
+        body = gzip.compress(payload)
+        upstream_response = httpx.Response(
+            200, content=b'{"ok":true}',
+            request=httpx.Request("POST", "https://upstream.test/responses"),
+        )
+        result = SimpleNamespace(
+            response=upstream_response, winner_attempt=1, total_sent=1,
+            last_status=200, retry_codes=[], first_ok=True, key_id="",
+            key_attempts=[], started_at=time.time(), key_entry=None,
+            response_started_mono=time.monotonic(),
+        )
+        service = SimpleNamespace(
+            request=AsyncMock(return_value=result),
+            hedge_mode_for=lambda request_pool: "off",
+        )
+        store = SimpleNamespace(write=AsyncMock())
+        proxy = create_handlers(service, store)[-1]
+        config = _config(dlp_mode="redact")
+        with patch("retry_proxy.api.settings", config), \
+                patch("retry_proxy.config.settings", config), \
+                patch("retry_proxy.api.KEY_POOLS", {}), \
+                patch("retry_proxy.api.match_route",
+                      return_value=("https://upstream.test", "test", "responses")):
+            response = await proxy(
+                "responses",
+                _request(body, extra_headers=[(b"content-encoding", b"gzip")]),
+            )
+            await response.body_iterator.__anext__()
+
+        args = service.request.await_args.args
+        forwarded_headers, forwarded_body = args[2], args[3]
+        self.assertEqual(forwarded_body, payload)
+        self.assertNotIn("content-encoding",
+                         {name.lower() for name in forwarded_headers})
+
+    async def test_gzip_decode_exceeding_dlp_limit_is_rejected(self):
+        payload = b'{"input":"' + b"x" * 2048 + b'"}'
+        body = gzip.compress(payload)
+        service = SimpleNamespace(request=AsyncMock())
+        proxy = create_handlers(service, SimpleNamespace())[-1]
+        with patch("retry_proxy.api.settings", _config(dlp_max_body_bytes=512)), \
+                patch("retry_proxy.config.settings", _config(dlp_max_body_bytes=512)), \
+                patch("retry_proxy.api.KEY_POOLS", {}), \
+                patch("retry_proxy.api.match_route",
+                      return_value=("https://upstream.test", "test", "responses")):
+            response = await proxy(
+                "responses",
+                _request(body, extra_headers=[(b"content-encoding", b"gzip")]),
+            )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertIn(b"dlp_body_too_large", response.body)
         service.request.assert_not_awaited()
 
 

@@ -49,11 +49,12 @@ def _is_valid_reference(ref):
 
 class DockerBuildConfigTests(unittest.TestCase):
     def setUp(self):
-        self.arg_defaults = _arg_defaults(DOCKERFILE.read_text())
-        self.env = _env_values(ENV_EXAMPLE.read_text())
-        self.cn_env = _env_values(CN_ENV_EXAMPLE.read_text())
-        self.compose = yaml.safe_load(COMPOSE_FILE.read_text())
-        self.legacy_compose = yaml.safe_load(LEGACY_COMPOSE_FILE.read_text())
+        self.arg_defaults = _arg_defaults(DOCKERFILE.read_text(encoding="utf-8"))
+        # 仓库文件均为 UTF-8；显式指定编码，避免 Windows 区域默认 GBK 解析失败
+        self.env = _env_values(ENV_EXAMPLE.read_text(encoding="utf-8"))
+        self.cn_env = _env_values(CN_ENV_EXAMPLE.read_text(encoding="utf-8"))
+        self.compose = yaml.safe_load(COMPOSE_FILE.read_text(encoding="utf-8"))
+        self.legacy_compose = yaml.safe_load(LEGACY_COMPOSE_FILE.read_text(encoding="utf-8"))
 
     def test_dockerfile_defaults_produce_valid_reference(self):
         ref = f"{self.arg_defaults['DOCKER_REGISTRY']}/{self.arg_defaults['PYTHON_BASE_IMAGE']}"
@@ -111,7 +112,7 @@ class DockerBuildConfigTests(unittest.TestCase):
         self.assertEqual(self.env["UVICORN_LOOP"], "auto")
         self.assertEqual(self.cn_env["UVICORN_LOOP"], "auto")
 
-        tree = ast.parse(MAIN_FILE.read_text())
+        tree = ast.parse(MAIN_FILE.read_text(encoding="utf-8"))
         loop_values = [
             keyword.value
             for node in ast.walk(tree)
@@ -128,7 +129,7 @@ class DockerBuildConfigTests(unittest.TestCase):
 
     def test_all_admin_pages_are_copied_into_image(self):
         # 管理页面必须全部 COPY 进镜像，新增页面忘记打包时访问会返回 not found
-        copied = {line.split()[1] for line in DOCKERFILE.read_text().splitlines()
+        copied = {line.split()[1] for line in DOCKERFILE.read_text(encoding="utf-8").splitlines()
                   if line.startswith("COPY ")}
         for page in ("stats.html", "logs.html", "key_pool.html", "settings.html"):
             self.assertIn(page, copied, f"Dockerfile 缺少 COPY {page}")

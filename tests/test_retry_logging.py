@@ -54,6 +54,25 @@ class RetryLoggingTests(unittest.IsolatedAsyncioTestCase):
             ["entry 2098", "entry 2099"],
         )
 
+    def test_log_capture_evicts_oldest_when_maxlen_set(self):
+        capture = LogCaptureHandler(maxlen=100)
+
+        for index in range(150):
+            record = logging.LogRecord(
+                "test", logging.INFO, __file__, 1, "entry %d", (index,), None,
+            )
+            capture.emit(record)
+
+        history = capture.history()
+        self.assertEqual(len(history), 100)
+        self.assertEqual(history[0]["message"], "entry 50")
+        self.assertEqual(history[-1]["message"], "entry 149")
+
+    def test_global_log_capture_is_bounded_by_default(self):
+        # 默认配置下进程内实时日志缓冲必须有界，避免长期运行内存只增不减
+        self.assertIsNotNone(log_capture._maxlen)
+        self.assertGreater(log_capture._maxlen, 0)
+
     def test_forward_debug_reaches_log_page_capture(self):
         marker = "retry-debug-capture-test"
 

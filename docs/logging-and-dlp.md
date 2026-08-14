@@ -36,6 +36,8 @@ DLP_MAX_BODY_BYTES=16777216
 
 `redact` 会把未豁免的敏感信息替换为 `[REDACTED:规则名]`，让 Agent 和用户根据上下文决定下一步，不会因普通命中中断调用链。也可以使用 `audit` 仅告警，或使用 `block` 返回 HTTP 422 并停止转发。默认最多扫描 16 MiB 请求体；`redact` 或 `block` 模式下超限会返回 HTTP 413。
 
+入站请求体带 `Content-Encoding: gzip`/`deflate` 时，DLP 会先受限解压再检查明文（解压结果同样受 `DLP_MAX_BODY_BYTES` 限制，超限按请求体超限处理），转发时改送解压后的明文并移除 `Content-Encoding` 头，避免上游二次解压；无法解压的正文按不可解析正文的既有语义处理。
+
 DLP 默认递归检查两层 Base64/Base64URL、hex 和 percent 编码；解码后的内容命中时处理整个原始编码片段。候选数量、累计解码字节数和递归深度分别由 `DLP_DECODE_MAX_CANDIDATES`、`DLP_DECODE_MAX_BYTES` 和 `DLP_DECODE_DEPTH` 限制，避免超长或嵌套输入耗尽资源。`redact`/`block` 模式下解码预算耗尽会返回 HTTP 413，避免攻击者用伪候选挤掉真实秘密。启用号池时还会在内存中精确匹配当前 Key，未知厂商格式也能被识别；日志只记录 `known_secret`，不会记录 Key 值。
 
 对于 Chat/Responses/Anthropic 风格请求，DLP 每次都会处理所有用户消息的 `content` 和工具输出的 `content`/`output`，确保本地文件、MCP、Shell 等工具返回的凭据也会在转发副本中脱敏。协议结构字段（包括 `id`、`call_id`、`tool_call_id`、`type` 和 `status`）、system/developer 指令、assistant 内容和 JSON Schema 不参与扫描。无法识别结构的通用 JSON 请求会回退到递归扫描全部字符串。

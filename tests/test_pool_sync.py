@@ -12,7 +12,8 @@ import httpx
 
 from retry_proxy.key_pool import KeyEntry, KeyPool
 from retry_proxy.pool_sync import (PoolSyncManager, _get_pinned_public_url,
-                                   _parse_experience_payload)
+                                   _parse_experience_payload,
+                                   _validate_base_url_destination)
 from retry_proxy.routes import RouteRegistry
 from retry_proxy.sync_adapters import PoolSyncError
 from retry_proxy.sync_adapters.sub2api import Sub2APIAdapter, _model_ids, _unwrap
@@ -495,6 +496,84 @@ class ExternalDataNetworkSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["extensions"]["sni_hostname"], "2001:4860:4860::8844")
 
 
+class BaseUrlSsfrValidationTests(unittest.IsolatedAsyncioTestCase):
+    """connect / manual-add 的 base_url 反 SSRF 校验"""
+
+    async def _assert_rejected(self, url, addrinfo=None):
+        loop = SimpleNamespace(getaddrinfo=AsyncMock(return_value=addrinfo or []))
+        with patch("retry_proxy.pool_sync.asyncio.get_running_loop", return_value=loop), \
+                self.assertRaises(PoolSyncError):
+            await _validate_base_url_destination(url)
+
+    async def test_private_and_loopback_literals_are_rejected(self):
+        for url in ("http://127.0.0.1:8080", "http://169.254.169.254/latest/meta-data",
+                    "https://192.168.1.5", "http://10.0.0.1", "http://[::1]",
+                    "https://localhost", "http://100.100.100.200"):
+            with self.subTest(url=url):
+                await self._assert_rejected(url)
+
+    async def test_cloud_metadata_hostname_is_rejected(self):
+        await self._assert_rejected("http://metadata.google.internal/")
+
+    async def test_public_ip_literal_is_accepted(self):
+        await _validate_base_url_destination("https://93.184.216.34/groups")
+
+    async def test_hostname_resolving_to_private_address_is_rejected(self):
+        await self._assert_rejected("https://internal.test", addrinfo=[
+            (2, 1, 6, "", ("192.168.1.10", 443)),
+        ])
+
+    async def test_connect_rejects_private_base_url_by_default(self):
+        config = SimpleNamespace(
+            key_pool_sync_state_file="unused-state.json",
+            key_pool_sync_default_adapter="sub2api",
+            key_pool_sync_default_url="https://upstream.test",
+            key_pool_sync_interval=0, key_pool_sync_secret="",
+            provider="test-provider",
+            key_pool_allow_private_base_url=False,
+        )
+        manager = PoolSyncManager({}, config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        with self.assertRaises(PoolSyncError) as raised:
+            await manager.connect("sub2api", "http://169.254.169.254", "test", {})
+        self.assertIn("私有", str(raised.exception))
+
+    async def test_connect_allows_private_base_url_when_opt_in(self):
+        config = SimpleNamespace(
+            key_pool_sync_state_file="unused-state.json",
+            key_pool_sync_default_adapter="sub2api",
+            key_pool_sync_default_url="https://upstream.test",
+            key_pool_sync_interval=0, key_pool_sync_secret="",
+            provider="test-provider",
+            key_pool_allow_private_base_url=True,
+        )
+        manager = PoolSyncManager({}, config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        with patch("retry_proxy.pool_sync._validate_base_url_destination",
+                   new_callable=AsyncMock) as check, \
+                patch.object(Sub2APIAdapter, "connect", new_callable=AsyncMock,
+                             side_effect=PoolSyncError("adapter-boom")):
+            with self.assertRaises(PoolSyncError) as raised:
+                await manager.connect("sub2api", "http://192.168.1.10", "test", {})
+        check.assert_not_awaited()
+        self.assertIn("adapter-boom", str(raised.exception))
+
+    async def test_manual_add_rejects_private_base_url_by_default(self):
+        from retry_proxy.sync_adapters.manual import ManualAdapter
+
+        config = SimpleNamespace(
+            key_pool_sync_state_file="unused-state.json",
+            key_pool_sync_default_adapter="manual",
+            key_pool_sync_default_url="https://manual.test",
+            key_pool_sync_interval=0, key_pool_sync_secret="",
+            provider="manual-provider", extra_upstreams="",
+            upstream_url="https://default.test",
+            key_pool_allow_private_base_url=False,
+        )
+        manager = PoolSyncManager({}, config, None, {"manual": ManualAdapter()})
+        with self.assertRaises(PoolSyncError) as raised:
+            await manager.add_manual_keys("http://127.0.0.1:8080", [{"key": "sk-x"}])
+        self.assertIn("私有", str(raised.exception))
+
+
 class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -514,6 +593,13 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.destination_check.start()
         self.addCleanup(self.destination_check.stop)
+        # 现有用例使用假域名，跳过 connect 的真实 DNS 反 SSRF 校验（专项用例单独覆盖）
+        self.base_url_check = patch(
+            "retry_proxy.pool_sync._validate_base_url_destination",
+            new_callable=AsyncMock,
+        )
+        self.base_url_check.start()
+        self.addCleanup(self.base_url_check.stop)
 
     def tearDown(self):
         self.tempdir.cleanup()
@@ -1495,6 +1581,13 @@ class ManualAdapterTests(unittest.IsolatedAsyncioTestCase):
             extra_upstreams="",
             upstream_url="https://default.test",
         )
+        # 现有用例使用假域名，跳过真实 DNS 反 SSRF 校验（专项用例单独覆盖）
+        self.base_url_check = patch(
+            "retry_proxy.pool_sync._validate_base_url_destination",
+            new_callable=AsyncMock,
+        )
+        self.base_url_check.start()
+        self.addCleanup(self.base_url_check.stop)
 
     def tearDown(self):
         self.tempdir.cleanup()

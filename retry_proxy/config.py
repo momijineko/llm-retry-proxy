@@ -1,6 +1,5 @@
 import asyncio
 import collections
-import hashlib
 import logging
 import os
 import re
@@ -15,6 +14,7 @@ from dotenv import load_dotenv
 from fastapi import HTTPException, Request
 
 from .access_control import parse_ip_networks
+from .admin_session import is_valid as is_valid_admin_session
 
 
 def safe_load_env(path: str = ".env"):
@@ -121,7 +121,7 @@ class LogCaptureHandler(logging.Handler):
             return list(self._buffer)
 
 
-log_capture = LogCaptureHandler()
+log_capture = LogCaptureHandler(maxlen=int(os.getenv("LOG_CAPTURE_MAXLEN", "5000")) or None)
 logging.getLogger().addHandler(log_capture)
 
 
@@ -158,12 +158,15 @@ class Settings:
     extra_upstreams: str = os.getenv("EXTRA_UPSTREAMS", "")
     log_dir: str = os.getenv("LOG_DIR", "logs")
     log_retention_days: int = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+    log_capture_maxlen: int = int(os.getenv("LOG_CAPTURE_MAXLEN", "5000"))
     legacy_log_file: str = os.getenv("LOG_FILE", "retry_log.jsonl")
     hedge_mode: str = os.getenv("HEDGE_MODE", "off").lower()
     max_concurrent: int = int(os.getenv("MAX_CONCURRENT", "10"))
     trust_env: bool = _bool("TRUST_ENV", "false")
     admin_password: str = (os.getenv("ADMIN_PASSWORD") or os.getenv("ADMIN_TOKEN", "")).strip()
     admin_cookie_secure: bool = _bool("ADMIN_COOKIE_SECURE", "false")
+    admin_login_max_attempts: int = int(os.getenv("ADMIN_LOGIN_MAX_ATTEMPTS", "5"))
+    admin_login_lockout_seconds: float = float(os.getenv("ADMIN_LOGIN_LOCKOUT_SECONDS", "300"))
     settings_page_enabled: bool = _bool("SETTINGS_PAGE_ENABLED", "false")
     api_docs_enabled: bool = _bool("API_DOCS_ENABLED", "false")
     proxy_api_key: str = os.getenv("PROXY_API_KEY", "").strip()
@@ -212,6 +215,7 @@ class Settings:
         os.getenv("LOG_DIR", "logs"), ".key_pool_sync.json"
     )
     key_pool_sync_secret: str = (os.getenv("KEY_POOL_SYNC_SECRET") or os.getenv("ADMIN_PASSWORD") or os.getenv("ADMIN_TOKEN", "")).strip()
+    key_pool_allow_private_base_url: bool = _bool("KEY_POOL_ALLOW_PRIVATE_BASE_URL", "false")
     dlp_mode: str = os.getenv("DLP_MODE", "off").lower()
     dlp_rules: frozenset = frozenset(x.strip() for x in os.getenv("DLP_RULES", "private_key,ai_tokens,code_tokens,cloud_tokens,saas_tokens,package_tokens,credentials,csv_credentials,jwt,connection_string,id_card,bank_card,structured_secret").split(",") if x.strip())
     dlp_rule_file: str = os.getenv("DLP_RULE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "dlp_rules.yaml"))
@@ -351,11 +355,6 @@ HOT_PARSERS = {
 settings = Settings()
 
 
-def admin_session_value(password=None):
-    secret = settings.admin_password if password is None else password
-    return hashlib.sha256(f"llm-retry-proxy-session:{secret}".encode("utf-8")).hexdigest()
-
-
 def require_admin(request: Request):
     if not settings.admin_password:
         raise HTTPException(status_code=503, detail="admin_auth_not_configured")
@@ -363,7 +362,7 @@ def require_admin(request: Request):
     bearer_ok = (scheme.lower() == "bearer" and credential
                  and secrets.compare_digest(credential, settings.admin_password))
     session = request.cookies.get("admin_session", "")
-    cookie_ok = bool(session and secrets.compare_digest(session, admin_session_value()))
+    cookie_ok = bool(session and is_valid_admin_session(session))
     if bearer_ok or cookie_ok:
         return
     if request.url.path in ("/stats", "/logs", "/key-pools", "/settings"):

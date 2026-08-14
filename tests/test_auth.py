@@ -8,8 +8,9 @@ import httpx
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from retry_proxy.config import (LogCaptureHandler, admin_session_value,
-                                can_use_key_pool, require_admin)
+from retry_proxy.admin_session import create_session
+from retry_proxy.config import (LogCaptureHandler, can_use_key_pool,
+                                require_admin)
 from retry_proxy.api import _responses_stream_key_failure_status, create_handlers
 from retry_proxy.key_pool import KeyEntry, KeyPool
 
@@ -56,8 +57,15 @@ class AdminAuthTests(unittest.TestCase):
     def test_valid_session_cookie_is_accepted(self):
         fake_settings = SimpleNamespace(admin_password="correct")
         with patch("retry_proxy.config.settings", fake_settings):
-            cookie = f"admin_session={admin_session_value()}"
+            cookie = f"admin_session={create_session()}"
             self.assertIsNone(require_admin(_request(cookie=cookie)))
+
+    def test_random_or_stale_cookie_is_rejected(self):
+        fake_settings = SimpleNamespace(admin_password="correct")
+        with patch("retry_proxy.config.settings", fake_settings):
+            with self.assertRaises(HTTPException) as raised:
+                require_admin(_request(cookie="admin_session=forged-value"))
+        self.assertEqual(raised.exception.status_code, 401)
 
     def test_browser_page_redirects_to_login(self):
         with patch("retry_proxy.config.settings", SimpleNamespace(admin_password="correct")):
