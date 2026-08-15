@@ -49,7 +49,9 @@ _STARTUP_BANNER = "\n".join(line.rstrip() for line in (
 
 
 def _log_startup():
-    logger.info(f"\033[36m{_STARTUP_BANNER}\033[0m")
+    # 横幅逐行独立输出：部分日志查看器（面板/HTML 页面）会折叠单条记录内嵌的换行
+    for line in _STARTUP_BANNER.splitlines():
+        logger.info(f"\033[36m{line}\033[0m")
     logger.info("=" * 60)
     logger.info(f"转发服务启动: http://{settings.listen_host}:{settings.listen_port}")
     for prefix, upstream_url, provider, _ in ROUTES:
