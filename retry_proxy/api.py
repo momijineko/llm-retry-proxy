@@ -13,7 +13,7 @@ from fastapi.responses import Response, StreamingResponse
 from .access_control import resolve_client_ip
 from .config import can_use_key_pool, log_capture, logger, settings
 from .dlp import decode_inbound_body, inspect_json_body
-from .routes import ROUTES, is_excluded_path, match_route
+from .routes import ROUTES, build_proxy_url, is_excluded_path, match_route
 from .key_pool import KEY_POOLS
 from .retry import (
     _mark_key_failure,
@@ -613,7 +613,8 @@ def create_handlers(service, store, pool_sync=None):
         if is_excluded_path(path): return Response(status_code=404)
         client_ip = _request_ip(request)
         log_method = request.method
-        upstream, provider, remaining = match_route(path); url = f"{upstream}/{remaining}" if remaining else upstream
+        upstream, provider, remaining = match_route(path)
+        url = build_proxy_url(upstream, remaining)
         if request.url.query: url += f"?{request.url.query}"
         logger.debug(f"{_tag(log_method, path, provider, '', client_ip)} 收到下游请求")
         body = b""

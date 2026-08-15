@@ -1,6 +1,27 @@
+import re
+
 from .config import logger, settings
 
 EXCLUDE_PATHS = {"favicon.ico", "robots.txt", "sitemap.xml", "manifest.json", "site.webmanifest", "browserconfig.xml"}
+
+# 版本段：v1、v2、v12…（大小写不敏感）；用于下游版本优先的叠加消除
+_VERSION_LEADING = re.compile(r"^v\d+(?:/|$)", re.IGNORECASE)
+_VERSION_TRAILING = re.compile(r"/v\d+$", re.IGNORECASE)
+
+
+def build_proxy_url(upstream_url, remaining):
+    """拼接转发 URL，下游版本优先避免 /v1/v1 叠加。
+
+    上游基地址以 /vN 结尾（如 https://…/go/v1）且下游路径以 /vN 开头时，
+    移除上游基地址的版本段、保留下游版本，避免转发为 https://…/go/v1/v1/…；
+    无叠加时保持既有拼接行为不变。
+    """
+    if not remaining:
+        return upstream_url
+    base = upstream_url.rstrip("/")
+    if _VERSION_LEADING.match(remaining) and _VERSION_TRAILING.search(base):
+        base = base[: base.rfind("/")]
+    return f"{base}/{remaining}"
 
 
 def is_excluded_path(path: str) -> bool:

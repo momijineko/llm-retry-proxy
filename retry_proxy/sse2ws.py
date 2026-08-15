@@ -42,7 +42,7 @@ from .config import can_use_key_pool, logger, settings
 from .dlp import inspect_json_body
 from .key_pool import KEY_POOLS
 from .retry import _mark_key_failure, _tag, reset_client_ip, set_client_ip
-from .routes import match_route
+from .routes import build_proxy_url, match_route
 
 SSE2WS_TERMINAL_EVENTS = frozenset({
     "response.completed", "response.failed", "response.incomplete",
@@ -396,7 +396,7 @@ class ResponsesWSBridge:
         endpoint_family = classify_endpoint(self.remaining)
         model_scope = classify_model_scope(model_name, endpoint_family)
         outbound_headers = self._build_outbound_headers(model_name)
-        url = f"{self.upstream}/{self.remaining}" if self.remaining else self.upstream
+        url = build_proxy_url(self.upstream, self.remaining)
         request_pool = self._pick_pool(model_name, endpoint_family, model_scope)
         if self.pool_access and request_pool is None:
             await self._safe_close_error(

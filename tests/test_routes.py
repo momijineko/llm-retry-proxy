@@ -3,7 +3,60 @@ from types import SimpleNamespace
 
 
 from retry_proxy.application import app
-from retry_proxy.routes import RouteRegistry, normalize_route_prefix
+from retry_proxy.routes import (RouteRegistry, build_proxy_url,
+                                normalize_route_prefix)
+
+
+class ProxyUrlVersionCollapseTests(unittest.TestCase):
+    """下游版本优先：上游基地址与下游路径都带 /vN 时消除 /v1/v1 叠加"""
+
+    def test_downstream_version_wins_over_trailing_base_version(self):
+        self.assertEqual(
+            build_proxy_url("https://opencode.ai/zen/go/v1", "v1/chat/completions"),
+            "https://opencode.ai/zen/go/v1/chat/completions",
+        )
+
+    def test_different_downstream_version_replaces_base_version(self):
+        self.assertEqual(
+            build_proxy_url("https://upstream.test/v1", "v2/chat/completions"),
+            "https://upstream.test/v2/chat/completions",
+        )
+
+    def test_base_without_version_keeps_downstream_version(self):
+        self.assertEqual(
+            build_proxy_url("https://upstream.test", "v1/chat/completions"),
+            "https://upstream.test/v1/chat/completions",
+        )
+
+    def test_path_without_version_keeps_base_version(self):
+        self.assertEqual(
+            build_proxy_url("https://upstream.test/v1", "chat/completions"),
+            "https://upstream.test/v1/chat/completions",
+        )
+
+    def test_non_version_words_are_not_collapsed(self):
+        self.assertEqual(
+            build_proxy_url("https://upstream.test/v1", "v1beta/models"),
+            "https://upstream.test/v1/v1beta/models",
+        )
+
+    def test_empty_remaining_returns_base(self):
+        self.assertEqual(
+            build_proxy_url("https://upstream.test/v1", ""),
+            "https://upstream.test/v1",
+        )
+
+    def test_version_only_path_collapses_to_single_version(self):
+        self.assertEqual(
+            build_proxy_url("https://upstream.test/v1", "v1"),
+            "https://upstream.test/v1",
+        )
+
+    def test_case_insensitive_version_segment(self):
+        self.assertEqual(
+            build_proxy_url("https://upstream.test/v1", "V1/chat"),
+            "https://upstream.test/V1/chat",
+        )
 
 
 class RouteRegistryTests(unittest.TestCase):
