@@ -49,9 +49,11 @@ _STARTUP_BANNER = "\n".join(line.rstrip() for line in (
 
 
 def _log_startup():
-    # 横幅逐行独立输出：部分日志查看器（面板/HTML 页面）会折叠单条记录内嵌的换行
+    # 横幅逐行独立输出：部分日志查看器（面板/HTML 页面）会折叠单条记录内嵌的换行；
+    # 行内对齐空格转为不换行空格（NBSP），避免 HTML 渲染折叠连续空格导致排版错位。
+    # 终端中 NBSP 显示与普通空格一致。
     for line in _STARTUP_BANNER.splitlines():
-        logger.info(f"\033[36m{line}\033[0m")
+        logger.info(f"\033[36m{line.replace(' ', '\u00a0')}\033[0m")
     logger.info("=" * 60)
     logger.info(f"转发服务启动: http://{settings.listen_host}:{settings.listen_port}")
     for prefix, upstream_url, provider, _ in ROUTES:
