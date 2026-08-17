@@ -274,6 +274,7 @@ class SettingsPostTests(unittest.IsolatedAsyncioTestCase):
         for key, value in (("DLP_DECODE_DEPTH", "9"), ("DLP_DECODE_DEPTH", "-1"),
                            ("MAX_RETRIES", "-5"), ("MAX_REQUEST_BODY", "0"),
                            ("MAX_CONCURRENT", "0"), ("KEY_TTFT_CONFIRMATIONS", "0"),
+                           ("KEY_CACHE_HIT_CONFIRMATIONS", "0"),
                            ("DLP_KNOWN_SECRET_MIN_LENGTH", "0"),
                            ("LISTEN_PORT", "70000")):
             with self.subTest(key=key, value=value), \

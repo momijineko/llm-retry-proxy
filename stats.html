@@ -683,8 +683,10 @@ function renderKeyRows(data){
     <td class="num">${d.failed_attempts}</td>
     <td class="num">${d.availability_pct===null?'—':pctPill(d.availability_pct)}</td>
     <td class="num">${d.request_availability_pct===null?'—':pctPill(d.request_availability_pct)}</td>
+    <td class="num">${keyCacheRateCell(d.cached_tokens,d.prompt_tokens)}</td>
   </tr>`).join('');
 }
+function keyCacheRateCell(cached,prompt){const p=Number(prompt||0),c=Number(cached||0);if(!p)return '—';return `<span class="cache-value" title="缓存 ${fmtTokFull(c)} / 输入 ${fmtTokFull(p)} Token">${(c/p*100).toFixed(1)}%</span>`}
 function keyPoolEndpoint(pool){
   let host=pool.upstream;
   try{const url=new URL(pool.upstream);host=url.host+(url.pathname==='/'?'':url.pathname.replace(/\/$/,''))}catch(_e){}
@@ -790,7 +792,7 @@ function renderKeyPools(pools){
       </div>
       <div class="kp-body">
         <div class="kp-attention"><div class="kp-attention-title">需关注 Key</div><div class="kp-attention-sub">低于 95%、熔断、不可用或待检测</div><div class="kp-chart" id="keyPoolChart${index}" style="height:${chartHeight}px"></div></div>
-        <div class="scroll-table kp-table-wrap"><table class="kp-table"><thead><tr><th>Key</th><th style="text-align:center">当前状态</th><th class="num">有效样本</th><th class="num">失败尝试</th><th class="num">Key 可用率</th><th class="num">请求成功率</th></tr></thead><tbody>${renderKeyRows(pool.keys)}</tbody></table></div>
+        <div class="scroll-table kp-table-wrap"><table class="kp-table"><thead><tr><th>Key</th><th style="text-align:center">当前状态</th><th class="num">有效样本</th><th class="num">失败尝试</th><th class="num">Key 可用率</th><th class="num">请求成功率</th><th class="num">缓存命中率</th></tr></thead><tbody>${renderKeyRows(pool.keys)}</tbody></table></div>
       </div>
     </div>`;
   }).join('');

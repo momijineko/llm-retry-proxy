@@ -258,6 +258,8 @@ CONFIG_ITEMS: list[ConfigItem] = [
                apply=HOT, min=0, description="上下阈值的滞回比例", name="滞回比例"),
     ConfigItem("KEY_CACHE_MISS_THRESHOLD", "int", "3", group="号池熔断与选择",
                apply=HOT, min=0, description="连续长输入无缓存熔断分组阈值；0=关闭", name="缓存未命中阈值"),
+    ConfigItem("KEY_CACHE_HIT_CONFIRMATIONS", "int", "3", group="号池熔断与选择",
+               apply=HOT, min=1, description="缓存命中率低于来源下限多少次后才切换分组", name="缓存切换确认样本数"),
     ConfigItem("KEY_CACHE_MISS_MIN_INPUT_TOKENS", "int", "1024", group="号池熔断与选择",
                apply=HOT, min=0, description="触发缓存熔断的最小输入 token 数", name="缓存统计最小输入"),
     ConfigItem("KEY_CACHE_MISS_COOLDOWN", "float", "3600", group="号池熔断与选择",

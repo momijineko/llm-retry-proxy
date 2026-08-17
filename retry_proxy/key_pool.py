@@ -22,7 +22,7 @@ _RUNTIME_FIELDS = (
     "probe_latency_s", "probe_last_ts",
 )
 
-KEY_POOL_STRATEGIES = {"cost", "ttft", "balanced"}
+KEY_POOL_STRATEGIES = {"cost", "ttft", "balanced", "cache"}
 _SESSION_ROUTE_LIMIT = 10000
 _SESSION_ROUTE_IDLE = 3600.0
 
@@ -101,7 +101,7 @@ class KeyEntry:
 class KeyPool:
     """号池选择与调度状态机。
 
-    调度状态字段（ttft/balanced 策略下使用，相互关联）：
+    调度状态字段（ttft/balanced/cache 策略下使用，相互关联）：
       _current            -- 当前粘性 key 的 KeyEntry（None 表示未选号）
       _sticky_until       -- 粘性保持到期时间戳；未到期时优先复用 _current
       _failover_floor     -- 故障转移下限 sort 值；仅 sort >= 此值的 key 可选
@@ -112,12 +112,14 @@ class KeyPool:
       _probe_reserved_until -- 探针预留窗口到期时间（探针期间阻止其它探针）
 
     cost 策略仅使用 _current/_sticky_until/_failover_floor；其余字段在
-    ttft/balanced 策略下由 record_ttft/mark_cooldown 驱动状态转移。
+    ttft/balanced 策略下由 record_ttft/mark_cooldown 驱动状态转移；cache
+    策略按请求视图累计输入与缓存 Token，并在每次明确的 usage 后重新排序。
     """
     def __init__(self, keys, provider: str = ""):
         self.entries = [KeyEntry(k[0], k[1] if len(k) > 1 else "") if isinstance(k, tuple) else KeyEntry(k) for k in keys]
         self.provider, self._current, self._sticky_until = provider, None, 0.0
         self.strategy, self.target_ttft_s = "cost", 5.0
+        self.target_cache_hit_rate = 0.5
         self.external_retest_weight = 0.5
         self.external_ttft_prior_strength = 2.0
         self.session_affinity = False
@@ -181,7 +183,8 @@ class KeyPool:
         return list(self._views.values())
 
     def apply_settings(self, strategy, target_ttft_s, external_retest_weight,
-                       external_ttft_prior_strength, session_affinity):
+                       external_ttft_prior_strength, session_affinity,
+                       target_cache_hit_rate=None):
         """Apply selection settings and reset scheduler state derived from them.
 
         Centralizes the update so callers (e.g. PoolSyncManager.set_source_settings)
@@ -189,6 +192,8 @@ class KeyPool:
         """
         self.strategy = strategy
         self.target_ttft_s = target_ttft_s
+        if target_cache_hit_rate is not None:
+            self.target_cache_hit_rate = target_cache_hit_rate
         self.external_retest_weight = external_retest_weight
         self.external_ttft_prior_strength = external_ttft_prior_strength
         self.session_affinity = session_affinity
@@ -206,6 +211,7 @@ class KeyPool:
             metric.update({
                 "slow_streak": 0, "recovery_streak": 0,
                 "next_probe_at": 0.0, "probe_reserved_until": 0.0,
+                "cache_low_streak": 0,
             })
 
     @staticmethod
@@ -263,6 +269,7 @@ class KeyPool:
             view.entries = selected
             view.strategy = self.strategy
             view.target_ttft_s = self.target_ttft_s
+            view.target_cache_hit_rate = self.target_cache_hit_rate
             view.external_retest_weight = self.external_retest_weight
             view.external_ttft_prior_strength = self.external_ttft_prior_strength
             view.session_affinity = self.session_affinity
@@ -273,6 +280,7 @@ class KeyPool:
         else:
             self._views[signature].strategy = self.strategy
             self._views[signature].target_ttft_s = self.target_ttft_s
+            self._views[signature].target_cache_hit_rate = self.target_cache_hit_rate
             self._views[signature].external_retest_weight = self.external_retest_weight
             self._views[signature].external_ttft_prior_strength = self.external_ttft_prior_strength
             self._views[signature].session_affinity = self.session_affinity
@@ -382,6 +390,10 @@ class KeyPool:
             group = groups.setdefault(self._group_key(entry), {
                 "entries": [], "sort": self._sort_value(entry), "index": index,
                 "ttft": None, "samples": 0, "last_ts": 0.0,
+                "cache_hit_rate": None, "cache_samples": 0,
+                "cache_input_tokens": 0, "cache_cached_tokens": 0,
+                "cache_last_ts": 0.0, "cache_low_streak": 0,
+                "cache_eligible_samples": 0,
             })
             group["entries"].append(entry)
             group["sort"] = min(group["sort"], self._sort_value(entry))
@@ -402,6 +414,17 @@ class KeyPool:
             )
             metric = self._metrics.get(key)
             if metric:
+                cache_input_tokens = metric.get("cache_input_tokens", 0)
+                group["cache_samples"] = metric.get("cache_samples", 0)
+                group["cache_input_tokens"] = cache_input_tokens
+                group["cache_cached_tokens"] = metric.get("cache_cached_tokens", 0)
+                group["cache_last_ts"] = metric.get("cache_last_ts", 0.0)
+                group["cache_low_streak"] = metric.get("cache_low_streak", 0)
+                group["cache_eligible_samples"] = metric.get("cache_eligible_samples", 0)
+                if cache_input_tokens > 0:
+                    group["cache_hit_rate"] = min(
+                        group["cache_cached_tokens"] / cache_input_tokens, 1.0,
+                    )
                 group["slow_streak"] = metric["slow_streak"]
                 group["recovery_streak"] = metric["recovery_streak"]
                 group["next_probe_at"] = metric["next_probe_at"]
@@ -437,6 +460,9 @@ class KeyPool:
             "ewma": None, "samples": 0, "last_ts": 0.0,
             "slow_streak": 0, "recovery_streak": 0,
             "next_probe_at": 0.0, "probe_reserved_until": 0.0,
+            "cache_samples": 0, "cache_input_tokens": 0,
+            "cache_cached_tokens": 0, "cache_last_ts": 0.0,
+            "cache_low_streak": 0, "cache_eligible_samples": 0,
         })
 
     def _ordered_probe_candidates(self, candidates, now):
@@ -485,7 +511,7 @@ class KeyPool:
         if self._balanced_group not in available_keys:
             self._balanced_group = current_key if current_key in available_keys else ordered[0][0]
         if current_key not in available_keys:
-            return self._balanced_group
+            return self._cache_choice_in_tier(groups, self._balanced_group)
 
         current = groups[current_key]
         interval = max(float(self._setting("key_ttft_retest_interval", 60)), 0.0)
@@ -516,8 +542,8 @@ class KeyPool:
 
         if (self._balanced_group in groups
                 and groups[self._balanced_group]["sort"] > current["sort"]):
-            return self._balanced_group
-        return current_key
+            return self._cache_choice_in_tier(groups, self._balanced_group)
+        return self._cache_choice_in_tier(groups, current_key)
 
     def _pick_group(self, entries):
         groups = self._group_metrics(entries)
@@ -531,7 +557,61 @@ class KeyPool:
                 candidates = unknown or stale
                 return min(candidates, key=lambda pair: (pair[1]["last_ts"], pair[1]["sort"]))[0]
             return min(groups.items(), key=lambda pair: (pair[1]["ttft"], pair[1]["sort"]))[0]
+        if self.strategy == "cache":
+            return self._cache_group_choice(groups)
         return self._balanced_pick(groups)
+
+    def _cache_group_choice(self, groups):
+        current_key = self._group_key(self._current) if self._current is not None else None
+        current = groups.get(current_key)
+        try:
+            confirmations = max(int(self._setting("key_cache_hit_confirmations", 3)), 1)
+        except (TypeError, ValueError):
+            confirmations = 3
+        if (current is not None
+                and current.get("cache_eligible_samples", 0) > 0
+                and current.get("cache_low_streak", 0) < confirmations):
+            return current_key
+        candidates = {
+            key: item for key, item in groups.items()
+            if key != current_key
+        } or groups
+        acceptable = [
+            (key, item) for key, item in candidates.items()
+            if item["cache_hit_rate"] is not None
+            and item["cache_hit_rate"] >= self.target_cache_hit_rate
+        ]
+        if acceptable:
+            return min(
+                acceptable,
+                key=lambda pair: (-pair[1]["cache_hit_rate"], pair[1]["sort"],
+                                  pair[1]["index"]),
+            )[0]
+        unknown = [
+            (key, item) for key, item in candidates.items()
+            if item["cache_hit_rate"] is None
+        ]
+        if unknown:
+            return min(
+                unknown,
+                key=lambda pair: (pair[1]["cache_last_ts"], pair[1]["sort"],
+                                  pair[1]["index"]),
+            )[0]
+        return min(
+            candidates.items(),
+            key=lambda pair: (-pair[1]["cache_hit_rate"], pair[1]["sort"],
+                              pair[1]["index"]),
+        )[0]
+
+    def _cache_choice_in_tier(self, groups, group_key):
+        target = groups.get(group_key)
+        if target is None:
+            return group_key
+        tier = {
+            key: item for key, item in groups.items()
+            if item["sort"] == target["sort"]
+        }
+        return self._cache_group_choice(tier)
 
     def record_ttft(self, entry, seconds, alpha=0.3):
         if entry is None or seconds < 0 or getattr(entry, "_retired", False):
@@ -632,8 +712,37 @@ class KeyPool:
 
     def record_cache_usage(self, entry, input_tokens, cached_tokens, session_id=""):
         """Track Responses cache reads and cool a consistently cold group."""
-        if (entry is None or getattr(entry, "_retired", False)
-                or not session_id):
+        if entry is None or getattr(entry, "_retired", False):
+            return False
+        group_key = self._group_key(entry)
+        if input_tokens > 0:
+            group_metric = self._metric(group_key)
+            group_metric["cache_samples"] += 1
+            group_metric["cache_input_tokens"] += input_tokens
+            group_metric["cache_cached_tokens"] += cached_tokens
+            group_metric["cache_last_ts"] = time.time()
+            min_input = max(int(self._setting("key_cache_miss_min_input_tokens", 1024)), 0)
+            if input_tokens >= min_input:
+                group_metric["cache_eligible_samples"] = (
+                    group_metric.get("cache_eligible_samples", 0) + 1
+                )
+                try:
+                    confirmations = max(
+                        int(self._setting("key_cache_hit_confirmations", 3)), 1,
+                    )
+                except (TypeError, ValueError):
+                    confirmations = 3
+                hit_rate = min(max(cached_tokens / input_tokens, 0.0), 1.0)
+                if hit_rate < self.target_cache_hit_rate:
+                    group_metric["cache_low_streak"] = min(
+                        group_metric.get("cache_low_streak", 0) + 1,
+                        confirmations,
+                    )
+                else:
+                    group_metric["cache_low_streak"] = 0
+            if self.strategy == "cache":
+                self._sticky_until = 0.0
+        if not session_id:
             return False
         threshold = max(int(self._setting("key_cache_miss_threshold", 3)), 0)
         cooldown = max(float(self._setting("key_cache_miss_cooldown", 3600)), 0.0)
@@ -641,7 +750,6 @@ class KeyPool:
         if threshold == 0 or cooldown == 0 or input_tokens < min_input:
             return False
 
-        group_key = self._group_key(entry)
         metric_key = (group_key, session_id)
         metric = self._cache_metrics.get(metric_key)
         if metric is None:
@@ -758,6 +866,9 @@ class KeyPool:
         now = time.time() if now is None else now
         stale_after = max(float(self._setting("key_ttft_stale_after", 300)), 0.0)
         confirmations = max(int(self._setting("key_ttft_confirmations", 2)), 1)
+        cache_confirmations = max(
+            int(self._setting("key_cache_hit_confirmations", 3)), 1,
+        )
         result = []
         latest_views = {}
         for view in self._views.values():
@@ -769,6 +880,12 @@ class KeyPool:
             if not groups:
                 continue
             current_key = view._balanced_group
+            if view.strategy == "cache":
+                available_groups = view._group_metrics([
+                    entry for entry in view._eligible_entries()
+                    if entry.cooldown_until <= now
+                ])
+                current_key = view._cache_group_choice(available_groups or groups)
             if current_key not in groups and view._current is not None:
                 current_key = view._group_key(view._current)
             current = groups.get(current_key)
@@ -811,6 +928,21 @@ class KeyPool:
                         "external_ttft": prior.get("ttft"),
                     })
             endpoint_family, model = view._workload
+            cache_groups = []
+            for key, group in groups.items():
+                cache_groups.append({
+                    "group_id": key,
+                    "group_name": (group["entries"][0].group_name
+                                   or group["entries"][0].label),
+                    "sort": str(group["entries"][0].sort),
+                    "hit_rate": round(group["cache_hit_rate"], 6)
+                    if group["cache_hit_rate"] is not None else None,
+                    "samples": group["cache_samples"],
+                    "input_tokens": group["cache_input_tokens"],
+                    "cached_tokens": group["cache_cached_tokens"],
+                    "last_ts": group["cache_last_ts"],
+                    "low_streak": group.get("cache_low_streak", 0),
+                })
             result.append({
                 "endpoint_family": endpoint_family,
                 "model": model,
@@ -820,6 +952,20 @@ class KeyPool:
                 "current_sort": str(current["entries"][0].sort) if current else "",
                 "ttft_ewma": round(current["ttft"], 3)
                 if current and current.get("ttft") is not None else None,
+                "cache_hit_rate": round(current["cache_hit_rate"], 6)
+                if current and current.get("cache_hit_rate") is not None else None,
+                "cache_samples": current.get("cache_samples", 0) if current else 0,
+                "cache_input_tokens": current.get("cache_input_tokens", 0) if current else 0,
+                "cache_cached_tokens": current.get("cache_cached_tokens", 0) if current else 0,
+                "cache_low_streak": current.get("cache_low_streak", 0) if current else 0,
+                "cache_confirmations": cache_confirmations,
+                "cache_groups": sorted(
+                    cache_groups,
+                    key=lambda item: (
+                        item["hit_rate"] is None,
+                        -(item["hit_rate"] or 0),
+                    ),
+                ),
                 "samples": current.get("samples", 0) if current else 0,
                 "last_ts": current_last_ts,
                 "metric_source": metric_source,
@@ -830,6 +976,35 @@ class KeyPool:
                 "cheaper_groups": cheaper,
             })
         return sorted(result, key=lambda item: (item["endpoint_family"], item["model"]))
+
+    def cache_status(self):
+        """Aggregate cache telemetry by group for the key management table."""
+        latest_views = {}
+        for view in self._views.values():
+            current = latest_views.get(view._workload)
+            if current is None or view._last_view_access >= current._last_view_access:
+                latest_views[view._workload] = view
+        result = {}
+        for view in latest_views.values():
+            for group_key, metric in view._metrics.items():
+                input_tokens = metric.get("cache_input_tokens", 0)
+                if input_tokens <= 0:
+                    continue
+                group = result.setdefault(group_key, {
+                    "samples": 0, "input_tokens": 0,
+                    "cached_tokens": 0, "last_ts": 0.0,
+                })
+                group["samples"] += metric.get("cache_samples", 0)
+                group["input_tokens"] += input_tokens
+                group["cached_tokens"] += metric.get("cache_cached_tokens", 0)
+                group["last_ts"] = max(
+                    group["last_ts"], metric.get("cache_last_ts", 0.0),
+                )
+        for group in result.values():
+            group["hit_rate"] = round(
+                min(group["cached_tokens"] / group["input_tokens"], 1.0), 6,
+            )
+        return result
 
     def has_fresh(self, exclude_keys=None):
         exclude_keys = exclude_keys or set()
@@ -926,6 +1101,8 @@ class KeyPool:
             return
         previous_group = self._group_key(self._current) if self._current is not None else None
         self._current = entry
+        if self.strategy in ("cache", "balanced") and group_key != previous_group:
+            self._metric(group_key)["cache_low_streak"] = 0
         if self.strategy != "balanced" or group_key != previous_group:
             self._sticky_until = now + settings.key_sticky
         if self.strategy == "balanced" and group_key != previous_group:
@@ -1044,6 +1221,7 @@ _AUTH_STRIP_HEADERS = {"authorization", settings.key_auth_header}
 def clone_key_pool(pool: KeyPool) -> KeyPool:
     """Copy pool configuration and health without sharing mutable entries."""
     clone = KeyPool([], pool.provider)
+    clone.target_cache_hit_rate = pool.target_cache_hit_rate
     clone.external_retest_weight = pool.external_retest_weight
     clone.external_ttft_prior_strength = pool.external_ttft_prior_strength
     clone.session_affinity = pool.session_affinity
@@ -1117,6 +1295,7 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
     previous.provider = replacement.provider
     previous.strategy = replacement.strategy
     previous.target_ttft_s = replacement.target_ttft_s
+    previous.target_cache_hit_rate = replacement.target_cache_hit_rate
     previous.external_retest_weight = replacement.external_retest_weight
     previous.external_ttft_prior_strength = replacement.external_ttft_prior_strength
     previous.session_affinity = replacement.session_affinity
@@ -1134,6 +1313,7 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
         view.provider = replacement.provider
         view.strategy = replacement.strategy
         view.target_ttft_s = replacement.target_ttft_s
+        view.target_cache_hit_rate = replacement.target_cache_hit_rate
         view.external_retest_weight = replacement.external_retest_weight
         view.external_ttft_prior_strength = replacement.external_ttft_prior_strength
         view.prior_metrics = previous.prior_metrics

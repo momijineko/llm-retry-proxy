@@ -142,6 +142,36 @@ class KeyAvailabilityStatsTests(unittest.TestCase):
         self.assertEqual(result["premium"]["availability_pct"], 100)
         self.assertEqual(result["premium"]["requests"], 1)
 
+    def test_key_stats_sum_cache_tokens_for_the_final_key(self):
+        records = [
+            {
+                "key_id": "warm",
+                "final_status": 200,
+                "prompt_tokens": 1000,
+                "cached_tokens": 250,
+                "total_tokens": 1100,
+                "key_attempts": [
+                    {"key_id": "cold", "available": False},
+                    {"key_id": "warm", "available": True},
+                ],
+            },
+            {
+                "key_id": "warm",
+                "final_status": 200,
+                "prompt_tokens": 3000,
+                "cached_tokens": 1750,
+                "total_tokens": 3200,
+                "key_attempts": [{"key_id": "warm", "available": True}],
+            },
+        ]
+
+        result = {item["key_id"]: item for item in _agg_by_key(records)}
+
+        self.assertEqual(result["warm"]["prompt_tokens"], 4000)
+        self.assertEqual(result["warm"]["cached_tokens"], 2000)
+        self.assertEqual(result["warm"]["total_tokens"], 4300)
+        self.assertEqual(result["cold"]["prompt_tokens"], 0)
+
     def test_host_errors_are_excluded_from_availability(self):
         records = [{
             "key_id": "primary",

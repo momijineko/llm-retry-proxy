@@ -121,6 +121,8 @@ async def lifespan(_app):
         raise ValueError("IP_AUTO_BAN_DURATION 不能小于 0")
     if settings.key_cache_miss_threshold < 0:
         raise ValueError("KEY_CACHE_MISS_THRESHOLD 不能小于 0")
+    if settings.key_cache_hit_confirmations < 1:
+        raise ValueError("KEY_CACHE_HIT_CONFIRMATIONS 不能小于 1")
     if settings.key_cache_miss_min_input_tokens < 0:
         raise ValueError("KEY_CACHE_MISS_MIN_INPUT_TOKENS 不能小于 0")
     if settings.key_cache_miss_cooldown < 0:
@@ -674,6 +676,7 @@ async def key_pools_source_settings(request: Request):
             body.get("check_model", ""), body.get("session_affinity"),
             body.get("external_retest_weight"),
             body.get("external_ttft_prior_strength"),
+            body.get("target_cache_hit_rate"),
         )
     except PoolSyncError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

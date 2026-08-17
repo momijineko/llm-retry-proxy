@@ -262,6 +262,7 @@ class PoolSyncManager:
         pool = KeyPool([], source.get("provider") or self.config.provider)
         pool.strategy = source.get("strategy", "cost")
         pool.target_ttft_s = float(source.get("target_ttft_s", 5.0))
+        pool.target_cache_hit_rate = float(source.get("target_cache_hit_rate", 0.5))
         pool.external_retest_weight = float(source.get("external_retest_weight", 0.5))
         pool.external_ttft_prior_strength = float(
             source.get("external_ttft_prior_strength", 2.0)
@@ -404,6 +405,7 @@ class PoolSyncManager:
                         source["group_model_rejections"] = {}
                     source.setdefault("strategy", "cost")
                     source.setdefault("target_ttft_s", 5.0)
+                    source.setdefault("target_cache_hit_rate", 0.5)
                     source.setdefault("external_retest_weight", 0.5)
                     source.setdefault("external_ttft_prior_strength", 2.0)
                     source.setdefault("session_affinity", False)
@@ -564,6 +566,7 @@ class PoolSyncManager:
                 "id": source_id, "adapter": adapter_name, "base_url": base_url,
                 "provider": requested_provider, "session": {}, "entries": [],
                 "route_prefix": "", "strategy": "cost", "target_ttft_s": 5.0,
+                "target_cache_hit_rate": 0.5,
                 "external_retest_weight": 0.5,
                 "external_ttft_prior_strength": 2.0,
                 "session_affinity": False,
@@ -993,9 +996,10 @@ class PoolSyncManager:
     async def set_source_settings(self, source_id, strategy, target_ttft_s=5.0,
                                   check_model="", session_affinity=None,
                                   external_retest_weight=None,
-                                  external_ttft_prior_strength=None):
+                                  external_ttft_prior_strength=None,
+                                  target_cache_hit_rate=None):
         if strategy not in KEY_POOL_STRATEGIES:
-            raise PoolSyncError("号池策略必须是 cost、ttft 或 balanced")
+            raise PoolSyncError("号池策略必须是 cost、ttft、balanced 或 cache")
         try:
             target = float(target_ttft_s)
         except (TypeError, ValueError) as exc:
@@ -1016,6 +1020,13 @@ class PoolSyncManager:
                 raise PoolSyncError("外部参考强度必须是数字") from exc
             if not math.isfinite(prior_strength) or prior_strength < 0 or prior_strength > 100:
                 raise PoolSyncError("外部参考强度必须在 0 到 100 之间")
+        if target_cache_hit_rate is not None:
+            try:
+                cache_target = float(target_cache_hit_rate)
+            except (TypeError, ValueError) as exc:
+                raise PoolSyncError("可接受缓存命中下限必须是数字") from exc
+            if not math.isfinite(cache_target) or cache_target < 0 or cache_target > 1:
+                raise PoolSyncError("可接受缓存命中下限必须在 0 到 1 之间")
         async with self._lock:
             source = self.sources.get(source_id)
             if source is None:
@@ -1024,8 +1035,11 @@ class PoolSyncManager:
                 external_weight = float(source.get("external_retest_weight", 0.5))
             if external_ttft_prior_strength is None:
                 prior_strength = float(source.get("external_ttft_prior_strength", 2.0))
+            if target_cache_hit_rate is None:
+                cache_target = float(source.get("target_cache_hit_rate", 0.5))
             source["strategy"] = strategy
             source["target_ttft_s"] = target
+            source["target_cache_hit_rate"] = cache_target
             source["external_retest_weight"] = external_weight
             source["external_ttft_prior_strength"] = prior_strength
             source["check_model"] = str(check_model or "").strip()
@@ -1036,10 +1050,12 @@ class PoolSyncManager:
                 affinity = bool(source.get("session_affinity", False))
                 pool.apply_settings(
                     strategy, target, external_weight, prior_strength, affinity,
+                    cache_target,
                 )
                 for view in pool.views():
                     view.apply_settings(
                         strategy, target, external_weight, prior_strength, affinity,
+                        cache_target,
                     )
             self._save_state()
             return self.status()
@@ -1320,10 +1336,13 @@ class PoolSyncManager:
             await self.stop()
         return result
 
-    def _visible_entry(self, source, item, pool, runtime, disabled_key_ids, now):
+    def _visible_entry(self, source, item, pool, runtime, cache_runtime,
+                       disabled_key_ids, now):
         raw_key = item.get("key", "")
         entry = runtime.get(raw_key)
         prior = pool.prior_metrics.get(str(item.get("group_id") or "")) if pool else None
+        group_key = pool._group_key(entry) if pool and entry else ""
+        cache = cache_runtime.get(group_key) or {}
         ttft_stale_after = getattr(self.config, "key_ttft_stale_after", 300)
         return {
             "source_key_id": item.get("source_key_id"),
@@ -1353,6 +1372,11 @@ class PoolSyncManager:
             "probe_latency_s": (round(entry.probe_latency_s, 3)
                                 if entry and entry.probe_latency_s is not None else None),
             "probe_last_ts": entry.probe_last_ts if entry else 0,
+            "cache_hit_rate": cache.get("hit_rate"),
+            "cache_samples": cache.get("samples", 0),
+            "cache_input_tokens": cache.get("input_tokens", 0),
+            "cache_cached_tokens": cache.get("cached_tokens", 0),
+            "cache_last_ts": cache.get("last_ts", 0),
         }
 
     def _source_status(self, source, now):
@@ -1362,12 +1386,15 @@ class PoolSyncManager:
         if not route_prefix and self.route_registry is not None:
             route_prefix = self.route_registry.environment_prefix_for_url(source["base_url"])
         runtime = {entry.key: entry for entry in pool.entries} if pool else {}
+        cache_runtime = pool.cache_status() if pool else {}
         disabled_key_ids = {
             str(value) for value in source.get("disabled_key_ids", [])
             if value not in (None, "")
         }
         visible_entries = [
-            self._visible_entry(source, item, pool, runtime, disabled_key_ids, now)
+            self._visible_entry(
+                source, item, pool, runtime, cache_runtime, disabled_key_ids, now,
+            )
             for item in (source.get("entries") or [])
         ]
         return {
@@ -1381,6 +1408,7 @@ class PoolSyncManager:
             "last_error": source.get("last_error", ""),
             "strategy": source.get("strategy", "cost"),
             "target_ttft_s": source.get("target_ttft_s", 5.0),
+            "target_cache_hit_rate": source.get("target_cache_hit_rate", 0.5),
             "external_retest_weight": source.get("external_retest_weight", 0.5),
             "external_ttft_prior_strength": source.get(
                 "external_ttft_prior_strength", 2.0,
@@ -1538,6 +1566,7 @@ class PoolSyncManager:
                     "route_prefix": effective_prefix,
                     "strategy": "cost",
                     "target_ttft_s": 5.0,
+                    "target_cache_hit_rate": 0.5,
                     "external_retest_weight": 0.5,
                     "external_ttft_prior_strength": 2.0,
                     "session_affinity": False,

@@ -251,6 +251,9 @@ def _agg_by_key(records: list, key_aliases: dict = None) -> list:
             "request_availability_pct": request.get("availability_pct") if request else None,
             "avg_retries": request.get("avg_retries", 0),
             "max_retries": request.get("max_retries", 0),
+            "prompt_tokens": request.get("prompt_tokens", 0),
+            "cached_tokens": request.get("cached_tokens", 0),
+            "total_tokens": request.get("total_tokens", 0),
         })
     return sorted(out, key=lambda item: item["attempts"], reverse=True)
 
@@ -319,6 +322,7 @@ def compute_key_pool_stats(records: list, pool_configs: list, health_records: li
                 "key_id": key_id, "attempts": 0, "failed_attempts": 0, "ignored_attempts": 0,
                 "legacy_attempts": 0, "availability_pct": None, "requests": 0,
                 "request_availability_pct": None, "avg_retries": 0, "max_retries": 0,
+                "prompt_tokens": 0, "cached_tokens": 0, "total_tokens": 0,
             })
             health = health_by_key.get(key_id, {})
             for field in ("latest_available", "latest_neutral", "previous_available", "consecutive_failures",

@@ -243,6 +243,146 @@ class KeyPoolStickyTests(unittest.TestCase):
 
         self.assertEqual(pool.pick().group_id, "fast")
 
+    def test_cache_strategy_switches_only_after_consecutive_low_hit_rates(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("warm", "warm", sort="0.10", group_id="warm"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "cache"
+        pool.target_cache_hit_rate = 0.5
+
+        first = pool.pick()
+        self.assertEqual(first.group_id, "cheap")
+        pool.mark_success(first)
+        pool.record_cache_usage(first, 2000, 0)
+        self.assertEqual(pool.pick().group_id, "cheap")
+        pool.record_cache_usage(first, 2000, 0)
+        self.assertEqual(pool.pick().group_id, "cheap")
+        pool.record_cache_usage(first, 2000, 0)
+
+        second = pool.pick()
+        self.assertEqual(second.group_id, "warm")
+        pool.mark_success(second)
+        pool.record_cache_usage(second, 2000, 1600)
+
+        self.assertEqual(pool.pick().group_id, "warm")
+        groups = pool._group_metrics(pool.entries)
+        self.assertEqual(groups["cheap"]["cache_hit_rate"], 0.0)
+        self.assertEqual(groups["warm"]["cache_hit_rate"], 0.8)
+
+    def test_cache_strategy_resets_low_streak_after_an_acceptable_hit(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("warm", "warm", sort="0.10", group_id="warm"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "cache"
+        pool.target_cache_hit_rate = 0.5
+        current = pool.pick()
+        pool.mark_success(current)
+
+        pool.record_cache_usage(current, 2000, 0)
+        pool.record_cache_usage(current, 2000, 1200)
+        pool.record_cache_usage(current, 2000, 0)
+        pool.record_cache_usage(current, 2000, 0)
+
+        self.assertEqual(pool.pick().group_id, "cheap")
+        self.assertEqual(pool._metric("cheap")["cache_low_streak"], 2)
+
+    def test_cache_strategy_gives_a_returning_group_a_fresh_confirmation_window(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("one", "one", sort="0.02", group_id="one"),
+            KeyEntry("two", "two", sort="0.10", group_id="two"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "cache"
+        pool.target_cache_hit_rate = 0.5
+
+        first = pool.pick()
+        pool.mark_success(first)
+        for _ in range(3):
+            pool.record_cache_usage(first, 2000, 0)
+        second = pool.pick()
+        pool.mark_success(second)
+        for _ in range(3):
+            pool.record_cache_usage(second, 2000, 0)
+
+        returning = pool.pick()
+        self.assertEqual(returning.group_id, "one")
+        pool.mark_success(returning)
+        pool.record_cache_usage(returning, 2000, 0)
+
+        self.assertEqual(pool.pick().group_id, "one")
+        self.assertEqual(pool._metric("one")["cache_low_streak"], 1)
+
+    def test_cache_strategy_keeps_sampling_when_only_short_inputs_are_seen(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("one", "one", sort="0.02", group_id="one"),
+            KeyEntry("two", "two", sort="0.10", group_id="two"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "cache"
+
+        first = pool.pick()
+        pool.mark_success(first)
+        pool.record_cache_usage(first, 100, 0)
+
+        self.assertEqual(pool.pick().group_id, "two")
+
+    def test_cache_strategy_tracks_usage_without_session_and_breaks_rate_ties_by_cost(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.02", group_id="cheap"),
+            KeyEntry("premium", "premium", sort="0.10", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "cache"
+
+        self.assertFalse(pool.record_cache_usage(pool.entries[0], 1000, 500))
+        self.assertFalse(pool.record_cache_usage(pool.entries[1], 2000, 1000))
+
+        self.assertEqual(pool.pick().group_id, "cheap")
+        status_pool = KeyPool([])
+        status_pool._views[((), ("responses", "gpt-test"))] = pool
+        pool._workload = ("responses", "gpt-test")
+        status = status_pool.scheduler_status()[0]
+        self.assertEqual(status["cache_hit_rate"], 0.5)
+        self.assertEqual(status["cache_samples"], 1)
+        self.assertEqual(len(status["cache_groups"]), 2)
+        self.assertEqual(status_pool.cache_status()["cheap"]["hit_rate"], 0.5)
+        self.assertEqual(status_pool.cache_status()["premium"]["input_tokens"], 2000)
+
+    def test_balanced_strategy_uses_cache_hit_rate_within_same_cost_tier(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cold", "cold", sort="0.02", group_id="cold"),
+            KeyEntry("warm", "warm", sort="0.02", group_id="warm"),
+            KeyEntry("premium", "premium", sort="0.10", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_cache_hit_rate = 0.5
+
+        first = pool.pick()
+        self.assertEqual(first.group_id, "cold")
+        pool.mark_success(first)
+        pool.record_cache_usage(first, 2000, 0)
+        self.assertEqual(pool.pick().group_id, "cold")
+        pool.record_cache_usage(first, 2000, 0)
+        self.assertEqual(pool.pick().group_id, "cold")
+        pool.record_cache_usage(first, 2000, 0)
+        second = pool.pick()
+        self.assertEqual(second.group_id, "warm")
+        pool.mark_success(second)
+        pool.record_cache_usage(second, 2000, 1600)
+
+        self.assertEqual(pool.pick().group_id, "warm")
+
     def test_ttft_strategy_blends_fresh_external_prior_with_local_samples(self):
         pool = KeyPool([])
         pool.entries = [

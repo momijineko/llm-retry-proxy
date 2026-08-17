@@ -96,12 +96,56 @@ class KeyPoolPageTests(unittest.TestCase):
         )
 
     def test_manual_source_hides_meta_and_capability_columns(self):
-        # 手动号池展开时隐藏账号所在元信息行，并省略平台/自动能力/手工规则列
+        # 手动号池展开时隐藏账号所在元信息行，并省略在线池观测与能力列
         self.assertIn("policyBar(s)+`<div class=\"source-meta\">", self.html)
         self.assertIn("s.adapter==='manual'?'':'<th>平台</th>'", self.html)
-        self.assertIn("s.adapter==='manual'?'':'<th>自动能力</th><th>手工规则</th>'", self.html)
+        self.assertIn(
+            "s.adapter==='manual'?'':sortHead('缓存命中','cache',true)+"
+            "'<th>自动能力</th><th>手工规则</th>'",
+            self.html,
+        )
         self.assertIn("platformCell=isManual?'':", self.html)
-        self.assertIn("colspan=\"${isManual?7:10}\"", self.html)
+        self.assertIn("cacheCell=isManual?'':", self.html)
+        self.assertIn("colspan=\"${isManual?7:11}\"", self.html)
+
+    def test_cache_hit_strategy_and_runtime_cells_are_wired(self):
+        self.assertIn("['cache','缓存命中优先']", self.html)
+        self.assertIn("const cacheMode=s.strategy==='cache'", self.html)
+        self.assertIn("data-cache-source=", self.html)
+        self.assertIn("function cacheMarkup(k)", self.html)
+        self.assertIn("cacheCells=new Map", self.html)
+        self.assertIn("setInterval(refreshRuntime,5000)", self.html)
+        self.assertIn('data-cache-target-control', self.html)
+        self.assertIn('data-target-cache-hit=', self.html)
+        self.assertIn('target_cache_hit_rate:Number(cacheTarget.value)/100', self.html)
+        self.assertIn("cacheControl.hidden=selected!=='cache'&&selected!=='balanced'", self.html)
+        self.assertIn('`观察 ${cacheLow}/${cacheConfirmations}`', self.html)
+
+    def test_policy_controls_only_show_for_strategies_that_use_them(self):
+        self.assertIn('data-ttft-target-control', self.html)
+        self.assertIn("targetControl.hidden=selected!=='balanced'", self.html)
+        self.assertIn("priorControl.hidden=selected!=='ttft'", self.html)
+        self.assertIn("weightControl.hidden=selected!=='balanced'", self.html)
+
+    def test_scheduler_strategy_options_stay_on_one_line(self):
+        self.assertIn('class="strategy-control"', self.html)
+        self.assertIn('class="strategy-scroll"', self.html)
+        self.assertIn(".strategy-control{display:flex", self.html)
+        self.assertIn(".strategy-scroll{min-width:0;overflow-x:auto", self.html)
+        self.assertIn("font-size:12px;white-space:nowrap;cursor:pointer", self.html)
+
+    def test_key_table_sorts_by_real_latency_and_cache_hit_rate(self):
+        self.assertIn("sortHead('延时观测','latency',true)", self.html)
+        self.assertIn("sortHead('缓存命中','cache',true)", self.html)
+        self.assertIn("field=keySortMode==='latency'?'ttft_ewma':'cache_hit_rate'", self.html)
+        self.assertIn("keySortDirection=mode==='cache'?-1:1", self.html)
+        self.assertIn("runtimeSorted=keySortMode==='latency'||keySortMode==='cache'", self.html)
+
+    def test_balanced_strategy_is_labeled_for_all_three_metrics(self):
+        self.assertIn("['balanced','兼顾三者']", self.html)
+        self.assertIn("balancedMode?'<th class=\"num\">TTFT</th><th class=\"num\">CH</th>'", self.html)
+        self.assertIn("balancedMode?ttftCell+cacheCell:ttftCell", self.html)
+        self.assertNotIn("兼顾两者", self.html)
 
     def test_unknown_image_permission_does_not_disable_synced_models(self):
         self.assertIn(

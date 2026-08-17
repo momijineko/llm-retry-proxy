@@ -1074,12 +1074,13 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
             target._probe_cursor_group = target._group_key(target.entries[-1])
 
         status = await manager.set_source_settings(
-            source_id, "balanced", 4.5, "test-model", True, 0.75, 5,
+            source_id, "balanced", 4.5, "test-model", True, 0.75, 5, 0.6,
         )
 
         source = status["sources"][0]
         self.assertEqual(source["strategy"], "balanced")
         self.assertEqual(source["target_ttft_s"], 4.5)
+        self.assertEqual(source["target_cache_hit_rate"], 0.6)
         self.assertEqual(source["external_retest_weight"], 0.75)
         self.assertEqual(source["external_ttft_prior_strength"], 5)
         self.assertTrue(source["session_affinity"])
@@ -1089,6 +1090,7 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pool.strategy, "balanced")
         self.assertTrue(pool.session_affinity)
         self.assertEqual(pool.target_ttft_s, 4.5)
+        self.assertEqual(pool.target_cache_hit_rate, 0.6)
         self.assertEqual(pool.external_retest_weight, 0.75)
         self.assertEqual(pool.external_ttft_prior_strength, 5)
         self.assertEqual(view.external_retest_weight, 0.75)
@@ -1104,6 +1106,7 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         with open(self.state_file, encoding="utf-8") as f:
             persisted = json.load(f)
         self.assertEqual(persisted["sources"][0]["strategy"], "balanced")
+        self.assertEqual(persisted["sources"][0]["target_cache_hit_rate"], 0.6)
         self.assertEqual(persisted["sources"][0]["external_retest_weight"], 0.75)
         self.assertEqual(persisted["sources"][0]["external_ttft_prior_strength"], 5)
         self.assertEqual(persisted["sources"][0]["check_model"], "test-model")
@@ -1119,6 +1122,14 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             restored_pools["https://upstream.test"].external_ttft_prior_strength, 5,
         )
+        self.assertEqual(
+            restored_pools["https://upstream.test"].target_cache_hit_rate, 0.6,
+        )
+        cache_status = await manager.set_source_settings(source_id, "cache")
+        self.assertEqual(cache_status["sources"][0]["strategy"], "cache")
+        self.assertEqual(pool.strategy, "cache")
+        with open(self.state_file, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["sources"][0]["strategy"], "cache")
 
     async def test_source_strategy_rejects_non_finite_numbers(self):
         manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
@@ -1127,6 +1138,7 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
             ({"target_ttft_s": float("nan")}, "首 Token 上限"),
             ({"external_retest_weight": float("inf")}, "外部复测权重"),
             ({"external_ttft_prior_strength": float("-inf")}, "外部参考强度"),
+            ({"target_cache_hit_rate": float("nan")}, "缓存命中下限"),
         ]
         for values, message in cases:
             with self.subTest(values=values), self.assertRaisesRegex(PoolSyncError, message):

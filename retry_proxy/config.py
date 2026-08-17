@@ -199,6 +199,7 @@ class Settings:
     key_ttft_confirmations: int = int(os.getenv("KEY_TTFT_CONFIRMATIONS", "2"))
     key_ttft_hysteresis: float = float(os.getenv("KEY_TTFT_HYSTERESIS", "0.1"))
     key_cache_miss_threshold: int = int(os.getenv("KEY_CACHE_MISS_THRESHOLD", "3"))
+    key_cache_hit_confirmations: int = int(os.getenv("KEY_CACHE_HIT_CONFIRMATIONS", "3"))
     key_cache_miss_min_input_tokens: int = int(os.getenv("KEY_CACHE_MISS_MIN_INPUT_TOKENS", "1024"))
     key_cache_miss_cooldown: float = float(os.getenv("KEY_CACHE_MISS_COOLDOWN", "3600"))
     key_auth_header: str = os.getenv("KEY_AUTH_HEADER", "authorization").lower()
@@ -331,6 +332,7 @@ HOT_PARSERS = {
     "KEY_TTFT_CONFIRMATIONS": ("key_ttft_confirmations", int),
     "KEY_TTFT_HYSTERESIS": ("key_ttft_hysteresis", float),
     "KEY_CACHE_MISS_THRESHOLD": ("key_cache_miss_threshold", int),
+    "KEY_CACHE_HIT_CONFIRMATIONS": ("key_cache_hit_confirmations", int),
     "KEY_CACHE_MISS_MIN_INPUT_TOKENS": ("key_cache_miss_min_input_tokens", int),
     "KEY_CACHE_MISS_COOLDOWN": ("key_cache_miss_cooldown", float),
     "TOKEN_STATS_INJECT_USAGE": ("token_stats_inject_usage", _parse_bool),

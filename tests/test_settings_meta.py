@@ -122,6 +122,7 @@ class SettingsMetaTests(unittest.TestCase):
         self.assertEqual(days, {"LOG_RETENTION_DAYS"})
         self.assertNotIn("MAX_REQUEST_BODY", seconds)
         self.assertNotIn("KEY_TTFT_CONFIRMATIONS", seconds)
+        self.assertNotIn("KEY_CACHE_HIT_CONFIRMATIONS", seconds)
         self.assertNotIn("LISTEN_PORT", seconds)
 
     def test_tz_is_fourth_card_in_docker_group(self):
