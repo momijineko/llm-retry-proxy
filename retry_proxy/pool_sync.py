@@ -16,6 +16,7 @@ import httpx
 from .config import logger, settings
 from .key_pool import (KEY_POOLS, KEY_POOL_STRATEGIES, KeyEntry, KeyPool,
                        clone_key_pool, replace_key_pool)
+from .model_capabilities import is_image_model_name, is_model_rejection_response
 from .routes import normalize_route_prefix
 from .experience_data import (_EXPERIENCE_PATH_PATTERN,
                              _EXPERIENCE_TRANSFORM_DEFAULTS,
@@ -329,6 +330,14 @@ class PoolSyncManager:
         rejected = rejections.get(group_id, [])
         if rejected:
             capabilities["rejected_models"] = list(rejected)
+        route_rejections = (source.get("group_model_rejection_routes") or {}).get(group_id, {})
+        if isinstance(route_rejections, dict):
+            normalized_routes = {
+                str(route): list(models) for route, models in route_rejections.items()
+                if isinstance(models, (list, tuple, set)) and models
+            }
+            if normalized_routes:
+                capabilities["rejected_model_routes"] = normalized_routes
         return capabilities
 
     def _restore_static(self, base_url):
@@ -403,6 +412,8 @@ class PoolSyncManager:
                     source.setdefault("group_model_cache", {})
                     if not isinstance(source.get("group_model_rejections"), dict):
                         source["group_model_rejections"] = {}
+                    if not isinstance(source.get("group_model_rejection_routes"), dict):
+                        source["group_model_rejection_routes"] = {}
                     source.setdefault("strategy", "cost")
                     source.setdefault("target_ttft_s", 5.0)
                     source.setdefault("target_cache_hit_rate", 0.5)
@@ -571,7 +582,7 @@ class PoolSyncManager:
                 "external_ttft_prior_strength": 2.0,
                 "session_affinity": False,
                 "check_model": "", "disabled_key_ids": [], "group_model_cache": {},
-                "group_model_rejections": {},
+                "group_model_rejections": {}, "group_model_rejection_routes": {},
                 "experience_source": {}, "experience_items": [],
                 "experience_mappings": {}, "experience_last_sync_at": "",
                 "experience_last_error": "",
@@ -883,7 +894,7 @@ class PoolSyncManager:
             self._save_state()
             return self.status()
 
-    async def mark_model_unsupported(self, upstream, group_id, model):
+    async def mark_model_unsupported(self, upstream, group_id, model, endpoint_family=""):
         upstream = (upstream or "").rstrip("/")
         group_id = str(group_id or "")
         model = str(model or "").strip().lower()
@@ -894,14 +905,35 @@ class PoolSyncManager:
                            if self._pool_url(item) == upstream), None)
             if source is None:
                 return False
-            rejections = source.get("group_model_rejections")
-            if not isinstance(rejections, dict):
-                rejections = source["group_model_rejections"] = {}
-            models = rejections.setdefault(group_id, [])
-            if model in models:
-                return False
-            models.append(model)
-            models.sort()
+            if endpoint_family:
+                route_rejections = source.setdefault("group_model_rejection_routes", {})
+                route_models = route_rejections.setdefault(group_id, {})
+                route_list = route_models.setdefault(str(endpoint_family), [])
+                changed = False
+                if model not in route_list:
+                    route_list.append(model)
+                    route_list.sort()
+                    changed = True
+                rejections = source.get("group_model_rejections")
+                legacy_models = (
+                    rejections.get(group_id, []) if isinstance(rejections, dict) else []
+                )
+                if model in legacy_models:
+                    legacy_models.remove(model)
+                    if not legacy_models:
+                        rejections.pop(group_id, None)
+                    changed = True
+                if not changed:
+                    return False
+            else:
+                rejections = source.get("group_model_rejections")
+                if not isinstance(rejections, dict):
+                    rejections = source["group_model_rejections"] = {}
+                models = rejections.setdefault(group_id, [])
+                if model in models:
+                    return False
+                models.append(model)
+                models.sort()
             self._activate(source)
             self._save_state_throttled()
             logger.warning(
@@ -1076,7 +1108,55 @@ class PoolSyncManager:
             return "upstream_error", True
         return "request_rejected", False
 
-    async def check_availability(self, source_id, model=None):
+    @staticmethod
+    def _availability_endpoint_families(entry, model):
+        capabilities = entry.routing_capabilities or {}
+        families = set(capabilities.get("endpoint_families") or ())
+        platform = str(capabilities.get("platform") or "").lower()
+        normalized = str(model or "").lower()
+        model_leaf = normalized.rsplit("/", 1)[-1]
+
+        if "realtime" in normalized:
+            return ("realtime",)
+        if is_image_model_name(normalized):
+            if (platform == "gemini" or "gemini" in families) and (
+                    model_leaf.startswith("gemini")
+                    or "imagen" in model_leaf or "nano-banana" in model_leaf
+            ):
+                return ("gemini_image",)
+            return ("images",)
+        if "embedding" in normalized:
+            return ("embeddings",)
+        if any(marker in normalized for marker in ("transcri", "whisper")):
+            return ("audio_transcription",)
+        if any(marker in normalized for marker in ("tts", "speech")):
+            return ("audio_speech",)
+        if families == {"audio"}:
+            return ("audio_transcription",)
+        if len(families) == 1:
+            return (next(iter(families)),)
+        if model_leaf.startswith("claude") and "messages" in families:
+            return ("messages",)
+        if model_leaf.startswith("gemini") and "gemini" in families:
+            return ("gemini",)
+        text_families = tuple(
+            family for family in ("chat", "responses") if family in families
+        )
+        if text_families:
+            return text_families
+        for family in ("messages", "gemini"):
+            if family in families:
+                return (family,)
+        # Preserve the conservative legacy default when the group publishes no
+        # endpoint metadata. Explicit OpenAI capabilities above enable both.
+        return ("chat",)
+
+    @staticmethod
+    def _availability_endpoint_family(entry, model):
+        return PoolSyncManager._availability_endpoint_families(entry, model)[0]
+
+    async def check_availability(
+            self, source_id, model=None, group_ids=None, persist_model=True):
         async with self._lock:
             source = self.sources.get(source_id)
             if source is None:
@@ -1087,19 +1167,22 @@ class PoolSyncManager:
             check_model = str(model or source.get("check_model") or "").strip()
             if not check_model:
                 raise PoolSyncError("请先填写检测模型")
-            source["check_model"] = check_model
-            self._save_state()
+            if persist_model:
+                source["check_model"] = check_model
+                self._save_state()
             adapter = self._adapter(source["adapter"])
-            request_spec = adapter.availability_request(source, check_model)
-            if not isinstance(request_spec, dict) or not request_spec.get("url"):
-                raise PoolSyncError("同步适配器未提供有效的可用性检测请求")
-            probe_url = request_spec["url"]
-            probe_payload = request_spec.get("json") or {}
-            probe_headers = request_spec.get("headers") or {}
             # Snapshot entries so probes don't race with replace_key_pool swaps.
             groups = {}
             for entry in list(pool.entries):
                 groups.setdefault(entry.group_id or entry.key, []).append(entry)
+            if group_ids is not None:
+                requested_groups = {str(value) for value in group_ids if value not in (None, "")}
+                groups = {
+                    group_id: entries for group_id, entries in groups.items()
+                    if str(group_id) in requested_groups
+                }
+                if not groups:
+                    raise PoolSyncError("指定分组没有可检测的 Key")
             pool_signature = tuple(
                 (id(entry), entry.group_id, entry.group_name,
                  entry.auth_header, entry.auth_scheme)
@@ -1109,37 +1192,73 @@ class PoolSyncManager:
         # Network probes deliberately run outside the manager lock. Runtime
         # entries are stable snapshots; hot-replaced entries are marked retired.
         semaphore = asyncio.Semaphore(2)
+        targeted_groups = group_ids is not None
 
-        async def probe(entry):
-            headers = dict(probe_headers)
+        async def probe(entry, endpoint_family):
+            request_spec = adapter.availability_request(
+                source, check_model, endpoint_family,
+            )
+            if not isinstance(request_spec, dict) or not request_spec.get("url"):
+                raise PoolSyncError("同步适配器未提供有效的可用性检测请求")
+            headers = dict(request_spec.get("headers") or {})
             headers[entry.auth_header] = (
                 f"{entry.auth_scheme} {entry.key}"
                 if entry.auth_scheme else entry.key
             )
+            request_kwargs = {"headers": headers, "timeout": 30}
+            for field in ("json", "data", "files", "content"):
+                if field in request_spec:
+                    request_kwargs[field] = request_spec[field]
             try:
                 async with semaphore:
                     started = time.monotonic()
                     response = await self.client.post(
-                        probe_url, json=probe_payload, headers=headers, timeout=30,
+                        request_spec["url"], **request_kwargs,
                     )
                     elapsed = time.monotonic() - started
                 available = self._probe_status(response.status_code)
+                try:
+                    response_body = await response.aread() if response.status_code >= 400 else b""
+                except (httpx.HTTPError, httpx.TransportError):
+                    response_body = b""
+                model_rejected = is_model_rejection_response(
+                    response.status_code, response_body,
+                )
                 reason, circuit_failure = (
                     ("available", False) if available
+                    else ("model_unsupported", False) if model_rejected
                     else self._probe_failure(response.status_code)
                 )
-                return entry, response.status_code, available, elapsed, reason, circuit_failure
+                return (
+                    entry, response.status_code, available, elapsed, reason,
+                    circuit_failure, model_rejected, endpoint_family,
+                )
             except httpx.RequestError:
-                return entry, 0, False, None, "transport_error", True
+                return (
+                    entry, 0, False, None, "transport_error", True, False,
+                    endpoint_family,
+                )
 
         async def probe_group(entries):
-            attempts = []
-            for entry in entries:
-                result = await probe(entry)
-                attempts.append(result)
-                if result[2] or not result[5]:
-                    break
-            return attempts
+            endpoint_families = []
+            if targeted_groups:
+                for entry in entries:
+                    for endpoint_family in self._availability_endpoint_families(
+                            entry, check_model):
+                        if endpoint_family not in endpoint_families:
+                            endpoint_families.append(endpoint_family)
+            else:
+                endpoint_families.append("chat")
+            route_attempts = []
+            for endpoint_family in endpoint_families:
+                attempts = []
+                for entry in entries:
+                    result = await probe(entry, endpoint_family)
+                    attempts.append(result)
+                    if result[2] or not result[5]:
+                        break
+                route_attempts.append((endpoint_family, attempts))
+            return route_attempts
 
         group_results = await asyncio.gather(
             *(probe_group(entries) for entries in groups.values())
@@ -1161,13 +1280,18 @@ class PoolSyncManager:
             if current_signature != pool_signature:
                 raise PoolSyncError("号池已在检测期间更新，请重试")
             summary = []
-            for group_id, attempts in by_group.items():
+            rejection_state_changed = False
+            for group_id, route_attempts in by_group.items():
+                attempts = [
+                    attempt for _, family_attempts in route_attempts
+                    for attempt in family_attempts
+                ]
                 available = any(item[2] is True for item in attempts)
                 explicitly_failed = bool(attempts) and all(item[2] is False for item in attempts)
                 circuit_opened = (
                     explicitly_failed and all(item[5] is True for item in attempts)
                 )
-                for entry, _, item_available, elapsed, _, _ in attempts:
+                for entry, _, item_available, elapsed, _, _, _, _ in attempts:
                     if item_available:
                         pool.record_probe(entry, elapsed)
                 if circuit_opened:
@@ -1177,16 +1301,103 @@ class PoolSyncManager:
                             entry, self.config.key_cooldown_5xx,
                             failure_kind="probe", status=status,
                         )
+                normalized_model = check_model.lower()
+                if targeted_groups:
+                    for endpoint_family, family_attempts in route_attempts:
+                        route_available = any(item[2] for item in family_attempts)
+                        model_rejected = bool(family_attempts) and all(
+                            item[6] for item in family_attempts
+                        )
+                        rejection_family = {
+                            "audio_speech": "audio",
+                            "audio_transcription": "audio",
+                            "gemini_image": "gemini",
+                        }.get(endpoint_family, endpoint_family)
+                        if model_rejected:
+                            route_rejections = source.setdefault(
+                                "group_model_rejection_routes", {},
+                            )
+                            route_models = route_rejections.setdefault(str(group_id), {})
+                            models = route_models.setdefault(rejection_family, [])
+                            if normalized_model not in models:
+                                models.append(normalized_model)
+                                models.sort()
+                                rejection_state_changed = True
+                        elif route_available:
+                            route_rejections = source.get("group_model_rejection_routes")
+                            route_models = (
+                                route_rejections.get(str(group_id))
+                                if isinstance(route_rejections, dict) else None
+                            )
+                            models = route_models.get(rejection_family, []) if route_models else []
+                            if normalized_model in models:
+                                models.remove(normalized_model)
+                                if not models:
+                                    route_models.pop(rejection_family, None)
+                                if not route_models and isinstance(route_rejections, dict):
+                                    route_rejections.pop(str(group_id), None)
+                                rejection_state_changed = True
+                    if any(item[2] or item[6] for item in attempts):
+                        legacy_rejections = source.get("group_model_rejections")
+                        legacy_models = (
+                            legacy_rejections.get(str(group_id), [])
+                            if isinstance(legacy_rejections, dict) else []
+                        )
+                        if normalized_model in legacy_models:
+                            legacy_models.remove(normalized_model)
+                            if not legacy_models:
+                                legacy_rejections.pop(str(group_id), None)
+                            rejection_state_changed = True
+                else:
+                    model_rejected = any(item[6] for item in attempts)
+                    rejections = source.setdefault("group_model_rejections", {})
+                    models = rejections.setdefault(str(group_id), [])
+                    if model_rejected and normalized_model not in models:
+                        models.append(normalized_model)
+                        models.sort()
+                        rejection_state_changed = True
+                    elif available and normalized_model in models:
+                        models.remove(normalized_model)
+                        if not models:
+                            rejections.pop(str(group_id), None)
+                        rejection_state_changed = True
+                route_summaries = []
+                for endpoint_family, family_attempts in route_attempts:
+                    route_available = any(item[2] for item in family_attempts)
+                    route_summaries.append({
+                        "endpoint_family": endpoint_family,
+                        "available": route_available,
+                        "reason": (
+                            "available" if route_available else family_attempts[-1][4]
+                        ),
+                        "statuses": [item[1] for item in family_attempts],
+                    })
+                endpoint_families = [item[0] for item in route_attempts]
+                reason = route_summaries[-1]["reason"]
+                if available:
+                    reason = "available"
+                elif route_summaries and all(
+                        item["reason"] == "model_unsupported"
+                        for item in route_summaries):
+                    reason = "model_unsupported"
                 summary.append({
                     "group_id": group_id,
                     "group_name": groups[group_id][0].group_name or groups[group_id][0].label,
                     "available": True if available else False if explicitly_failed else None,
                     "circuit_opened": circuit_opened,
-                    "reason": "available" if available else attempts[-1][4],
+                    "reason": reason,
+                    "endpoint_family": (
+                        endpoint_families[0] if len(endpoint_families) == 1 else None
+                    ),
+                    "endpoint_families": endpoint_families,
+                    "routes": route_summaries,
                     "statuses": [item[1] for item in attempts],
                     "response_s": min((item[3] for item in attempts if item[2] and item[3] is not None),
                                       default=None),
                 })
+            if rejection_state_changed:
+                self._activate(source)
+                self._save_state_throttled()
             unavailable = sum(item["available"] is False for item in summary)
             rejected = sum(
                 item["available"] is False and not item["circuit_opened"] for item in summary
@@ -1573,7 +1784,7 @@ class PoolSyncManager:
                     "check_model": "",
                     "disabled_key_ids": [],
                     "group_model_cache": {},
-                    "group_model_rejections": {},
+                    "group_model_rejections": {}, "group_model_rejection_routes": {},
                     "experience_source": {},
                     "experience_items": [],
                     "experience_mappings": {},

@@ -10,6 +10,7 @@ from typing import Optional
 from collections import OrderedDict
 
 from .config import logger, settings
+from .model_capabilities import is_image_model_name
 
 _FAILURE_KIND_PRIORITY = {
     "transport": 1, "cache_miss": 1, "probe": 2, "upstream": 2,
@@ -28,13 +29,7 @@ _SESSION_ROUTE_IDLE = 3600.0
 
 
 def _is_image_model(model):
-    value = (model or "").strip().lower()
-    return (
-        value.startswith(("gpt-image-", "image", "imagen", "nano-banana"))
-        or value.startswith("gemini") and any(
-            marker in value for marker in ("image", "imagen", "nano-banana")
-        )
-    )
+    return is_image_model_name(model)
 
 
 class KeyEntry:
@@ -67,6 +62,16 @@ class KeyEntry:
                         str(value).strip().lower() for value in capabilities.get(field, ())
                         if str(value).strip()
                     )
+            if "rejected_model_routes" in capabilities:
+                raw_routes = capabilities.get("rejected_model_routes")
+                if isinstance(raw_routes, dict):
+                    normalized_capabilities["rejected_model_routes"] = {
+                        str(route).strip().lower(): tuple(
+                            str(value).strip().lower() for value in models
+                            if str(value).strip()
+                        ) for route, models in raw_routes.items()
+                        if isinstance(models, (list, tuple, set))
+                    }
             if "model_list_known" in capabilities:
                 normalized_capabilities["model_list_known"] = bool(
                     capabilities.get("model_list_known")
@@ -224,6 +229,10 @@ class KeyPool:
                 and endpoint_family not in families):
             return False
         if model and model in capabilities.get("rejected_models", ()):
+            return False
+        route_rejections = capabilities.get("rejected_model_routes", {})
+        if (model and endpoint_family in route_rejections
+                and model in route_rejections[endpoint_family]):
             return False
         if (model and _is_image_model(model) and "image_generation" in capabilities
                 and not capabilities.get("image_generation")):
@@ -1130,7 +1139,11 @@ class KeyPool:
                  "probe_last_ts": e.probe_last_ts,
                  "models": list(e.models), "paths": list(e.paths),
                  "routing_capabilities": {
-                     key: list(value) if isinstance(value, tuple) else value
+                     key: (
+                         {route: list(models) for route, models in value.items()}
+                         if key == "rejected_model_routes" and isinstance(value, dict)
+                         else list(value) if isinstance(value, tuple) else value
+                     )
                      for key, value in e.routing_capabilities.items()
                  }, "auth": {"header": e.auth_header, "scheme": e.auth_scheme}}
                 for e in self.entries]

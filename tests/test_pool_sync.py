@@ -177,7 +177,7 @@ class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entries[0]["platform"], "openai")
         self.assertEqual(
             entries[0]["routing_capabilities"]["endpoint_families"],
-            ["audio", "chat", "embeddings", "responses"],
+            ["audio", "chat", "embeddings", "realtime", "responses"],
         )
         self.assertEqual(
             entries[0]["routing_capabilities"]["model_patterns"],
@@ -200,6 +200,38 @@ class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             first[0]["routing_capabilities"]["model_patterns"],
             second[0]["routing_capabilities"]["model_patterns"],
+        )
+
+    async def test_group_model_limit_filters_stale_models_endpoint(self):
+        adapter = Sub2APIAdapter()
+        client = FakeClient()
+        original_get = client.get
+
+        async def restricted_group(url, params=None, headers=None, timeout=None):
+            result = await original_get(url, params=params, headers=headers, timeout=timeout)
+            if url.endswith("/groups/available"):
+                payload = result.json()
+                payload["data"][0]["models_list_config"] = {
+                    "enabled": True,
+                    "models": ["gpt-5.4"],
+                }
+                return response(payload)
+            return result
+
+        client.get = restricted_group
+        source = {"base_url": "https://upstream.test"}
+        session = {"access_token": "access-1", "refresh_token": "refresh-1"}
+
+        _, entries = await adapter.fetch(client, source, session)
+        _, catalog = await adapter.catalog(client, source, session)
+
+        self.assertEqual(source["group_model_cache"]["2"], ["gpt-5.4", "gpt-4.1"])
+        self.assertEqual(
+            entries[0]["routing_capabilities"]["model_patterns"], ["gpt-5.4"],
+        )
+        team = next(group for group in catalog if str(group["id"]) == "2")
+        self.assertEqual(
+            team["routing_capabilities"]["model_patterns"], ["gpt-5.4"],
         )
 
     async def test_failed_model_request_retries_on_next_sync(self):
@@ -1144,6 +1176,185 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(values=values), self.assertRaisesRegex(PoolSyncError, message):
                 await manager.set_source_settings("missing", "balanced", **values)
 
+    def test_availability_requests_cover_supported_model_protocols(self):
+        adapter = Sub2APIAdapter()
+        source = {"base_url": "https://upstream.test"}
+        cases = {
+            "chat": ("/v1/chat/completions", "json"),
+            "responses": ("/v1/responses", "json"),
+            "messages": ("/v1/messages", "json"),
+            "gemini": ("/v1beta/models/gemini-2.5-pro:generateContent", "json"),
+            "gemini_image": ("/v1beta/models/gemini-2.5-pro:generateContent", "json"),
+            "images": ("/v1/images/generations", "json"),
+            "embeddings": ("/v1/embeddings", "json"),
+            "audio_speech": ("/v1/audio/speech", "json"),
+            "audio_transcription": ("/v1/audio/transcriptions", "files"),
+            "realtime": ("/v1/realtime/sessions", "json"),
+        }
+        for family, (suffix, payload_field) in cases.items():
+            model = "gemini-2.5-pro" if family.startswith("gemini") else "test-model"
+            with self.subTest(family=family):
+                request_spec = adapter.availability_request(source, model, family)
+                self.assertTrue(request_spec["url"].endswith(suffix))
+                self.assertIn(payload_field, request_spec)
+
+    def test_availability_families_infer_media_and_ambiguous_text_models(self):
+        cases = [
+            ("dall-e-3", {"platform": "openai",
+                           "endpoint_families": ("chat", "images")}, ("images",)),
+            ("black-forest-labs/flux-1.1-pro", {}, ("images",)),
+            ("gpt-4o-image-preview", {}, ("images",)),
+            ("qwen-image", {}, ("images",)),
+            ("doubao-seedream-3.0-t2i", {}, ("images",)),
+            ("stability-ai/stable-image-ultra", {}, ("images",)),
+            ("dalle3", {}, ("images",)),
+            ("black-forest-labs/flux1-dev", {}, ("images",)),
+            ("text-image-embedding", {}, ("embeddings",)),
+            ("vendor-model", {"endpoint_families": ("images",)}, ("images",)),
+            ("vendor-model", {"endpoint_families": ("embeddings",)}, ("embeddings",)),
+            ("google/gemini-2.5-flash-image", {
+                "platform": "gemini", "endpoint_families": ("gemini",),
+            }, ("gemini_image",)),
+            ("realtime-preview", {"endpoint_families": ("chat",)}, ("realtime",)),
+            ("codex-mini-latest", {
+                "endpoint_families": ("chat", "responses"),
+            }, ("chat", "responses")),
+            ("computer-use-preview", {}, ("chat",)),
+        ]
+        for model, capabilities, expected in cases:
+            with self.subTest(model=model, capabilities=capabilities):
+                entry = SimpleNamespace(routing_capabilities=capabilities)
+                self.assertEqual(
+                    PoolSyncManager._availability_endpoint_families(entry, model), expected,
+                )
+
+    async def test_targeted_group_check_uses_group_protocol_and_scopes_rejection(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        entry = manager.pools["https://upstream.test"].entries[0]
+        entry.routing_capabilities = {
+            "platform": "anthropic", "endpoint_families": ("messages",),
+            "model_patterns": ("claude-3-7-sonnet",), "model_list_known": True,
+        }
+        manager.client.post = AsyncMock(return_value=response({
+            "error": {"type": "model_disabled", "message": "Model is not enabled"},
+        }, 403))
+
+        result = await manager.check_availability(
+            source_id, "claude-3-7-sonnet", [entry.group_id], persist_model=False,
+        )
+
+        call = manager.client.post.await_args
+        self.assertTrue(call.args[0].endswith("/v1/messages"))
+        self.assertEqual(call.kwargs["headers"]["anthropic-version"], "2023-06-01")
+        self.assertEqual(result["checks"][0]["endpoint_family"], "messages")
+        capabilities = manager.status()["sources"][0]["keys"][0]["routing_capabilities"]
+        self.assertNotIn("rejected_models", capabilities)
+        self.assertEqual(capabilities["rejected_model_routes"], {
+            "messages": ["claude-3-7-sonnet"],
+        })
+
+    async def test_targeted_group_check_accepts_any_supported_text_protocol(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        entry = manager.pools["https://upstream.test"].entries[0]
+        entry.routing_capabilities = {
+            "platform": "openai", "endpoint_families": ("chat", "responses"),
+        }
+
+        async def post(url, **kwargs):
+            if url.endswith("/v1/chat/completions"):
+                return response({
+                    "error": {"type": "model_disabled", "message": "Model is not enabled"},
+                }, 403)
+            if url.endswith("/v1/responses"):
+                return response({"output": []}, 200)
+            raise AssertionError(url)
+
+        manager.client.post = AsyncMock(side_effect=post)
+
+        result = await manager.check_availability(
+            source_id, "codex-mini-latest", [entry.group_id], persist_model=False,
+        )
+
+        check = result["checks"][0]
+        self.assertTrue(check["available"])
+        self.assertEqual(check["endpoint_families"], ["chat", "responses"])
+        self.assertIsNone(check["endpoint_family"])
+        self.assertEqual(manager.client.post.await_count, 2)
+        capabilities = manager.status()["sources"][0]["keys"][0]["routing_capabilities"]
+        self.assertEqual(capabilities["rejected_model_routes"], {
+            "chat": ["codex-mini-latest"],
+        })
+
+    async def test_targeted_success_does_not_create_empty_route_rejections(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        entry = manager.pools["https://upstream.test"].entries[0]
+        entry.routing_capabilities = {
+            "platform": "openai", "endpoint_families": ("chat", "responses"),
+        }
+        manager.client.post = AsyncMock(return_value=response({"output": []}, 200))
+
+        await manager.check_availability(
+            source_id, "codex-mini-latest", [entry.group_id], persist_model=False,
+        )
+
+        self.assertEqual(manager.sources[source_id]["group_model_rejection_routes"], {})
+
+    async def test_targeted_group_check_records_rejection_for_each_text_protocol(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        entry = manager.pools["https://upstream.test"].entries[0]
+        entry.routing_capabilities = {
+            "platform": "openai", "endpoint_families": ("chat", "responses"),
+        }
+        manager.client.post = AsyncMock(return_value=response({
+            "error": {"type": "model_disabled", "message": "Model is not enabled"},
+        }, 403))
+
+        result = await manager.check_availability(
+            source_id, "codex-mini-latest", [entry.group_id], persist_model=False,
+        )
+
+        check = result["checks"][0]
+        self.assertFalse(check["available"])
+        self.assertEqual(check["reason"], "model_unsupported")
+        self.assertEqual(manager.client.post.await_count, 2)
+        capabilities = manager.status()["sources"][0]["keys"][0]["routing_capabilities"]
+        self.assertEqual(capabilities["rejected_model_routes"], {
+            "chat": ["codex-mini-latest"],
+            "responses": ["codex-mini-latest"],
+        })
+
+    async def test_top_availability_check_keeps_chat_protocol(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        entry = manager.pools["https://upstream.test"].entries[0]
+        entry.routing_capabilities = {
+            "platform": "anthropic", "endpoint_families": ("messages",),
+        }
+        manager.client.post = AsyncMock(return_value=response({"choices": []}, 200))
+
+        await manager.check_availability(source_id, "saved-check-model")
+
+        self.assertTrue(manager.client.post.await_args.args[0].endswith("/v1/chat/completions"))
+
     async def test_availability_check_cools_failed_group_and_reset_clears_it(self):
         manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
         status = await manager.connect("sub2api", "https://upstream.test", "test", {
@@ -1177,7 +1388,7 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.ttft_samples, 0)
         self.assertIsNotNone(entry.probe_latency_s)
 
-    async def test_availability_check_does_not_cool_model_rejection(self):
+    async def test_availability_check_records_model_rejection_without_cooling(self):
         manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
         status = await manager.connect("sub2api", "https://upstream.test", "test", {
             "email": "user@example.com", "password": "secret",
@@ -1189,24 +1400,30 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         ))
         pool.finalize_entries()
         manager.client.post = AsyncMock(return_value=response({
-            "error": {"type": "model_not_found", "message": "unsupported"},
-        }, 404))
+            "error": {
+                "type": "model_disabled",
+                "message": "Model luna is not enabled for this group",
+            },
+        }, 403))
         self.config.key_auth_header = "authorization"
         self.config.key_auth_scheme = "Bearer"
         self.config.key_cooldown_5xx = 30
 
         with self.assertLogs("forward", level="INFO") as captured:
-            result = await manager.check_availability(source_id, "missing-model")
+            result = await manager.check_availability(source_id, "luna")
 
         check = result["checks"][0]
         self.assertFalse(check["available"])
         self.assertFalse(check["circuit_opened"])
-        self.assertEqual(check["reason"], "request_rejected")
-        self.assertEqual(check["statuses"], [404])
+        self.assertEqual(check["reason"], "model_unsupported")
+        self.assertEqual(check["statuses"], [403])
         self.assertEqual(manager.client.post.await_count, 1)
-        self.assertTrue(all(entry.cooldown_until == 0 for entry in pool.entries))
-        self.assertIn("model=missing-model", "\n".join(captured.output))
-        self.assertIn("statuses=404:1", "\n".join(captured.output))
+        current_pool = manager.pools["https://upstream.test"]
+        self.assertTrue(all(entry.cooldown_until == 0 for entry in current_pool.entries))
+        capabilities = manager.status()["sources"][0]["keys"][0]["routing_capabilities"]
+        self.assertEqual(capabilities["rejected_models"], ["luna"])
+        self.assertIn("model=luna", "\n".join(captured.output))
+        self.assertIn("statuses=403:1", "\n".join(captured.output))
 
     async def test_availability_check_stops_group_after_first_success(self):
         manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
@@ -1227,6 +1444,52 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["checks"][0]["available"])
         self.assertEqual(manager.client.post.await_count, 1)
+
+    async def test_availability_check_can_target_one_group_and_restore_model(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        source = manager.sources[source_id]
+        source["group_model_rejections"] = {"2": ["luna"]}
+        pool = manager.pools["https://upstream.test"]
+        pool.entries.append(KeyEntry(
+            "sk-secret-other", "other", sort="0.04",
+            group_id="other", group_name="Other",
+        ))
+        pool.finalize_entries()
+        manager.client.post = AsyncMock(return_value=response({"choices": []}, 200))
+        self.config.key_auth_header = "authorization"
+        self.config.key_auth_scheme = "Bearer"
+
+        result = await manager.check_availability(source_id, "luna", ["2"])
+
+        self.assertEqual([check["group_id"] for check in result["checks"]], ["2"])
+        self.assertEqual(manager.client.post.await_count, 2)
+        self.assertNotIn("2", source["group_model_rejections"])
+        target_key = next(
+            key for key in manager.status()["sources"][0]["keys"]
+            if str(key.get("group_id")) == "2"
+        )
+        capabilities = target_key["routing_capabilities"]
+        self.assertNotIn("luna", capabilities.get("rejected_models", []))
+
+    async def test_group_model_scan_does_not_replace_saved_check_model(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        source = manager.sources[source_id]
+        source["check_model"] = "saved-model"
+        manager.client.post = AsyncMock(return_value=response({"choices": []}, 200))
+
+        await manager.check_availability(
+            source_id, "scanned-model", ["2"], persist_model=False,
+        )
+
+        self.assertEqual(source["check_model"], "saved-model")
 
     async def test_availability_ttft_excludes_concurrency_queue_time(self):
         manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})

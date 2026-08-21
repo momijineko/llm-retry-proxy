@@ -1217,6 +1217,48 @@ class KeyPoolStickyTests(unittest.TestCase):
 
         self.assertEqual([entry.key for entry in selected.entries], ["paid"])
 
+    def test_endpoint_scoped_rejection_does_not_block_other_protocols(self):
+        pool = KeyPool([])
+        pool.entries = [KeyEntry("multi", "multi", routing_capabilities={
+            "platform": "antigravity",
+            "endpoint_families": ["chat", "messages"],
+            "model_patterns": ["claude-3-7-sonnet"],
+            "model_list_known": True,
+            "rejected_model_routes": {"chat": ["claude-3-7-sonnet"]},
+        })]
+        pool.finalize_entries()
+
+        chat = pool.for_request(
+            "claude-3-7-sonnet", "v1/chat/completions", "chat", "claude",
+        )
+        messages = pool.for_request(
+            "claude-3-7-sonnet", "v1/messages", "messages", "claude",
+        )
+
+        self.assertIsNone(chat)
+        self.assertEqual([entry.key for entry in messages.entries], ["multi"])
+
+    def test_realtime_rejection_blocks_the_realtime_route(self):
+        pool = KeyPool([])
+        pool.entries = [KeyEntry("multi", "multi", routing_capabilities={
+            "platform": "openai",
+            "endpoint_families": ["chat", "realtime"],
+            "model_patterns": ["realtime-preview"],
+            "model_list_known": True,
+            "rejected_model_routes": {"realtime": ["realtime-preview"]},
+        })]
+        pool.finalize_entries()
+
+        realtime = pool.for_request(
+            "realtime-preview", "v1/realtime/sessions", "realtime", "",
+        )
+        chat = pool.for_request(
+            "realtime-preview", "v1/chat/completions", "chat", "",
+        )
+
+        self.assertIsNone(realtime)
+        self.assertEqual([entry.key for entry in chat.entries], ["multi"])
+
     def test_image_models_require_image_generation_permission(self):
         pool = KeyPool([])
         pool.entries = [
@@ -1254,14 +1296,21 @@ class RequestClassificationTests(unittest.TestCase):
         self.assertTrue(is_model_rejection_response(400, json.dumps({
             "error": {"message": "Unsupported model: gpt-example"},
         }).encode()))
+        self.assertTrue(is_model_rejection_response(403, json.dumps({
+            "error": {"code": "model_disabled",
+                      "message": "Model luna is not enabled for this group"},
+        }).encode()))
+        self.assertTrue(is_model_rejection_response(403, json.dumps({
+            "message": "当前分组已禁用模型 luna",
+        }).encode()))
 
     def test_generic_request_errors_are_not_model_rejections(self):
         cases = [
             (404, {"error": {"type": "not_found_error", "message": "Route not found"}}),
             (400, {"error": {"type": "invalid_request_error",
                               "message": "max_tokens must be positive"}}),
-            (403, {"error": {"code": "model_not_found",
-                              "message": "The model does not exist"}}),
+            (403, {"error": {"code": "permission_denied",
+                              "message": "Invalid API key"}}),
         ]
         for status, payload in cases:
             with self.subTest(status=status, payload=payload):
@@ -1277,6 +1326,7 @@ class RequestClassificationTests(unittest.TestCase):
             "v1/images/generations": "images",
             "v1/embeddings": "embeddings",
             "v1/audio/transcriptions": "audio",
+            "v1/realtime/sessions": "realtime",
             "v1beta/models/gemini-2.5-pro:generateContent": "gemini",
             "v1/models": "",
         }
@@ -1479,6 +1529,81 @@ class KeyPoolCooldownWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.total_sent, 1)
         self.assertEqual(pool.entries[0].last_failure_status, 403)
         sleep.assert_not_awaited()
+
+    async def test_model_disabled_403_switches_group_without_cooling_key(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("luna-off", "luna-off", group_id="off", sort="0.01"),
+            KeyEntry("luna-on", "luna-on", group_id="on", sort="0.02"),
+        ]
+        pool.finalize_entries()
+        config = SimpleNamespace(
+            hedge_mode="off", max_retries=3, retry_interval=0,
+            retry_interval_429=5, retry_backoff=False, retry_backoff_max=60,
+            retry_backoff_429=True, retry_backoff_max_429=60,
+            key_cooldown=30, key_cooldown_5xx=30, key_cooldown_429=60,
+            key_cooldown_auth=1800, key_cooldown_max=3600,
+            key_cooldown_backoff=True,
+        )
+        responses = [
+            httpx.Response(
+                403, json={"error": {
+                    "code": "model_disabled",
+                    "message": "Model luna is not enabled for this group",
+                }},
+                request=httpx.Request("POST", "https://upstream.test"),
+            ),
+            httpx.Response(
+                200, json={"choices": []},
+                request=httpx.Request("POST", "https://upstream.test"),
+            ),
+        ]
+        proxy = RetryProxy(config=config, client=object())
+        proxy._send = AsyncMock(side_effect=responses)
+
+        result = await proxy.request(
+            "POST", "https://upstream.test", {}, b'{"model":"luna"}',
+            "v1/chat/completions", "test", "luna", pool,
+        )
+
+        self.assertEqual(result.response.status_code, 200)
+        self.assertEqual(result.model_rejections, ["off"])
+        self.assertEqual(result.model_rejection_routes, [("off", "chat")])
+        self.assertEqual(result.key_attempts[0]["available"], None)
+        self.assertEqual(result.key_attempts[1]["available"], True)
+        self.assertEqual(pool.entries[0].cooldown_until, 0)
+        self.assertEqual(pool.entries[0].last_failure_status, None)
+
+    async def test_realtime_model_rejection_keeps_realtime_route_family(self):
+        pool = KeyPool([])
+        pool.entries = [KeyEntry("realtime-off", "realtime-off", group_id="off")]
+        pool.finalize_entries()
+        config = SimpleNamespace(
+            hedge_mode="off", max_retries=1, retry_interval=0,
+            retry_interval_429=5, retry_backoff=False, retry_backoff_max=60,
+            retry_backoff_429=True, retry_backoff_max_429=60,
+            key_cooldown=30, key_cooldown_5xx=30, key_cooldown_429=60,
+            key_cooldown_auth=1800, key_cooldown_max=3600,
+            key_cooldown_backoff=True,
+        )
+        response = httpx.Response(
+            403, json={"error": {
+                "code": "model_disabled",
+                "message": "Model realtime-preview is not enabled for this group",
+            }},
+            request=httpx.Request("POST", "https://upstream.test"),
+        )
+        proxy = RetryProxy(config=config, client=object())
+        proxy._send = AsyncMock(return_value=response)
+
+        result = await proxy.request(
+            "POST", "https://upstream.test", {},
+            b'{"model":"realtime-preview"}', "v1/realtime/sessions",
+            "test", "realtime-preview", pool,
+        )
+
+        self.assertIs(result.response, response)
+        self.assertEqual(result.model_rejection_routes, [("off", "realtime")])
 
     def test_session_routes_lru_eviction(self):
         pool = KeyPool([("key1", "k1"), ("key2", "k2")])

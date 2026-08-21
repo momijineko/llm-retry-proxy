@@ -335,8 +335,8 @@ class ProxyPoolRoutingTests(unittest.IsolatedAsyncioTestCase):
         pool.entries = [entry]
         pool.finalize_entries()
         upstream_response = httpx.Response(
-            404, json={"error": {"code": "model_not_found",
-                                  "message": "The model does not exist"}},
+            403, json={"error": {"code": "model_disabled",
+                                  "message": "Model is not enabled for this group"}},
             request=httpx.Request("POST", "https://upstream.test/responses"),
         )
         result = SimpleNamespace(
@@ -369,10 +369,61 @@ class ProxyPoolRoutingTests(unittest.IsolatedAsyncioTestCase):
                 patch("retry_proxy.api._run_until_disconnect", AsyncMock(return_value=result)):
             response = await proxy("responses", request)
 
-        self.assertEqual(response.status_code, 404)
-        self.assertIn(b"model_not_found", response.body)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn(b"model_disabled", response.body)
         pool_sync.mark_model_unsupported.assert_awaited_once_with(
-            "https://upstream.test", "free", "gpt-example",
+            "https://upstream.test", "free", "gpt-example", "responses",
+        )
+
+    async def test_retried_model_rejection_updates_failed_group_after_success(self):
+        config = SimpleNamespace(
+            proxy_api_key="", dlp_mode="off", dlp_max_body_bytes=1024,
+            image_upstream_user_agent="", image_upstream_originator="",
+        )
+        winner = KeyEntry("winner-key", "winner", group_id="paid")
+        pool = KeyPool([])
+        pool.entries = [winner]
+        pool.finalize_entries()
+        upstream_response = httpx.Response(
+            200, json={"choices": []},
+            request=httpx.Request("POST", "https://upstream.test/chat/completions"),
+        )
+        result = SimpleNamespace(
+            response=upstream_response, winner_attempt=2, total_sent=2,
+            last_status=200, retry_codes=[403], first_ok=False,
+            key_id=winner.key_id, key_attempts=[], started_at=time.time(),
+            key_entry=winner, response_started_mono=time.monotonic(),
+            model_rejections=["free"],
+            model_rejection_routes=[("free", "chat")],
+        )
+        service = SimpleNamespace(
+            request=lambda *args, **kwargs: None,
+            hedge_mode_for=lambda request_pool: "off",
+        )
+        store = SimpleNamespace(write=AsyncMock())
+        pool_sync = SimpleNamespace(mark_model_unsupported=AsyncMock(return_value=True))
+        proxy = create_handlers(service, store, pool_sync)[-1]
+        request = Request({
+            "type": "http", "method": "POST", "path": "/chat/completions",
+            "headers": [(b"content-type", b"application/json")],
+            "query_string": b"", "server": ("test", 80), "client": ("127.0.0.1", 1),
+        }, receive=AsyncMock(return_value={
+            "type": "http.request", "body": b'{"model":"luna"}',
+            "more_body": False,
+        }))
+
+        with patch("retry_proxy.api.settings", config), \
+                patch("retry_proxy.config.settings", config), \
+                patch("retry_proxy.api.KEY_POOLS", {"https://upstream.test": pool}), \
+                patch("retry_proxy.api.match_route",
+                      return_value=("https://upstream.test", "test", "chat/completions")), \
+                patch("retry_proxy.api._run_until_disconnect", AsyncMock(return_value=result)):
+            response = await proxy("chat/completions", request)
+            body = b"".join([chunk async for chunk in response.body_iterator])
+
+        self.assertIn(b"choices", body)
+        pool_sync.mark_model_unsupported.assert_awaited_once_with(
+            "https://upstream.test", "free", "luna", "chat",
         )
 
     async def test_matching_proxy_key_is_not_forwarded_when_pool_is_missing(self):

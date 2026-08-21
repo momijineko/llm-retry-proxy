@@ -15,6 +15,10 @@ class KeyPoolPageTests(unittest.TestCase):
         self.assertIn('aria-controls="${bodyId}"', self.html)
         self.assertIn('class="source-body"', self.html)
 
+    def test_expired_admin_session_has_chinese_message(self):
+        self.assertIn("message==='invalid_admin_credentials'", self.html)
+        self.assertIn("'登录已失效，请重新登录'", self.html)
+
     def test_accordion_keeps_one_expanded_source_across_renders(self):
         self.assertIn("expandedSourceId=null", self.html)
         self.assertIn("function normalizeExpandedSource(sources)", self.html)
@@ -158,6 +162,26 @@ class KeyPoolPageTests(unittest.TestCase):
         )
         self.assertIn("'<span class=\"pill muted\">未知</span>'", self.html)
 
+    def test_image_model_detection_handles_infix_names_and_excludes_embeddings(self):
+        self.assertIn("if(/embed/.test(value))return false", self.html)
+        self.assertIn("(?:^|[-_.])", self.html)
+        self.assertIn("(?=$|[-_.]|\\d)", self.html)
+        for marker in ("image", "seedream", "stable-image"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.html)
+
+    def test_rejected_models_missing_from_catalog_are_still_rendered(self):
+        self.assertIn("learnedOnly=rejectedModels.filter", self.html)
+        self.assertIn("return!listedNames.has(normalized)", self.html)
+        self.assertIn("learnedOnly.map(model=>modelCapabilityMarkup(c,model))", self.html)
+
+    def test_route_rejections_are_labeled_without_disabling_the_whole_model(self):
+        self.assertIn("function rejectedRoutes(c,model)", self.html)
+        self.assertIn("function modelCapabilityMarkup(c,model)", self.html)
+        self.assertIn("globalRejected||noPermission", self.html)
+        self.assertIn("${esc(route)} 不可用", self.html)
+        self.assertIn('class="rejected-route"', self.html)
+
     def test_manual_add_key_dialog_is_wired(self):
         self.assertIn('id="manualAddModal"', self.html)
         self.assertIn('id="manualAddForm"', self.html)
@@ -178,6 +202,37 @@ class KeyPoolPageTests(unittest.TestCase):
             self.html,
         )
         self.assertIn("clearKeys(ids)", self.html)
+
+    def test_group_catalog_can_probe_one_group(self):
+        self.assertIn('<th>操作</th>', self.html)
+        self.assertIn('data-action="check-group"', self.html)
+        self.assertIn('检测可用模型', self.html)
+        self.assertIn("group_ids:[groupId]", self.html)
+        self.assertIn("activeGroupChecks.add(checkKey)", self.html)
+        self.assertIn("api('catalog?source_id='+encodeURIComponent(sourceId))", self.html)
+
+    def test_main_key_table_can_probe_each_group_once(self):
+        self.assertIn("renderedCheckGroups=new Set()", self.html)
+        self.assertIn("showGroupCheck=!isManual&&groupId&&!renderedCheckGroups.has(groupId)", self.html)
+        self.assertIn("data-group-name=", self.html)
+        self.assertIn("function groupModels(sourceId,groupId)", self.html)
+        self.assertIn("async function checkGroupModels(sourceId,groupId,groupName='',models=null)", self.html)
+        self.assertIn("groupCheckProgress.set(checkKey", self.html)
+        self.assertIn("persist_model:false", self.html)
+        self.assertNotIn("/(?:image|audio|realtime)/i", self.html)
+        self.assertIn("Object.values(caps.rejected_model_routes||{}).flat()", self.html)
+        self.assertIn("!/[?*\\[\\]]/.test(model)", self.html)
+
+    def test_group_scan_preserves_unsaved_policy_fields(self):
+        self.assertIn("const activeChecks=new Set(),activeGroupChecks=new Set()", self.html)
+        self.assertIn("policyDrafts=new Map()", self.html)
+        self.assertIn("function capturePolicyDrafts()", self.html)
+        self.assertIn("function restorePolicyDrafts()", self.html)
+        self.assertIn("capturePolicyDrafts();const scrollState", self.html)
+        self.assertIn("restorePolicyDrafts();restoreScrollState", self.html)
+        self.assertIn("policyDrafts.delete(String(button.dataset.id))", self.html)
+        self.assertIn("if(control)control.value=value", self.html)
+        self.assertNotIn("control&&value!==''", self.html)
 
 
 if __name__ == "__main__":

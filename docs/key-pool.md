@@ -176,21 +176,21 @@ Key 与在线同步得到的 Key 使用同一状态文件及加密策略：配�
 
 管理页使用受限字段转换而不是执行 JavaScript 或 Python 代码。这样可以适配不同 JSON 结构，同时避免把管理配置变成服务端任意代码执行入口。当前转换器只读取 JSON 对象中的点分隔字段，不执行表达式、网络请求或文件操作。
 
-号池页面的“检测可用性”只在手动点击时执行，不会后台轮询模型。检测最多同时发起 2 个请求，按分组依次尝试 Key；组内任一 Key 成功后立即停止检测该组。状态刷新不会向上游增加请求。模型检测使用页面指定的检测模型调用上游 `POST /v1/chat/completions`，只包含固定的最小提示并设置 `max_tokens=1`。真实生成返回 `2xx/3xx` 才视为可用。检测记录的是完整探测响应耗时，仅用于人工查看，不再写入真实首 Token 指标或参与自动调度。模型不存在、请求格式不兼容等请求级 `4xx` 会报告为“不支持该模型或请求”，但不会污染分组运行状态；`401/403`、`429`、`5xx` 或网络异常导致组内全部 Key 失败时才熔断整个分组。检测熔断沿用 `KEY_COOLDOWN_5XX`，到期自动恢复，也可以从页面解除单个分组或全部分组的熔断。
+号池页面的“检测可用性”只在手动点击时执行，不会后台轮询模型。检测最多同时发起 2 个请求，按分组依次尝试 Key；组内任一 Key 成功后立即停止检测该组。状态刷新不会向上游增加请求。上方“调用模型检测”继续使用页面指定模型调用 `POST /v1/chat/completions`；分组后的“检测可用模型”则扫描该组全部具体模型，并依据模型类型与分组能力分别使用 Chat、Responses、Messages、Gemini、图片、嵌入、音频或 Realtime 的最小请求。图片协议识别覆盖带供应商前缀的 Gemini 图片模型及常见的 GPT Image、DALL-E、Flux、Seedream、Recraft、Ideogram、Stable Diffusion 和 SDXL 命名；只有一个已知端点族时直接使用该端点，避免未知命名回退到 Chat。真实生成返回 `2xx/3xx` 才视为可用。检测记录的是完整探测响应耗时，仅用于人工查看，不再写入真实首 Token 指标或参与自动调度。明确返回 `model_not_found`、`model_disabled`、模型无权限等模型能力错误时，会按分组、模型及端点族持久记录并从对应协议的后续路由中排除，但不会熔断 Key；同一模型的其它协议不会被误伤。页面仅对全局模型拒绝或缺少生图权限的模型整体划线，端点级拒绝会显示“端点不可用”标签。其它请求格式类 `4xx` 只报告为“不支持该模型或请求”，不改变运行状态。普通 `401/403` 鉴权失败、`429`、`5xx` 或网络异常导致组内全部 Key 失败时才熔断整个分组。检测熔断沿用 `KEY_COOLDOWN_5XX`，到期自动恢复，也可以从页面解除单个分组或全部分组的熔断。
 
 管理页的分组目录还支持配置分组路由映射。为某个分组填写模型通配符和路径通配符后，该分组同步到的所有 Key 会继承这些规则。例如 `Image2-超分4k` 可配置 `paths=v1/images/*`、`models=image2-*`；请求匹配这些规则时才会从该分组取 Key。规则按分组 ID 保存在同步状态中，重启后仍然有效。
 
 ### 自动端点与模型能力隔离
 
-在线同步适配器可以为分组返回结构化的路由能力。`sub2api` 会同步分组的 `platform`、生图权限和 OpenAI Messages 调度权限，并在每个分组首次出现可用 Key 时使用该 Key 请求上游 `/v1/models`。`newapi` 会优先选择未启用 Token 模型限制的 Token 读取分组完整模型列表，再用每个 Token 自身的模型限制收窄结果；只有受限 Token 的分组直接使用各 Token 声明的限制。成功取得的模型列表按上游连接和分组 ID 持久化，后续普通同步不再重复请求；首次读取失败则在下次同步重试。代理据此生成自动能力约束，并先根据去掉代理前缀后的请求路径识别 `chat`、`responses`、`messages`、`images`、`embeddings`、`audio` 或 Gemini 原生端点，再解析正文或 Gemini 路径中的模型名。New API 没有提供可靠的分组端点和生图权限元数据，因此其自动能力只约束模型，不会根据缺失字段排除端点或生图模型。
+在线同步适配器可以为分组返回结构化的路由能力。`sub2api` 会同步分组的 `platform`、生图权限、OpenAI Messages 调度权限及分组模型限制，并在每个分组首次出现可用 Key 时使用该 Key 请求上游 `/v1/models`；最终模型能力取分组限制与 `/v1/models` 的交集，避免全局列表重新放入分组已经关闭的模型。`newapi` 会优先选择未启用 Token 模型限制的 Token 读取分组完整模型列表，再用每个 Token 自身的模型限制收窄结果；只有受限 Token 的分组直接使用各 Token 声明的限制。成功取得的模型列表按上游连接和分组 ID 持久化，后续普通同步不再重复请求；首次读取失败则在下次同步重试。代理据此生成自动能力约束，并先根据去掉代理前缀后的请求路径识别 `chat`、`responses`、`messages`、`images`、`embeddings`、`audio` 或 Gemini 原生端点，再解析正文或 Gemini 路径中的模型名。New API 没有提供可靠的分组端点和生图权限元数据，因此其自动能力只约束模型，不会根据缺失字段排除端点或生图模型。
 
 自动能力是硬约束：代理先排除端点协议、模型范围或生图能力不兼容的分组，再应用管理页中的手工 `models`、`paths` 通配符。手工规则只能进一步缩小候选范围，不能将已被自动能力排除的分组重新加入。所有重试、熔断、粘性和倍率/首 Token 调度都只在最终候选分组内进行。
 
-上游 `/v1/models` 可能声明了实际不可用的模型。代理不会额外探测；当真实业务请求收到明确的 `model_not_found`、`unsupported_model` 等模型不存在响应时，会按连接和分组持久记录该模型。管理页仍保留上游声明的模型名并加删除线，以便看出上游数据有误；后续同名模型会跳过该分组，其他模型及其他分组不受影响。普通参数错误或只有状态码、没有明确模型错误信息的 `400/404` 不会触发排除。
+上游 `/v1/models` 可能声明了实际不可用的模型。代理不会额外后台探测；当真实业务请求收到明确的 `model_not_found`、`unsupported_model`、`model_disabled` 或模型无权限响应时，会按连接和分组持久记录该模型，并在当前请求还有兼容分组时直接切换。模型能力拒绝不会熔断 Key，也不会影响该分组的其它模型。管理页仍保留上游声明的模型名并加删除线，以便看出上游数据有误；后续同名模型会跳过该分组，其他模型及其他分组不受影响。普通参数错误或只有状态码、没有明确模型错误信息的 `400/403/404/422` 不会触发排除。
 
 当在线号池包含能力元数据、请求端点可识别，但没有兼容 Key 时，代理返回 HTTP 403 和 `key_pool_no_compatible_route`，不会向上游发送请求。错误体同时包含请求模型、端点族、供应商、上游和未匹配原因。静态 CSV、旧同步快照以及未返回可靠能力元数据的适配器继续沿用原有 `models`、`paths` 与默认池行为。
 
-当前 `sub2api` 平台映射如下：`openai` 使用 Chat、Responses、Embeddings 和 Audio；开启 Messages 调度后也可使用 Messages；`anthropic` 使用 Messages；`gemini` 使用 Gemini 原生端点；`antigravity` 使用 Chat、Messages 和 Gemini 原生端点；`grok` 使用 Chat 和 Responses。开启生图权限的分组额外获得 Images 能力；即使上游 `/v1/models` 错误列出了 `gpt-image-*`、`imagen*` 等生图模型，没有生图权限的分组也会被自动排除。未知平台不根据名称猜测，保持旧选择行为。
+当前 `sub2api` 平台映射如下：`openai` 使用 Chat、Responses、Embeddings、Audio 和 Realtime；开启 Messages 调度后也可使用 Messages；`anthropic` 使用 Messages；`gemini` 使用 Gemini 原生端点；`antigravity` 使用 Chat、Messages 和 Gemini 原生端点；`grok` 使用 Chat 和 Responses。开启生图权限的分组额外获得 Images 能力；即使上游 `/v1/models` 错误列出了 `gpt-image-*`、`imagen*` 等生图模型，没有生图权限的分组也会被自动排除。未知平台不根据名称猜测，保持旧选择行为。
 
 通用调度配置：
 
@@ -209,4 +209,4 @@ IMAGE_UPSTREAM_ORIGINATOR=
 
 新增其它中转适配时，实现 `PoolSyncAdapter` 的认证与标准化接口，并按需覆盖 `routing_capabilities(group)` 返回可靠能力；无法可靠判断时返回空对象即可保留旧行为。适配器在 `retry_proxy/sync_adapters/__init__.py` 注册后，管理 API、持久化、定时任务和热替换逻辑不需要修改。
 
-不同中转站还可以在标准化 entry 中返回 `auth: {"header": "x-api-key", "scheme": ""}`。鉴权配置随 Key 进入候选池和重试链路，不再要求所有上游共用同一套全局 Header；未提供该字段的适配器继续使用全局配置。若站点不是 OpenAI Chat 探测格式，适配器应覆盖 `availability_request(source, model)`，返回自己的检测 URL、请求体和附加 Header。
+不同中转站还可以在标准化 entry 中返回 `auth: {"header": "x-api-key", "scheme": ""}`。鉴权配置随 Key 进入候选池和重试链路，不再要求所有上游共用同一套全局 Header；未提供该字段的适配器继续使用全局配置。若站点的协议格式不同，适配器应覆盖 `availability_request(source, model, endpoint_family)`，返回自己的检测 URL、请求体和附加 Header。

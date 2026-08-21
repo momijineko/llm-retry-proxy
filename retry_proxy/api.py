@@ -15,6 +15,8 @@ from .config import can_use_key_pool, log_capture, logger, settings
 from .dlp import decode_inbound_body, inspect_json_body
 from .routes import ROUTES, build_proxy_url, is_excluded_path, match_route
 from .key_pool import KEY_POOLS
+from .model_capabilities import (classify_endpoint_family, is_image_model_name,
+                                 is_model_rejection_response)
 from .retry import (
     _mark_key_failure,
     _tag,
@@ -57,20 +59,7 @@ _GEMINI_MODEL_PATH = re.compile(
 
 def classify_endpoint(path):
     """Return a stable endpoint family for capability-aware key routing."""
-    normalized = (path or "").strip("/").lower()
-    if not normalized:
-        return ""
-    if _GEMINI_MODEL_PATH.search(normalized):
-        return "gemini"
-    segments = normalized.split("/")
-    if "images" in segments:
-        return "images"
-    if len(segments) >= 2 and segments[-2:] == ["chat", "completions"]:
-        return "chat"
-    for family in ("responses", "messages", "embeddings", "audio"):
-        if family in segments:
-            return family
-    return ""
+    return classify_endpoint_family(path)
 
 
 def parse_request_model(body, path=""):
@@ -108,53 +97,10 @@ def classify_model_scope(model, endpoint_family=""):
     if value.startswith("claude"):
         return "claude"
     if value.startswith("gemini"):
-        image_markers = ("image", "imagen", "nano-banana")
-        if endpoint_family == "images" or any(marker in value for marker in image_markers):
+        if endpoint_family == "images" or is_image_model_name(value):
             return "gemini_image"
         return "gemini_text"
     return ""
-
-
-_MODEL_REJECTION_CODES = {
-    "invalid_model", "model_not_found", "unsupported_model",
-    "model_not_supported", "model_unsupported",
-}
-_MODEL_REJECTION_MESSAGE = re.compile(
-    r"(?:\bmodel\b.{0,160}\b(?:does not exist|not found|is not supported|unsupported)\b"
-    r"|\b(?:invalid|unsupported)\s+model\b|模型(?:不存在|不支持|无效)|不支持(?:该|此)?模型)",
-    re.IGNORECASE,
-)
-
-
-def is_model_rejection_response(status_code, body):
-    """Recognize only explicit model capability failures from request-level 4xx."""
-    if status_code not in (400, 404, 422) or not body:
-        return False
-    try:
-        payload = json.loads(body)
-    except (ValueError, TypeError, UnicodeDecodeError):
-        return False
-    if not isinstance(payload, dict):
-        return False
-
-    error = payload.get("error", payload)
-    stack = [error]
-    messages = []
-    while stack:
-        value = stack.pop()
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if isinstance(item, (dict, list)):
-                    stack.append(item)
-                elif isinstance(item, str):
-                    normalized = re.sub(r"[\s-]+", "_", item.strip().lower())
-                    if key.lower() in ("code", "type", "reason") and normalized in _MODEL_REJECTION_CODES:
-                        return True
-                    if key.lower() in ("message", "detail", "error_description"):
-                        messages.append(item)
-        elif isinstance(value, list):
-            stack.extend(value)
-    return any(_MODEL_REJECTION_MESSAGE.search(message) for message in messages)
 
 
 def _sse_has_token(buffer):
@@ -776,6 +722,21 @@ def create_handlers(service, store, pool_sync=None):
         key_id = result.key_id
         key_tag = f" [{key_id}]" if key_id else ""
         key_attempts = getattr(result, "key_attempts", None) or []
+        learned_model_rejections = {
+            str(group_id) for group_id in (
+                getattr(result, "model_rejections", None) or []
+            ) if group_id not in (None, "")
+        }
+        if pool_sync is not None and model_name:
+            route_rejections = getattr(result, "model_rejection_routes", None) or []
+            if route_rejections:
+                for group_id, endpoint_family in route_rejections:
+                    await pool_sync.mark_model_unsupported(
+                        upstream, group_id, model_name, endpoint_family,
+                    )
+            else:
+                for group_id in learned_model_rejections:
+                    await pool_sync.mark_model_unsupported(upstream, group_id, model_name)
         start = result.started_at
         log_record = {"method": request.method, "path": "/" + path,
                       "provider": provider, "model": model_name,
@@ -817,9 +778,10 @@ def create_handlers(service, store, pool_sync=None):
                 error_body = None
             if error_body is not None:
                 if is_model_rejection_response(response.status_code, error_body):
-                    await pool_sync.mark_model_unsupported(
-                        upstream, entry.group_id, model_name,
-                    )
+                    if entry.group_id not in learned_model_rejections:
+                        await pool_sync.mark_model_unsupported(
+                            upstream, entry.group_id, model_name, endpoint_family,
+                        )
                 await response.aclose()
                 await write_log(response.status_code, False)
                 return Response(error_body, status_code=response.status_code, headers=headers)

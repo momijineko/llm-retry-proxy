@@ -1,4 +1,5 @@
 import asyncio
+import fnmatch
 import uuid
 
 from ..config import logger
@@ -87,6 +88,14 @@ def _model_ids(payload):
     return models
 
 
+def _models_allowed_by_limits(models, limits):
+    patterns = [str(value).strip().lower() for value in limits if str(value).strip()]
+    return [
+        model for model in models
+        if any(fnmatch.fnmatchcase(model.lower(), pattern) for pattern in patterns)
+    ]
+
+
 class Sub2APIAdapter(PoolSyncAdapter):
     name = "sub2api"
     label = "Sub2API"
@@ -100,7 +109,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
     def routing_capabilities(group):
         platform = str(group.get("platform") or "").strip().lower()
         endpoints = {
-            "openai": {"chat", "responses", "embeddings", "audio"},
+            "openai": {"chat", "responses", "embeddings", "audio", "realtime"},
             "anthropic": {"messages"},
             "gemini": {"gemini"},
             "antigravity": {"chat", "messages", "gemini"},
@@ -118,7 +127,7 @@ class Sub2APIAdapter(PoolSyncAdapter):
             models_config.get("models") or []
             if isinstance(models_config, dict) and models_config.get("enabled") else []
         )
-        return {
+        capabilities = {
             "platform": platform,
             "endpoint_families": sorted(endpoints),
             "model_patterns": [str(value) for value in model_patterns if str(value).strip()],
@@ -128,6 +137,9 @@ class Sub2APIAdapter(PoolSyncAdapter):
             ],
             "image_generation": image_generation,
         }
+        if isinstance(models_config, dict) and models_config.get("enabled"):
+            capabilities["model_list_known"] = True
+        return capabilities
 
     @staticmethod
     def _headers(access_token="", extra=None):
@@ -226,7 +238,11 @@ class Sub2APIAdapter(PoolSyncAdapter):
             capabilities = item.get("routing_capabilities")
             if group_id not in cache or not capabilities:
                 continue
-            capabilities["model_patterns"] = list(cache[group_id])
+            models = list(cache[group_id])
+            configured = capabilities.get("model_patterns") or []
+            if capabilities.get("model_list_known"):
+                models = _models_allowed_by_limits(models, configured)
+            capabilities["model_patterns"] = models
             capabilities["model_list_known"] = True
         return entries
 
@@ -379,7 +395,11 @@ class Sub2APIAdapter(PoolSyncAdapter):
             key = str(group_id)
             capabilities = self.routing_capabilities(group)
             if key in model_cache and capabilities and isinstance(model_cache[key], list):
-                capabilities["model_patterns"] = list(model_cache[key])
+                models = list(model_cache[key])
+                configured = capabilities.get("model_patterns") or []
+                if capabilities.get("model_list_known"):
+                    models = _models_allowed_by_limits(models, configured)
+                capabilities["model_patterns"] = models
                 capabilities["model_list_known"] = True
             catalog.append({
                 "id": group_id, "name": group.get("name", ""),

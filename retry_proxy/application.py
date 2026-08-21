@@ -685,8 +685,14 @@ async def key_pools_source_settings(request: Request):
 async def key_pools_check(request: Request):
     try:
         body = await _json_object(request)
+        group_ids = body.get("group_ids")
+        if group_ids is not None and not isinstance(group_ids, list):
+            raise HTTPException(status_code=400, detail="group_ids 必须是数组")
+        persist_model = body.get("persist_model", True)
+        if not isinstance(persist_model, bool):
+            raise HTTPException(status_code=400, detail="persist_model 必须是布尔值")
         return await pool_sync.check_availability(
-            body.get("source_id"), body.get("model"),
+            body.get("source_id"), body.get("model"), group_ids, persist_model,
         )
     except PoolSyncError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

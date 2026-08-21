@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from urllib.parse import quote
 
 import httpx
 
@@ -50,11 +51,12 @@ class PoolSyncAdapter(ABC):
     """Provider-specific authentication and key normalization contract.
 
     Normalized entries may include ``routing_capabilities`` with ``platform``,
-    ``endpoint_families``, ``model_patterns``, ``model_scopes``, ``model_list_known`` and
-    ``image_generation``. They may also include ``auth`` with ``header`` and
-    ``scheme`` for per-entry upstream authentication. Adapters should omit
-    either object when the upstream does not expose reliable metadata so
-    legacy selection/configuration is retained.
+    ``endpoint_families``, ``model_patterns``, ``model_scopes``,
+    ``model_list_known``, ``rejected_model_routes`` and ``image_generation``.
+    They may also include ``auth`` with ``header`` and ``scheme`` for per-entry
+    upstream authentication. Adapters should omit either object when the
+    upstream does not expose reliable metadata so legacy selection/configuration
+    is retained.
     """
 
     name = ""
@@ -86,10 +88,86 @@ class PoolSyncAdapter(ABC):
         """Return reliable normalized routing metadata, or an empty dict."""
         return {}
 
-    def availability_request(self, source, model):
-        """Build the request used by the manual availability check."""
+    def availability_request(self, source, model, endpoint_family="chat"):
+        """Build a minimal generation request for one model protocol."""
+        base_url = source["base_url"].rstrip("/")
+        if endpoint_family == "responses":
+            return {
+                "url": base_url + "/v1/responses",
+                "json": {
+                    "model": model, "input": "Hi", "max_output_tokens": 1,
+                    "stream": False,
+                },
+                "headers": {},
+            }
+        if endpoint_family == "messages":
+            return {
+                "url": base_url + "/v1/messages",
+                "json": {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "max_tokens": 1,
+                    "stream": False,
+                },
+                "headers": {"anthropic-version": "2023-06-01"},
+            }
+        if endpoint_family in ("gemini", "gemini_image"):
+            generation_config = {"maxOutputTokens": 1}
+            if endpoint_family == "gemini_image":
+                generation_config["responseModalities"] = ["IMAGE"]
+            return {
+                "url": (
+                    base_url + "/v1beta/models/" + quote(model, safe="")
+                    + ":generateContent"
+                ),
+                "json": {
+                    "contents": [{"parts": [{"text": "Hi"}]}],
+                    "generationConfig": generation_config,
+                },
+                "headers": {},
+            }
+        if endpoint_family == "images":
+            return {
+                "url": base_url + "/v1/images/generations",
+                "json": {"model": model, "prompt": "Hi", "n": 1},
+                "headers": {},
+            }
+        if endpoint_family == "embeddings":
+            return {
+                "url": base_url + "/v1/embeddings",
+                "json": {"model": model, "input": "Hi"},
+                "headers": {},
+            }
+        if endpoint_family == "audio_speech":
+            return {
+                "url": base_url + "/v1/audio/speech",
+                "json": {
+                    "model": model, "input": "Hi", "voice": "alloy",
+                    "response_format": "mp3",
+                },
+                "headers": {},
+            }
+        if endpoint_family == "audio_transcription":
+            # 44-byte PCM header plus one silent 16-bit sample.
+            silent_wav = (
+                b"RIFF\x26\x00\x00\x00WAVEfmt \x10\x00\x00\x00"
+                b"\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00"
+                b"\x02\x00\x10\x00data\x02\x00\x00\x00\x00\x00"
+            )
+            return {
+                "url": base_url + "/v1/audio/transcriptions",
+                "data": {"model": model},
+                "files": {"file": ("probe.wav", silent_wav, "audio/wav")},
+                "headers": {},
+            }
+        if endpoint_family == "realtime":
+            return {
+                "url": base_url + "/v1/realtime/sessions",
+                "json": {"model": model},
+                "headers": {"OpenAI-Beta": "realtime=v1"},
+            }
         return {
-            "url": source["base_url"].rstrip("/") + "/v1/chat/completions",
+            "url": base_url + "/v1/chat/completions",
             "json": {
                 "model": model,
                 "messages": [{"role": "user", "content": "Hi"}],

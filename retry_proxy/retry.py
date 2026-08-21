@@ -12,6 +12,7 @@ import httpx
 
 from .config import logger, settings
 from .key_pool import headers_with_key
+from .model_capabilities import classify_endpoint_family, is_model_rejection_response
 
 
 _client_ip = contextvars.ContextVar("client_ip", default="")
@@ -317,6 +318,8 @@ class RetryResult:
     key_entry: object = None
     response_started_at: float = 0.0
     response_started_mono: float = 0.0
+    model_rejections: list = None
+    model_rejection_routes: list = None
 
 
 class RetryProxy:
@@ -617,7 +620,10 @@ class RetryProxy:
             return await self._stagger(method, url, headers, body, path, start, provider, model, pool, session_id)
         max_attempts = _max_attempts(self.config)
         attempt = 0; last_status = 0; retry_codes = []; key_attempts = []; c429 = cother = 0; last_key_id = ""
+        model_rejections = []
+        model_rejection_routes = []
         request_excluded_keys = set()
+        model_rejected_keys = set()
         progress = _request_progress.get()
         if progress is not None:
             progress["key_attempts"] = key_attempts
@@ -631,7 +637,7 @@ class RetryProxy:
                 pool,
                 getattr(self.config, "key_pool_wait_timeout", None),
                 session_id,
-                request_excluded_keys,
+                request_excluded_keys | model_rejected_keys,
             )
             send_headers = headers_with_key(
                 headers, entry.key, entry.auth_header, entry.auth_scheme,
@@ -720,6 +726,49 @@ class RetryProxy:
                 await _sleep_before_retry(
                     sleep_for, pool, pool_wait, getattr(self.config, "key_pool_wait_timeout", None),
                 ); continue
+            model_rejected = False
+            if (pool and entry is not None and entry.group_id and model
+                    and response.status_code in (400, 403, 404, 422)):
+                try:
+                    error_body = await response.aread()
+                except (httpx.HTTPError, httpx.TransportError):
+                    error_body = b""
+                model_rejected = is_model_rejection_response(
+                    response.status_code, error_body,
+                )
+            if model_rejected:
+                _record_key_attempt(key_attempts, entry, None)
+                if entry.group_id not in model_rejections:
+                    model_rejections.append(entry.group_id)
+                endpoint_family = classify_endpoint_family(path) or "chat"
+                route_item = (entry.group_id, endpoint_family)
+                if route_item not in model_rejection_routes:
+                    model_rejection_routes.append(route_item)
+                model_rejected_keys.update(
+                    candidate.key for candidate in pool.entries
+                    if candidate.group_id == entry.group_id
+                )
+                excluded_keys = request_excluded_keys | model_rejected_keys
+                if pool.has_fresh(exclude_keys=excluded_keys):
+                    last_status = response.status_code
+                    retry_codes.append(response.status_code)
+                    detail = _response_error_message(response)
+                    detail_tag = f" 上游={detail}" if detail else ""
+                    await response.aclose()
+                    self.logger.warning(
+                        f"{_tag(method, path, provider, model)}{key_tag} "
+                        f"模型不兼容 #{attempt} 换分组{detail_tag} "
+                        f"总{time.time() - start:.1f}s"
+                    )
+                    continue
+                return RetryResult(
+                    response, attempt, attempt, response.status_code,
+                    retry_codes, False, last_key_id, start, key_attempts,
+                    key_entry=entry, response_started_at=cycle,
+                    response_started_mono=cycle_mono,
+                    model_rejections=model_rejections,
+                    model_rejection_routes=model_rejection_routes,
+                )
             html_bad_request = pool is not None and _is_html_bad_request(response)
             if model and (_should_retry(response.status_code) or html_bad_request):
                 last_status = response.status_code; retry_codes.append(response.status_code)
@@ -775,5 +824,11 @@ class RetryProxy:
             return RetryResult(response, attempt, attempt, response.status_code, retry_codes,
                                attempt == 1, last_key_id, start, key_attempts,
                                key_entry=entry, response_started_at=cycle,
-                               response_started_mono=cycle_mono)
-        return RetryResult(None, 0, attempt - 1, last_status, retry_codes, False, last_key_id, start, key_attempts)
+                               response_started_mono=cycle_mono,
+                               model_rejections=model_rejections,
+                               model_rejection_routes=model_rejection_routes)
+        return RetryResult(
+            None, 0, attempt - 1, last_status, retry_codes, False,
+            last_key_id, start, key_attempts, model_rejections=model_rejections,
+            model_rejection_routes=model_rejection_routes,
+        )
