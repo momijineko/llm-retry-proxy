@@ -199,6 +199,8 @@ Key 与在线同步得到的 Key 使用同一状态文件及加密策略：配�
 KEY_POOL_SYNC_DEFAULT_ADAPTER=sub2api
 KEY_POOL_SYNC_URL=https://aihub.top
 KEY_POOL_SYNC_INTERVAL=300
+# 外部经验数据接口的单次请求超时；慢接口可适当增大
+KEY_POOL_EXPERIENCE_TIMEOUT=60
 # 创建/补齐 Key 时相邻请求的间隔（秒）
 KEY_POOL_CREATE_DELAY=1.5
 # 可选：图片请求转发到上游时覆盖客户端身份

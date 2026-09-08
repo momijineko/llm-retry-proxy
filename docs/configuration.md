@@ -160,6 +160,7 @@ IP 和到期时间（永久封禁使用 `0`），不保存扫描路径。
 | `KEY_POOL_SYNC_DEFAULT_ADAPTER` | `sub2api` | 管理页新增连接时默认使用的同步适配器 |
 | `KEY_POOL_SYNC_URL` | `UPSTREAM_URL` | 管理页新增连接时预填的上游地址 |
 | `KEY_POOL_SYNC_INTERVAL` | `300` | 自动同步周期（秒）；`0` = 仅手动同步 |
+| `KEY_POOL_EXPERIENCE_TIMEOUT` | `60` | 外部经验数据接口的单次请求超时（秒）；超时后保留上次成功调度 |
 | `KEY_POOL_CREATE_DELAY` | `1.5` | 批量创建 key 时相邻请求的间隔（秒） |
 | `KEY_POOL_SYNC_STATE_FILE` | `LOG_DIR/.key_pool_sync.json` | 同步连接、刷新令牌与最近成功号池的持久化文件 |
 | `KEY_POOL_SYNC_SECRET` | `ADMIN_PASSWORD` | 状态文件登录凭据和同步得到的完整上游 Key 的加密主密钥；留空时回退到 `ADMIN_PASSWORD`，两者均未设置则不加密（明文落盘，向后兼容） |

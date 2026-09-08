@@ -285,6 +285,7 @@ class SettingsPostTests(unittest.IsolatedAsyncioTestCase):
     async def test_out_of_range_float_rejected(self):
         for key, value in (("RETRY_INTERVAL", "-1"), ("RETRY_BACKOFF_MAX", "-0.5"),
                            ("SSE2WS_FIRST_EVENT_TIMEOUT", "0"),
+                           ("KEY_POOL_EXPERIENCE_TIMEOUT", "0"),
                            ("KEY_COOLDOWN_5XX", "-30")):
             with self.subTest(key=key, value=value), \
                     self.assertRaises(HTTPException) as raised:
@@ -292,10 +293,12 @@ class SettingsPostTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(raised.exception.status_code, 400, key)
 
     async def test_non_finite_float_rejected(self):
-        for value in ("nan", "inf", "-inf"):
-            with self.subTest(value=value), \
+        for key, value in (("RETRY_INTERVAL", "nan"), ("RETRY_INTERVAL", "inf"),
+                           ("RETRY_INTERVAL", "-inf"),
+                           ("KEY_POOL_EXPERIENCE_TIMEOUT", "nan")):
+            with self.subTest(key=key, value=value), \
                     self.assertRaises(HTTPException) as raised:
-                await self._post({"updates": {"RETRY_INTERVAL": value}})
+                await self._post({"updates": {key: value}})
             self.assertEqual(raised.exception.status_code, 400)
 
     async def test_boundary_values_accepted(self):

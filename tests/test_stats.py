@@ -375,7 +375,7 @@ class LogStoreFlushTests(unittest.IsolatedAsyncioTestCase):
     async def test_summary_is_not_persisted_on_every_write_within_interval(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = SimpleNamespace(
-                log_dir=tmp, log_retention_days=30,
+                log_dir=tmp, log_retention_days=0,
                 legacy_log_file=os.path.join(tmp, "retry_log.jsonl"),
                 summary_file=os.path.join(tmp, "_summary.json"),
             )
@@ -401,7 +401,7 @@ class LogStoreFlushTests(unittest.IsolatedAsyncioTestCase):
     async def test_flush_forces_persistence_of_pending_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = SimpleNamespace(
-                log_dir=tmp, log_retention_days=30,
+                log_dir=tmp, log_retention_days=0,
                 legacy_log_file=os.path.join(tmp, "retry_log.jsonl"),
                 summary_file=os.path.join(tmp, "_summary.json"),
             )
@@ -420,7 +420,7 @@ class LogStoreFlushTests(unittest.IsolatedAsyncioTestCase):
     async def test_restart_replays_jsonl_tail_after_unflushed_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = SimpleNamespace(
-                log_dir=tmp, log_retention_days=30,
+                log_dir=tmp, log_retention_days=0,
                 legacy_log_file=os.path.join(tmp, "retry_log.jsonl"),
                 summary_file=os.path.join(tmp, "_summary.json"),
             )
@@ -445,7 +445,7 @@ class LogStoreFlushTests(unittest.IsolatedAsyncioTestCase):
     async def test_version_six_summary_migration_replays_unflushed_tail(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = SimpleNamespace(
-                log_dir=tmp, log_retention_days=30,
+                log_dir=tmp, log_retention_days=0,
                 legacy_log_file=os.path.join(tmp, "retry_log.jsonl"),
                 summary_file=os.path.join(tmp, "_summary.json"),
             )

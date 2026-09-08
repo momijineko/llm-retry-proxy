@@ -140,7 +140,7 @@ def _original_host_header(parsed):
     return host
 
 
-async def _get_pinned_public_url(url, *, params=None, headers=None, timeout=20):
+async def _get_pinned_public_url(url, *, params=None, headers=None, timeout=60):
     """Fetch a validated URL without allowing a second DNS lookup to change its target.
 
     The TCP connection uses a validated IP literal. HTTPS still authenticates the
@@ -162,6 +162,11 @@ async def _get_pinned_public_url(url, *, params=None, headers=None, timeout=20):
     if last_error is not None:
         raise last_error
     raise PoolSyncError("外部数据 URL 域名未解析到地址")
+
+
+def _error_summary(exc):
+    detail = str(exc).strip()
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
 
 
 def _experience_timestamp(value):
@@ -784,17 +789,18 @@ class PoolSyncManager:
         else:
             params = ({config["sample_param"]: config["samples"]}
                       if config.get("sample_param") else None)
+        timeout = float(getattr(self.config, "key_pool_experience_timeout", 60))
         if isinstance(self.client, httpx.AsyncClient):
             response = await _get_pinned_public_url(
                 config["url"], params=params,
-                headers={"Accept": "application/json"}, timeout=20,
+                headers={"Accept": "application/json"}, timeout=timeout,
             )
         else:
             # Test doubles do not open sockets; retain their simple get() contract.
             await _resolve_public_url_destination(config["url"])
             response = await self.client.get(
                 config["url"], params=params,
-                headers={"Accept": "application/json"}, timeout=20,
+                headers={"Accept": "application/json"}, timeout=timeout,
             )
         if response.status_code >= 400:
             raise PoolSyncError(f"外部数据接口请求失败 (HTTP {response.status_code})")
@@ -815,14 +821,15 @@ class PoolSyncManager:
             source["experience_last_error"] = ""
             return items
         except Exception as exc:
-            source["experience_last_error"] = str(exc)
+            error = _error_summary(exc)
+            source["experience_last_error"] = error
             if raise_errors:
                 if isinstance(exc, PoolSyncError):
                     raise
-                raise PoolSyncError(f"外部数据读取失败: {exc}") from exc
+                raise PoolSyncError(f"外部数据读取失败: {error}") from exc
             logger.warning(
                 f"外部数据刷新失败，继续使用原有调度: upstream={source['base_url']} "
-                f"error={exc}"
+                f"error={error}"
             )
             return source.get("experience_items") or []
 

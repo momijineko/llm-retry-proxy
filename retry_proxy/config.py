@@ -209,6 +209,7 @@ class Settings:
         "KEY_POOL_SYNC_URL", os.getenv("UPSTREAM_URL", "")
     ).strip().rstrip("/")
     key_pool_sync_interval: int = int(os.getenv("KEY_POOL_SYNC_INTERVAL", "300"))
+    key_pool_experience_timeout: float = float(os.getenv("KEY_POOL_EXPERIENCE_TIMEOUT", "60"))
     key_pool_create_delay: float = float(os.getenv("KEY_POOL_CREATE_DELAY", "1.5"))
     image_upstream_user_agent: str = os.getenv("IMAGE_UPSTREAM_USER_AGENT", "").strip()
     image_upstream_originator: str = os.getenv("IMAGE_UPSTREAM_ORIGINATOR", "").strip()

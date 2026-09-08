@@ -493,7 +493,7 @@ class ExternalDataNetworkSafetyTests(unittest.IsolatedAsyncioTestCase):
         ]))
         with patch("retry_proxy.pool_sync.asyncio.get_running_loop", return_value=loop), \
                 patch("retry_proxy.pool_sync.httpx.AsyncClient",
-                      return_value=ClientContext()):
+                      return_value=ClientContext()) as client_factory:
             await _get_pinned_public_url(
                 "https://metrics.test/groups?scope=public",
                 params={"limit": "50"}, headers={"Accept": "application/json"},
@@ -503,6 +503,7 @@ class ExternalDataNetworkSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.args[0], "https://93.184.216.34/groups?scope=public")
         self.assertEqual(call.kwargs["headers"]["Host"], "metrics.test")
         self.assertEqual(call.kwargs["extensions"]["sni_hostname"], "metrics.test")
+        client_factory.assert_called_once_with(trust_env=False, follow_redirects=False)
 
     async def test_pinned_ipv6_request_preserves_original_host_and_port(self):
         session = SimpleNamespace(get=AsyncMock(return_value=response({"ok": True})))
@@ -1831,6 +1832,45 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source["key_count"], 1)
         self.assertIn("HTTP 503", source["experience"]["last_error"])
         self.assertEqual(len(source["experience"]["items"]), 1)
+
+    async def test_external_refresh_reports_empty_transport_error_type(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()})
+        source = {
+            "base_url": "https://upstream.test",
+            "experience_source": {"url": "https://metrics.test/groups"},
+            "experience_items": [{"id": "existing"}],
+        }
+
+        with patch.object(manager, "_fetch_experience_items", new_callable=AsyncMock,
+                          side_effect=httpx.ReadTimeout("")), \
+                self.assertLogs("forward", level="WARNING") as captured:
+            items = await manager._refresh_experience_locked(source, raise_errors=False)
+
+        self.assertEqual(items, [{"id": "existing"}])
+        self.assertEqual(source["experience_last_error"], "ReadTimeout")
+        self.assertIn("error=ReadTimeout", captured.output[0])
+
+    async def test_external_fetch_uses_configured_timeout(self):
+        client = httpx.AsyncClient()
+        manager = PoolSyncManager(
+            {}, SimpleNamespace(key_pool_experience_timeout=75), client, {},
+        )
+        config = {
+            "url": "https://metrics.test/groups",
+            "query_params": {"limit": "50"},
+            "transform": ExternalDataParserTests.TRANSFORM,
+        }
+        try:
+            with patch("retry_proxy.pool_sync._get_pinned_public_url",
+                       new_callable=AsyncMock, return_value=response({"rows": []})) as fetch:
+                await manager._fetch_experience_items(config)
+        finally:
+            await client.aclose()
+
+        fetch.assert_awaited_once_with(
+            "https://metrics.test/groups", params={"limit": "50"},
+            headers={"Accept": "application/json"}, timeout=75.0,
+        )
 
     def test_single_existing_pool_is_used_as_generic_default_url(self):
         self.config.key_pool_sync_default_url = "https://default-without-pool.test"

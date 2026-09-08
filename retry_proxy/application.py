@@ -127,6 +127,9 @@ async def lifespan(_app):
         raise ValueError("KEY_CACHE_MISS_MIN_INPUT_TOKENS 不能小于 0")
     if settings.key_cache_miss_cooldown < 0:
         raise ValueError("KEY_CACHE_MISS_COOLDOWN 不能小于 0")
+    if (not math.isfinite(settings.key_pool_experience_timeout)
+            or settings.key_pool_experience_timeout <= 0):
+        raise ValueError("KEY_POOL_EXPERIENCE_TIMEOUT 必须是大于 0 的有限数字")
     if settings.dlp_mode != "off":
         policy = load_policy(settings.dlp_rule_file)
         unknown_rules = settings.dlp_rules - (policy.rules.keys() | {"structured_secret"})
