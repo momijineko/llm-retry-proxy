@@ -13,7 +13,8 @@ from fastapi.responses import Response, StreamingResponse
 from .access_control import resolve_client_ip
 from .config import can_use_key_pool, log_capture, logger, settings
 from .dlp import decode_inbound_body, inspect_json_body
-from .routes import ROUTES, build_proxy_url, is_excluded_path, match_route
+from .routes import (ROUTES, build_proxy_url, is_excluded_path, is_proxy_api_path,
+                     match_route, route_headers_for)
 from .key_pool import KEY_POOLS
 from .model_capabilities import (classify_endpoint_family, is_image_model_name,
                                  is_model_rejection_response)
@@ -46,6 +47,11 @@ DOWNSTREAM_PROXY_REQUEST_HEADERS = {
 }
 DOWNSTREAM_PROXY_REQUEST_PREFIXES = ("cf-", "x-forwarded-")
 
+# 携带代理凭据的请求在透传（目标上游无号池）时，这些头不会被发给上游
+_PROXY_CREDENTIAL_HEADERS = frozenset(
+    {"authorization", (settings.key_auth_header or "authorization").lower()}
+)
+
 _DIAGNOSTIC_VALUE_HEADERS = {
     "accept", "content-encoding", "content-type", "originator", "user-agent",
 }
@@ -60,6 +66,15 @@ _GEMINI_MODEL_PATH = re.compile(
 def classify_endpoint(path):
     """Return a stable endpoint family for capability-aware key routing."""
     return classify_endpoint_family(path)
+
+
+def is_model_list_path(path):
+    """Return true only for the collection endpoint, not a model resource."""
+    normalized = re.sub(
+        r"^v\d+(?:beta\d*|alpha\d*)?/", "", str(path or "").strip("/"),
+        flags=re.IGNORECASE,
+    )
+    return normalized.lower() == "models"
 
 
 def parse_request_model(body, path=""):
@@ -291,7 +306,36 @@ def _maybe_inject_stream_usage(body, endpoint_family):
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
-def outbound_request_headers(request_headers, path, model, config=settings):
+def _inspectable_request_body(body, request_headers):
+    """Return readable request JSON for diagnostics, without binary payloads."""
+    try:
+        payload = json.loads(body or b"")
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, (dict, list)):
+        return None
+    content_type = str(request_headers.get("content-type", "")).lower()
+    if "json" not in content_type:
+        return None
+
+    def strip_binary(value):
+        if isinstance(value, list):
+            return [strip_binary(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        cleaned = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in {"image", "image_url", "audio", "file_data", "blob"}:
+                cleaned[key] = "[omitted]"
+            else:
+                cleaned[key] = strip_binary(item)
+        return cleaned
+
+    return strip_binary(payload)
+
+
+def outbound_request_headers(request_headers, path, model, config=settings, full_path=None):
     headers = {
         name: value
         for name, value in filter_headers(
@@ -311,6 +355,9 @@ def outbound_request_headers(request_headers, path, model, config=settings):
         headers["user-agent"] = config.image_upstream_user_agent
     if image_request and config.image_upstream_originator:
         headers["originator"] = config.image_upstream_originator
+    # 路由级固定请求头：如 opencode Zen/Go 的 x-opencode-session（2026-09-06 起必需）
+    for name, value in route_headers_for(full_path or path or "", config=config).items():
+        headers[name] = value
     return headers
 
 
@@ -451,13 +498,24 @@ async def _read_request_body_limited(request, limit):
 
 
 _SETTINGS_NAV_LINK_RE = re.compile(r"\s*<a href=\"/settings\">配置</a>")
+_REQUESTS_NAV_LINK_RE = re.compile(r"\s*<a href=\"/requests\">请求排查</a>")
 
 
 def _with_settings_nav(html: str) -> str:
-    """SETTINGS_PAGE_ENABLED 关闭时移除导航中的配置入口"""
-    if settings.settings_page_enabled:
+    """Apply runtime-dependent entries to shared admin navigation."""
+    if getattr(settings, "settings_page_enabled", False):
         return html
     return _SETTINGS_NAV_LINK_RE.sub("", html)
+
+
+def _with_request_diagnostics_nav(html: str) -> str:
+    if getattr(settings, "request_body_logging", False):
+        return html
+    return _REQUESTS_NAV_LINK_RE.sub("", html)
+
+
+def _admin_page_html(html: str) -> str:
+    return _with_request_diagnostics_nav(_with_settings_nav(html))
 
 
 def create_handlers(service, store, pool_sync=None):
@@ -465,8 +523,9 @@ def create_handlers(service, store, pool_sync=None):
         return {"status": "ok"}
 
     async def stats_page():
-        if os.path.exists(settings.stats_html_path):
-            with open(settings.stats_html_path, encoding="utf-8") as f: return Response(_with_settings_nav(f.read()), media_type="text/html; charset=utf-8")
+        stats_path = getattr(settings, "stats_html_path", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "stats.html"))
+        if os.path.exists(stats_path):
+            with open(stats_path, encoding="utf-8") as f: return Response(_admin_page_html(f.read()), media_type="text/html; charset=utf-8")
         return Response("stats.html not found", status_code=404)
 
     async def stats_api(range="today", model="", provider="", plan_start="", rate_mode=""):
@@ -528,9 +587,10 @@ def create_handlers(service, store, pool_sync=None):
                 "rate_counts": {"5h": c5h, "week": c_week, "month": c_month}}
 
     async def logs_page():
-        if os.path.exists(settings.logs_html_path):
-            with open(settings.logs_html_path, encoding="utf-8") as f:
-                return Response(_with_settings_nav(f.read()), media_type="text/html; charset=utf-8")
+        logs_path = getattr(settings, "logs_html_path", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs.html"))
+        if os.path.exists(logs_path):
+            with open(logs_path, encoding="utf-8") as f:
+                return Response(_admin_page_html(f.read()), media_type="text/html; charset=utf-8")
         return Response("logs.html not found", status_code=404)
 
     async def logs_history(since: int = 0):
@@ -555,11 +615,46 @@ def create_handlers(service, store, pool_sync=None):
         return StreamingResponse(event_gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
+    async def requests_page():
+        if not getattr(settings, "request_body_logging", False):
+            return Response("request diagnostics disabled", status_code=404)
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "requests.html")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                return Response(_admin_page_html(f.read()), media_type="text/html; charset=utf-8")
+        return Response("requests.html not found", status_code=404)
+
+    async def requests_api(range="today", limit=500):
+        if not getattr(settings, "request_body_logging", False):
+            return Response("request diagnostics disabled", status_code=404)
+        days = {"today": 1, "7d": 7, "30d": 30, "all": 0}.get(range, 1)
+        limit = max(1, min(int(limit), 2000))
+        records = store.load(days)
+        records = [record for record in records if record.get("request_body") is not None
+                   or record.get("request_body_unavailable")]
+        records = records[-limit:]
+        records.reverse()
+        return {"records": records, "range": range, "count": len(records)}
+
     async def proxy(path: str, request: Request):
+        # 管理路由的拼写错误、子路径和错误方法不能落入通用上游代理。
+        local_roots = {"admin", "stats", "logs", "requests", "settings",
+                       "key-pools", "health", "docs", "redoc", "openapi.json"}
+        local_path = path.strip("/").split("/", 1)[0].lower() in local_roots
+        browser_page = request.method in ("GET", "HEAD") and (
+            request.headers.get("sec-fetch-mode") == "navigate"
+            or "text/html" in request.headers.get("accept", "").lower()
+        )
+        if local_path or browser_page:
+            return Response('{"detail":"Not Found"}', status_code=404,
+                            media_type="application/json")
         if is_excluded_path(path): return Response(status_code=404)
         client_ip = _request_ip(request)
         log_method = request.method
         upstream, provider, remaining = match_route(path)
+        if not is_proxy_api_path(remaining):
+            return Response('{"detail":"Not Found"}', status_code=404,
+                            media_type="application/json")
         url = build_proxy_url(upstream, remaining)
         if request.url.query: url += f"?{request.url.query}"
         logger.debug(f"{_tag(log_method, path, provider, '', client_ip)} 收到下游请求")
@@ -645,11 +740,14 @@ def create_handlers(service, store, pool_sync=None):
                     logger.warning(f"{_tag(log_method, path, provider, '', client_ip)} DLP{action} rules={rules}{count}")
                 if dlp.exemptions:
                     logger.info(f"{_tag(log_method, path, provider, '', client_ip)} DLP豁免 count={dlp.exemptions}")
+        diagnostic_body = None
+        if getattr(settings, "request_body_logging", False):
+            diagnostic_body = _inspectable_request_body(body, request.headers)
         endpoint_family = classify_endpoint(remaining)
         model_name = parse_request_model(body, remaining)
         session_id = parse_request_session_id(body)
         model_scope = classify_model_scope(model_name, endpoint_family)
-        outbound_headers = outbound_request_headers(request.headers, remaining, model_name)
+        outbound_headers = outbound_request_headers(request.headers, remaining, model_name, full_path=path)
         if body_encoding:
             # 已按明文解压转发，移除 Content-Encoding 避免上游二次解压
             outbound_headers = {
@@ -669,19 +767,24 @@ def create_handlers(service, store, pool_sync=None):
             )
         base_pool = KEY_POOLS.get(upstream)
         pool_credential_ok = can_use_key_pool(request.headers)
+        # 配置了代理号池凭据但目标上游没有号池时，拒绝请求，避免把代理凭据
+        # 当作普通上游请求继续处理。
         if settings.proxy_api_key and pool_credential_ok and base_pool is None:
             return Response(
                 '{"error":{"type":"key_pool_unavailable","message":"Key pool is unavailable for this upstream"}}',
                 status_code=503, media_type="application/json",
             )
         pool_access = bool(base_pool and pool_credential_ok)
+        model_list_request = bool(
+            pool_access and request.method == "GET" and is_model_list_path(remaining)
+        )
         capability_routing = bool(
             pool_access and endpoint_family and base_pool.has_routing_capabilities()
         )
         request_pool = base_pool.for_request(
             model_name, remaining, endpoint_family, model_scope,
-        ) if pool_access else None
-        if pool_access and request_pool is None:
+        ) if pool_access and not model_list_request else base_pool if model_list_request else None
+        if pool_access and request_pool is None and not model_list_request:
             error_type = (
                 "key_pool_no_compatible_route" if capability_routing else "key_pool_no_match"
             )
@@ -699,15 +802,23 @@ def create_handlers(service, store, pool_sync=None):
                 "reason": "capability_mismatch" if capability_routing else "manual_rule_mismatch",
             }}, ensure_ascii=False)
             return Response(payload, status_code=403, media_type="application/json")
-        key_pool = upstream if request_pool else ""
-        body = _maybe_inject_stream_usage(body, endpoint_family)
+        key_pool = upstream if request_pool and not model_list_request else ""
         ip_token = set_client_ip(client_ip)
         try:
+            if model_list_request:
+                work = service.request_model_list(
+                    request.method, url, outbound_headers, path, provider, base_pool,
+                )
+            else:
+                body = _maybe_inject_stream_usage(body, endpoint_family)
+                work = service.request(
+                    request.method, url, outbound_headers,
+                    body, path, provider, model_name, request_pool, session_id,
+                    log_method="",
+                )
             result = await _run_until_disconnect(
                 request,
-                service.request(request.method, url, outbound_headers,
-                                body, path, provider, model_name, request_pool, session_id,
-                                log_method=""),
+                work,
             )
         finally:
             reset_client_ip(ip_token)
@@ -740,11 +851,17 @@ def create_handlers(service, store, pool_sync=None):
         start = result.started_at
         log_record = {"method": request.method, "path": "/" + path,
                       "provider": provider, "model": model_name,
+                      "session_id": session_id,
                       "upstream_status": last_status, "attempts": total_sent,
                       "retries": max(total_sent - 1, 0), "retry_codes": retry_codes,
                       "mode": service.hedge_mode_for(request_pool), "first_ok": first_ok,
                       "key_id": key_id, "key_pool": key_pool, "key_attempts": key_attempts,
                       "client_ip": client_ip}
+        if diagnostic_body is not None:
+            log_record["request_body"] = diagnostic_body
+        elif getattr(settings, "request_body_logging", False):
+            log_record["request_body_unavailable"] = True
+
         async def write_log(final_status, succeeded, **extra):
             record = dict(log_record)
             record.update({"ts": datetime.now().isoformat(timespec="milliseconds"),
@@ -922,4 +1039,4 @@ def create_handlers(service, store, pool_sync=None):
                             extra["stream_status"] = stream_override
                         await write_log(response.status_code, succeeded, **extra)
         return StreamingResponse(body_gen(), status_code=response.status_code, headers=headers, media_type=response.headers.get("content-type"))
-    return health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy
+    return health, stats_page, stats_api, logs_page, logs_history, logs_stream, requests_page, requests_api, proxy

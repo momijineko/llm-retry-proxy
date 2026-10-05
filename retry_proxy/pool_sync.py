@@ -306,6 +306,8 @@ class PoolSyncManager:
                 "observed_ts": float(item.get("last_ts") or 0.0),
                 "external_group_id": str(external_group_id),
                 "name": item.get("name", ""),
+                "detection_status": item.get("detection_status", ""),
+                "detection_label": item.get("detection_label", ""),
             }
         pool.finalize_entries()
         return pool
@@ -762,7 +764,7 @@ class PoolSyncManager:
                 if name in transform:
                     normalized_transform[name] = transform[name]
         for name in normalized_transform:
-            if name == "ttft_unit":
+            if name in ("ttft_unit", "detection_map"):
                 continue
             value = str(normalized_transform.get(name) or "").strip()
             if name in ("items_path", "id_path", "ttft_path") and not value:
@@ -772,6 +774,11 @@ class PoolSyncManager:
             if value != "$" and value and not _EXPERIENCE_PATH_PATTERN.fullmatch(value):
                 raise PoolSyncError(f"外部数据字段路径无效: {value}")
             normalized_transform[name] = value
+        if normalized_transform.get("detection_map") is None:
+            normalized_transform["detection_map"] = {}
+        if not isinstance(normalized_transform.get("detection_map"), dict):
+            raise PoolSyncError("检测状态映射必须是对象")
+        normalized_transform["detection_map"] = {str(k).strip().lower(): str(v).strip() for k, v in normalized_transform["detection_map"].items() if str(k).strip() and str(v).strip()}
         unit = str(normalized_transform.get("ttft_unit") or "ms").strip().lower()
         if unit not in ("ms", "s"):
             raise PoolSyncError("TTFT 单位必须是 ms 或 s")
@@ -1559,6 +1566,11 @@ class PoolSyncManager:
         raw_key = item.get("key", "")
         entry = runtime.get(raw_key)
         prior = pool.prior_metrics.get(str(item.get("group_id") or "")) if pool else None
+        if prior is None:
+            external_items = {str(value.get("id")): value for value in source.get("experience_items", []) if isinstance(value, dict)}
+            direct = external_items.get(str(item.get("group_id") or ""))
+            if direct:
+                prior = direct
         group_key = pool._group_key(entry) if pool and entry else ""
         cache = cache_runtime.get(group_key) or {}
         ttft_stale_after = getattr(self.config, "key_ttft_stale_after", 300)
@@ -1587,6 +1599,8 @@ class PoolSyncManager:
                                    if prior and prior.get("ttft") is not None else None),
             "experience_samples": prior.get("samples", 0) if prior else 0,
             "experience_last_ts": prior.get("observed_ts", 0) if prior else 0,
+            "detection_status": prior.get("detection_status", "") if prior else "",
+            "detection_label": prior.get("detection_label", "") if prior else "",
             "probe_latency_s": (round(entry.probe_latency_s, 3)
                                 if entry and entry.probe_latency_s is not None else None),
             "probe_last_ts": entry.probe_last_ts if entry else 0,

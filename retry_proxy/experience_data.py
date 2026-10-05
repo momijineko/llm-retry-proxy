@@ -21,6 +21,8 @@ _EXPERIENCE_TRANSFORM_DEFAULTS = {
     "ttft_unit": "ms",
     "samples_path": "",
     "timestamp_path": "",
+    "detection_path": "",
+    "detection_map": {},
 }
 
 
@@ -85,7 +87,7 @@ def _parse_experience_payload(payload, transform=None):
             rate = rate if math.isfinite(rate) else None
         except (TypeError, ValueError):
             rate = None
-        normalized.append({
+        item = {
             "id": item_id,
             "name": str(_experience_value(raw, transform["name_path"]) or item_id).strip(),
             "platform": str(_experience_value(
@@ -97,5 +99,10 @@ def _parse_experience_payload(payload, transform=None):
             "last_ts": _experience_timestamp(_experience_value(
                 raw, transform["timestamp_path"],
             )),
-        })
+        }
+        if transform.get("detection_path"):
+            status = str(_experience_value(raw, transform["detection_path"]) or "").strip().lower()
+            item["detection_status"] = status
+            item["detection_label"] = str((transform.get("detection_map") or {}).get(status, "")).strip()
+        normalized.append(item)
     return normalized
