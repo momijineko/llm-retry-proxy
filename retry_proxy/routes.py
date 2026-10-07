@@ -28,6 +28,79 @@ def is_excluded_path(path: str) -> bool:
     return path.lstrip("/").lower() in EXCLUDE_PATHS
 
 
+def is_proxy_api_path(path: str) -> bool:
+    """检查去除上游路由前缀后的 API 路径，禁止任意页面走默认上游。"""
+    normalized = path.strip("/")
+    normalized = re.sub(r"^v\d+(?:beta\d*|alpha\d*)?/", "", normalized)
+    if normalized in {"chat/completions", "completions", "embeddings",
+                      "moderations", "images/generations", "images/edits",
+                      "images/variations", "audio/speech", "audio/transcriptions",
+                      "audio/translations", "sub2api/billing"}:
+        return True
+    # 这些资源支持列表、按 ID 查询及子操作，交给上游判断 ID/操作有效性。
+    return normalized.split("/", 1)[0] in {
+        "responses", "messages", "models", "files", "uploads", "batches",
+        "fine_tuning", "assistants", "threads", "vector_stores", "realtime",
+        "containers", "videos", "skills",
+    }
+
+
+def parse_route_headers(raw) -> dict:
+    """解析 ROUTE_HEADERS：按路由前缀为转发请求补充固定请求头。
+
+    格式 `前缀:头名=值,头名=值`，多条配置用分号分隔，前缀 `*` 表示默认路由。
+    例如 `ROUTE_HEADERS=/ocg:x-opencode-session=0192f0aa-...`。
+    """
+    parsed = {}
+    for entry in str(raw or "").split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        prefix, separator, raw_headers = entry.partition(":")
+        if not separator:
+            logger.warning("ROUTE_HEADERS 条目格式错误，已跳过（应为 前缀:头名=值）")
+            continue
+        prefix = prefix.strip()
+        try:
+            normalized = "*" if prefix in ("", "*", "/") else normalize_route_prefix(prefix)
+        except ValueError:
+            logger.warning("ROUTE_HEADERS 路由前缀无效，已跳过")
+            continue
+        headers = {}
+        for pair in raw_headers.split(","):
+            name, separator, value = pair.partition("=")
+            name = name.strip().lower()
+            if (not separator or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9a-z-]+", name)
+                    or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+                logger.warning("ROUTE_HEADERS 请求头格式错误，已跳过")
+                continue
+            headers[name] = value.strip()
+        if headers:
+            parsed.setdefault(normalized, {}).update(headers)
+    return parsed
+
+
+def route_prefix_for(path: str) -> str:
+    """返回该请求命中的路由前缀；默认路由返回空字符串。"""
+    for prefix, _upstream_url, _provider, _strip in route_registry.routes:
+        if not prefix:
+            return ""
+        path_prefix = prefix.lstrip("/")
+        if path == path_prefix or path.startswith(path_prefix + "/"):
+            return prefix
+    return ""
+
+
+def route_headers_for(path: str, headers=None, config=settings) -> dict:
+    """返回该路径应补充的路由请求头；未命中命名路由时使用 `*` 兜底配置。"""
+    if headers is None:
+        headers = parse_route_headers(getattr(config, "route_headers", ""))
+    if not headers:
+        return {}
+    prefix = route_prefix_for(path)
+    return headers.get(prefix or "*", {})
+
+
 def normalize_route_prefix(prefix: str) -> str:
     value = (prefix or "").strip()
     if not value:

@@ -16,6 +16,7 @@ COPY main.py ./
 COPY retry_proxy ./retry_proxy
 COPY stats.html ./
 COPY logs.html ./
+COPY requests.html ./
 COPY key_pool.html ./
 COPY settings.html ./
 

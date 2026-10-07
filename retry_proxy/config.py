@@ -156,9 +156,14 @@ class Settings:
     ))
     provider: str = os.getenv("PROVIDER", "xfyun")
     extra_upstreams: str = os.getenv("EXTRA_UPSTREAMS", "")
+    # 按路由前缀补充固定请求头，如 /ocg:x-opencode-session=<uuid>；分号分隔多条
+    route_headers: str = os.getenv("ROUTE_HEADERS", "")
     log_dir: str = os.getenv("LOG_DIR", "logs")
     log_retention_days: int = int(os.getenv("LOG_RETENTION_DAYS", "30"))
     log_capture_maxlen: int = int(os.getenv("LOG_CAPTURE_MAXLEN", "5000"))
+    # Upper bound for records retained by one dashboard analysis request.
+    log_analysis_max_records: int = int(os.getenv("LOG_ANALYSIS_MAX_RECORDS", "50000"))
+    request_body_logging: bool = _bool("REQUEST_BODY_LOGGING", "false")
     legacy_log_file: str = os.getenv("LOG_FILE", "retry_log.jsonl")
     hedge_mode: str = os.getenv("HEDGE_MODE", "off").lower()
     max_concurrent: int = int(os.getenv("MAX_CONCURRENT", "10"))
@@ -368,8 +373,9 @@ def require_admin(request: Request):
     cookie_ok = bool(session and is_valid_admin_session(session))
     if bearer_ok or cookie_ok:
         return
-    if request.url.path in ("/stats", "/logs", "/key-pools", "/settings"):
-        raise HTTPException(status_code=303, headers={"Location": f"/admin/login?next={request.url.path}"})
+    if request.url.path in ("/stats", "/logs", "/key-pools", "/settings", "/requests", "/requests/api"):
+        next_path = request.url.path.removesuffix("/api") if request.url.path.startswith("/requests/") else request.url.path
+        raise HTTPException(status_code=303, headers={"Location": f"/admin/login?next={next_path}"})
     raise HTTPException(status_code=401, detail="invalid_admin_credentials",
                         headers={"WWW-Authenticate": "Bearer"})
 

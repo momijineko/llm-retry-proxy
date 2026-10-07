@@ -142,6 +142,10 @@ CONFIG_ITEMS: list[ConfigItem] = [
     ConfigItem("EXTRA_UPSTREAMS", "str", "", group="上游、路由与网络",
                apply=RESTART, description="额外上游路由：每行一条（前缀 → 上游地址，供应商可选），转发时去掉匹配前缀",
                name="额外上游路由"),
+    ConfigItem("ROUTE_HEADERS", "str", "", group="上游、路由与网络",
+               apply=RESTART,
+               description="按路由前缀补充固定请求头：`/前缀:头名=值`，多条用分号分隔，`*` 表示默认路由（如 /ocg:x-opencode-session=<uuid>）",
+               name="路由固定请求头"),
 
     # ---------------------------------------------------------------- SSE2WS 桥接
     ConfigItem("SSE2WS_MODE", "enum", "off", ("off", "bridge"), group="Codex Responses WebSocket 桥接 (SSE2WS)",
@@ -304,6 +308,11 @@ CONFIG_ITEMS: list[ConfigItem] = [
     ConfigItem("LOG_CAPTURE_MAXLEN", "int", "5000", group="日志",
                apply=RESTART, min=0, description="进程内实时日志缓冲条数；0=不限制（内存随运行持续增长）",
                name="实时日志缓冲"),
+    ConfigItem("LOG_ANALYSIS_MAX_RECORDS", "int", "50000", group="日志",
+               apply=HOT, min=1, description="单次日志分析记录上限；另有字节预算保护", name="日志分析记录上限"),
+    ConfigItem("REQUEST_BODY_LOGGING", "bool", "false", group="日志",
+               apply=RESTART, description="将 JSON 请求正文写入明细日志，并启用 /requests 排查页；可能含用户隐私",
+               name="记录请求正文"),
     ConfigItem("LOG_LEVEL", "enum", "INFO", ("DEBUG", "INFO", "WARNING", "ERROR"), group="日志",
                apply=RESTART, description="控制台日志级别", name="日志级别"),
     ConfigItem("LOG_FILE", "str", "retry_log.jsonl", group="日志", attr="legacy_log_file",

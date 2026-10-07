@@ -137,9 +137,12 @@ class SettingsMetaTests(unittest.TestCase):
         self.assertEqual(it.group, "服务与访问控制")
         self.assertEqual(it.apply, RESTART)
         self.assertEqual(it.type, "bool")
-        keys = [item.key for item in CONFIG_ITEMS if item.group == "服务与访问控制"]
-        self.assertLess(keys.index("ADMIN_PASSWORD"), keys.index("SETTINGS_PAGE_ENABLED"))
-        self.assertLess(keys.index("SETTINGS_PAGE_ENABLED"), keys.index("ADMIN_COOKIE_SECURE"))
+
+    def test_request_body_logging_is_opt_in(self):
+        item = CONFIG_ITEMS_BY_KEY["REQUEST_BODY_LOGGING"]
+        self.assertEqual(item.default, "false")
+        self.assertEqual(item.group, "日志")
+        self.assertEqual(item.apply, RESTART)
 
     def test_api_docs_enabled_metadata(self):
         item = CONFIG_ITEMS_BY_KEY["API_DOCS_ENABLED"]

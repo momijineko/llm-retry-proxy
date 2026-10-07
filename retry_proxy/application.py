@@ -24,7 +24,7 @@ from .env_file import load_env_file, update_env_file
 from .key_pool import KEY_POOLS
 from .log_store import RetryLogStore
 from .retry import RetryProxy
-from .routes import ROUTES, route_registry
+from .routes import ROUTES, parse_route_headers, route_registry
 from .settings_meta import CONFIG_ITEMS, CONFIG_ITEMS_BY_KEY, GROUPS, HOT, REBUILD
 
 from .sse2ws import create_sse2ws_handler
@@ -75,6 +75,13 @@ def _log_startup():
     logger.info(f"代理: trust_env={'是(跟随系统代理)' if settings.trust_env else '否(直连)'}")
     logger.info(f"管理端鉴权: {'已启用' if settings.admin_password else '未配置（统计与日志端点已禁用）'}")
     logger.info(f"号池访问鉴权: {'已启用' if settings.proxy_api_key else '未配置（兼容开放模式）'}")
+    route_headers = parse_route_headers(settings.route_headers)
+    if route_headers:
+        for prefix, headers in route_headers.items():
+            target = "默认路由" if prefix == "*" else f"{prefix}/*"
+            logger.info(f"路由固定请求头: {target} 补充 {','.join(sorted(headers))}")
+    else:
+        logger.info("路由固定请求头: 未配置")
     logger.info(f"API文档: {'已启用' if settings.api_docs_enabled else '未启用'}")
     logger.info(
         f"IP黑名单: {len(settings.ip_blacklist)}条, "
@@ -216,9 +223,14 @@ app.add_middleware(
     state_file=settings.ip_ban_state_file,
 )
 service = RetryProxy(client=None, pools=KEY_POOLS, log_store=store)
-health, stats_page, stats_api, logs_page, logs_history, logs_stream, proxy = create_handlers(
+health, stats_page, stats_api, logs_page, logs_history, logs_stream, requests_page, requests_api, proxy = create_handlers(
     service, store, pool_sync,
 )
+if not settings.request_body_logging:
+    async def requests_disabled():
+        return HTMLResponse("request diagnostics disabled", status_code=404)
+
+    requests_page = requests_api = requests_disabled
 
 
 # 登录限速状态（进程内）：按客户端 IP 记录连续失败次数与锁定到期时间。
@@ -277,7 +289,8 @@ def _login_success(ip):
 
 
 def _login_page(next_path="/stats", failed=False, notice="", status_code=200):
-    next_path = next_path if next_path in ("/stats", "/logs", "/key-pools", "/settings") else "/stats"
+    allowed = ("/stats", "/logs", "/key-pools", "/settings", "/requests")
+    next_path = next_path if next_path in allowed and (next_path != "/requests" or settings.request_body_logging) else "/stats"
     error = '<p class="error">密码不正确</p>' if failed else ""
     notice_block = f'<p class="error">{html.escape(notice)}</p>' if notice else ""
     disabled = "" if settings.admin_password else "disabled"
@@ -295,7 +308,8 @@ async def admin_login(request: Request):
     values = parse_qs((await request.body()).decode("utf-8", errors="replace"))
     password = values.get("password", [""])[0]
     next_path = values.get("next", ["/stats"])[0]
-    next_path = next_path if next_path in ("/stats", "/logs", "/key-pools", "/settings") else "/stats"
+    allowed = ("/stats", "/logs", "/key-pools", "/settings", "/requests")
+    next_path = next_path if next_path in allowed and (next_path != "/requests" or settings.request_body_logging) else "/stats"
     client_ip = resolve_client_ip(request.scope, settings.trusted_proxy_ips)
     now = time.monotonic()
     locked_for = _login_locked(client_ip, now)
@@ -826,6 +840,8 @@ app.add_api_route("/admin/key-pools/api/manual-remove", key_pools_manual_remove,
 app.add_api_route("/admin/key-pools/api/manual-update", key_pools_manual_update, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/stats", stats_page, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/stats/api", stats_api, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/requests", requests_page, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/requests/api", requests_api, methods=["GET"], dependencies=admin_dependencies)
 if settings.settings_page_enabled:
     app.add_api_route("/settings", settings_page, methods=["GET"], dependencies=admin_dependencies)
     app.add_api_route("/admin/settings", settings_get, methods=["GET"], dependencies=admin_dependencies)

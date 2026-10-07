@@ -347,6 +347,211 @@ class RetryProxy:
             progress["sent"] += 1
         return await self._send(method, url, headers, body)
 
+    @staticmethod
+    def _model_list_payload(content):
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return None, None
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            return None, None
+        return payload, payload["data"]
+
+    @staticmethod
+    def _model_list_item_id(item):
+        if isinstance(item, dict):
+            value = item.get("id") or item.get("name")
+        elif isinstance(item, str):
+            value = item
+        else:
+            value = ""
+        return str(value or "").strip()
+
+    @staticmethod
+    def _model_list_representatives(pool):
+        """Choose one key per synced group for a model-list fan-out.
+
+        A group normally exposes the same ``/models`` result through all of its
+        keys.  Prefer a key with a known, concrete model catalog and keep the
+        first entry as a fallback for legacy/static pools.
+        """
+        groups = {}
+        for entry in getattr(pool, "entries", ()):
+            group_id = entry.group_id or entry.key
+            current = groups.get(group_id)
+            capabilities = entry.routing_capabilities or {}
+            score = (
+                int(bool(capabilities.get("model_list_known"))),
+                len(capabilities.get("model_patterns", ())),
+            )
+            if current is None or score > current[0]:
+                groups[group_id] = (score, entry)
+        return [item[1] for item in groups.values()]
+
+    async def request_model_list(self, method, url, headers, path, provider, pool):
+        """Fetch and merge model catalogs exposed by the pool's groups.
+
+        The normal request path intentionally selects one key.  That is right
+        for generation requests, but it makes a shared ``/models`` endpoint
+        hide models that exist only in another group.  This helper performs one
+        read per group, merges OpenAI-compatible ``data`` arrays, and uses
+        cached catalogs for groups whose keys are currently cooling down.
+        """
+        started = time.time()
+        representatives = self._model_list_representatives(pool)
+        now = time.time()
+        query_entries = [
+            entry for entry in representatives
+            if entry.cooldown_until <= now
+        ]
+        cached_by_entry = {}
+        for entry in representatives:
+            capabilities = entry.routing_capabilities or {}
+            if capabilities.get("model_list_known"):
+                cached_by_entry[id(entry)] = [
+                    pattern for pattern in capabilities.get("model_patterns", ())
+                    if pattern and not any(char in pattern for char in "*?[]")
+                ]
+
+        async def fetch(entry):
+            send_headers = headers_with_key(
+                headers, entry.key, entry.auth_header, entry.auth_scheme,
+            )
+            try:
+                response = await self._send(method, url, send_headers, b"")
+                status = response.status_code
+                try:
+                    content = await response.aread()
+                    # aread() has decoded the body; merged content also has a new length.
+                    response_headers = {
+                        name: value for name, value in response.headers.items()
+                        if name.lower() not in (
+                            "content-encoding", "content-length", "transfer-encoding",
+                        )
+                    }
+                finally:
+                    await response.aclose()
+                _mark_key_outcome(pool, entry, self.config, status)
+                return {
+                    "entry": entry, "status": status, "content": content,
+                    "headers": response_headers,
+                    "available": status < 400,
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not is_host_level_error(exc):
+                    _mark_key_failure(pool, entry, self.config, 0)
+                return {
+                    "entry": entry, "status": 0, "content": b"",
+                    "headers": {}, "available": None, "error": exc,
+                }
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def limited_fetch(entry):
+            async with semaphore:
+                return await fetch(entry)
+
+        results = await asyncio.gather(
+            *(limited_fetch(entry) for entry in query_entries),
+        ) if query_entries else []
+        successful = [item for item in results if item["available"]]
+        parsed = []
+        for item in successful:
+            payload, models = self._model_list_payload(item["content"])
+            if payload is not None:
+                parsed.append((item, payload, models))
+
+        if parsed:
+            first_item, payload, _ = parsed[0]
+            merged = []
+            seen = set()
+            for item, _payload, models in parsed:
+                for model in models:
+                    model_id = self._model_list_item_id(model)
+                    if not model_id or model_id.lower() in seen:
+                        continue
+                    seen.add(model_id.lower())
+                    if isinstance(model, dict):
+                        merged.append(model)
+                    else:
+                        merged.append({"id": model_id, "object": "model"})
+            parsed_entries = {id(item["entry"]) for item, _payload, _models in parsed}
+            cached_ids = [
+                model_id
+                for entry in representatives
+                if id(entry) not in parsed_entries
+                for model_id in cached_by_entry.get(id(entry), ())
+            ]
+            for model_id in cached_ids:
+                if model_id.lower() in seen:
+                    continue
+                seen.add(model_id.lower())
+                merged.append({"id": model_id, "object": "model"})
+            merged_payload = dict(payload)
+            merged_payload["data"] = merged
+            content = json.dumps(
+                merged_payload, ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8")
+            status = first_item["status"]
+            response_headers = first_item["headers"]
+            winner_index = next(
+                (index for index, item in enumerate(results, 1) if item is first_item),
+                1,
+            )
+            winner = first_item["entry"]
+            key_attempts = [
+                {"key_id": item["entry"].key_id, "available": item["available"]}
+                for item in results
+            ]
+            response = httpx.Response(
+                status, content=content, headers=response_headers,
+                request=httpx.Request(method, url),
+            )
+            return RetryResult(
+                response, winner_index, len(results), status, [],
+                winner_index == 1, winner.key_id, started, key_attempts,
+                key_entry=winner,
+            )
+
+        cached_ids = [
+            model_id for entry in representatives
+            for model_id in cached_by_entry.get(id(entry), ())
+        ]
+        if cached_ids:
+            content = json.dumps({
+                "object": "list",
+                "data": [{"id": model_id, "object": "model"}
+                         for model_id in dict.fromkeys(cached_ids)],
+            }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            response = httpx.Response(
+                200, content=content,
+                headers={"content-type": "application/json"},
+                request=httpx.Request(method, url),
+            )
+            return RetryResult(response, 0, len(results), 200, [], True, "", started, [])
+
+        # If no group returned a parseable successful catalog, preserve the
+        # first upstream response and its status/body for normal client errors.
+        fallback = next((item for item in results if item["status"] > 0), None)
+        if fallback is None:
+            return RetryResult(
+                None, 0, len(results), 0, [], False, "", started,
+                [{"key_id": item["entry"].key_id, "available": item["available"]}
+                 for item in results],
+            )
+        response = httpx.Response(
+            fallback["status"], content=fallback["content"],
+            headers=fallback["headers"], request=httpx.Request(method, url),
+        )
+        return RetryResult(
+            response, 1, len(results), fallback["status"], [],
+            fallback["status"] < 400, fallback["entry"].key_id, started,
+            [{"key_id": item["entry"].key_id, "available": item["available"]}
+             for item in results], key_entry=fallback["entry"],
+        )
+
     async def _race(self, method, url, req_headers, body, path, t0, provider, model, pool, session_id=""):
         total_sent = last_status = round_num = 0; retry_codes = []; key_attempts = []; c429 = cother = 0; last_key_id = ""
         max_attempts = _max_attempts(self.config)

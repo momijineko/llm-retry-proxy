@@ -2,9 +2,13 @@
 
 [返回 README](../README.md)
 
-通过 `EXTRA_UPSTREAMS` 可在同一个代理实例内同时转发多个上游端点，按**请求路径前缀**分流。匹配前缀的请求会**去掉前缀**后转发到对应上游；未匹配任何前缀的请求走默认 `UPSTREAM_URL`。
+通过 `EXTRA_UPSTREAMS` 可在同一个代理实例内同时转发多个上游端点，按**请求路径前缀**分流。匹配前缀的请求会**去掉前缀**后转发到对应上游；未匹配任何前缀的合法 API 请求走默认 `UPSTREAM_URL`。
+
+管理页面命名空间（如 `/admin`、`/requests`、`/settings`、`/logs`）未匹配的子路径或请求方法在本地返回 404。未匹配本地路由的浏览器页面导航（GET/HEAD 且带 `Sec-Fetch-Mode: navigate` 或 `Accept: text/html`）也返回本地 404，不发送给上游；去掉路由前缀后，只有已支持的 API 路径（Chat、Responses、Messages、Models、Images、Audio、Embeddings、Files 等）可以转发；其他任意路径均返回本地 404，包括 POST 和带上游前缀的未知路径。资源 ID 与资源子操作的有效性仍由上游判断。
 
 ## 配置格式
+
+支持转发 Sub2API 倍率查询端点 `/v1/sub2api/billing`（也可带已配置的代理前缀）。该端点仍使用现有鉴权与号池规则；其它未知的 `sub2api` 子路径保持本地 404。
 
 ```
 EXTRA_UPSTREAMS=prefix|url|provider,prefix|url|provider,...

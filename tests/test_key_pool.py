@@ -16,6 +16,30 @@ from retry_proxy.retry import (KeyPoolWaitTimeout, RetryProxy, _key_available_fo
 
 
 class KeyPoolStickyTests(unittest.TestCase):
+    def test_model_list_representatives_are_grouped_by_group_id(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap-a", group_id="cheap"),
+            KeyEntry("cheap-b", group_id="cheap"),
+            KeyEntry("premium", group_id="premium"),
+        ]
+        pool.entries[1].routing_capabilities = {
+            "model_list_known": True, "model_patterns": ("gpt-5.6",),
+        }
+        pool.finalize_entries()
+        representatives = RetryProxy._model_list_representatives(pool)
+        self.assertEqual({entry.group_id for entry in representatives}, {"cheap", "premium"})
+        self.assertIn("cheap-b", {entry.key for entry in representatives})
+
+    def test_model_list_payload_item_ids_are_read(self):
+        self.assertEqual(
+            RetryProxy._model_list_item_id({"id": "gpt-5.6"}), "gpt-5.6",
+        )
+        self.assertEqual(
+            RetryProxy._model_list_item_id({"name": "models/gemini"}),
+            "models/gemini",
+        )
+
     def test_codex_session_id_is_extracted_from_client_metadata(self):
         body = json.dumps({
             "model": "gpt-5.6-sol",

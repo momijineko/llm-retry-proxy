@@ -63,7 +63,30 @@ IP 和到期时间（永久封禁使用 `0`），不保存扫描路径。
 | `UPSTREAM_URL` | `https://maas-coding-api.cn-huabei-1.xf-yun.com/v2` | 默认上游地址，不要带尾斜杠 |
 | `PROVIDER` | `xfyun` | 供应商标签，写入日志与统计记录 |
 | `EXTRA_UPSTREAMS` | 空 | 额外上游路由，格式 `prefix\|url\|provider`，多组用逗号分隔。详见[多上游路由](routing.md) |
+| `ROUTE_HEADERS` | 空 | 按路由前缀给转发请求补充固定请求头：`/前缀:头名=值`，多条用逗号分隔、多组用分号分隔，`*` 表示默认路由。详见下文 |
 | `TRUST_ENV` | `false` | 是否读取 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等系统代理变量 |
+
+### 路由固定请求头 `ROUTE_HEADERS`
+
+部分上游要求客户端发送特定请求头，而下游客户端（或代理自身的后台请求）不一定带。`ROUTE_HEADERS`
+让代理在转发前按路由补上这些头，只影响命中的那一条路由，其余上游不受影响。
+
+```env
+# /ocg -> opencode Zen/Go：自 2026-09-06 起推理请求必须带 x-opencode-session，
+# 缺失时上游返回 400 {"error":{"type":"MissingSessionID"}}
+ROUTE_HEADERS=/ocg:x-opencode-session=0192f0aa-1234-7abc-9def-0123456789ab
+
+# 多条头用逗号分隔，多个路由用分号分隔，* 表示默认路由
+ROUTE_HEADERS=/ocg:x-opencode-session=<uuid>,originator=opencode;/tr:x-api-version=2026-01-01;*:x-proxy-tier=internal
+```
+
+要点：
+
+- 值会**覆盖**下游同名请求头，路由上没配的头一律原样透传。
+- 该配置为启动项（`RESTART`），修改后需重启服务；启动横幅会打印每条生效规则。
+- 请求头按路由前缀匹配，与 `EXTRA_UPSTREAMS` 的前缀一致；`/ocg` 与 `/ocg/v1` 都会命中。
+- 前缀不能包含 `?`、`#`、`|`、`,` 或空白字符。
+
 
 ## 连接与响应超时
 
@@ -96,6 +119,7 @@ IP 和到期时间（永久封禁使用 `0`），不保存扫描路径。
 行为说明：
 
 - 多轮上下文通过连接内累积 + 完整 input 重放实现：续轮（携带 `previous_response_id` 或 `function_call_output`）时丢弃 `previous_response_id`，把累积的上下文 item 与当前 input 合并后发给上游，适配无状态的 HTTP/SSE 上游。
+- 合并前会归一化 `function_call` 的输出元数据；缓存与本轮重复的工具项按 `type` + `call_id` 合并，本轮版本优先，调用与结果分别保留，避免桥接重复拼接触发 `conflicting duplicate call_id`。客户端单次 input 内原有的冲突仍由上游校验。
 - 终止事件以 `response.completed` / `response.incomplete` / `response.failed` / `response.cancelled` / `error` 为准；提前 EOF 视为失败并下发 error 帧，不当作成功。
 - 鉴权、号池路由、重试、熔断与日志记录与普通 HTTP 请求共用同一套引擎；日志 `method` 标记为 `WS`。
 
@@ -189,6 +213,8 @@ IP 和到期时间（永久封禁使用 `0`），不保存扫描路径。
 | `LOG_DIR` | `logs` | 日志目录；明细按天拆分，累计汇总存 `_summary.json` |
 | `LOG_RETENTION_DAYS` | `30` | 明细日志保留天数；`0` = 不清理，累计汇总不受影响 |
 | `LOG_CAPTURE_MAXLEN` | `5000` | 进程内实时日志缓冲条数；`0` = 不限制（内存随运行持续增长） |
+| `LOG_ANALYSIS_MAX_RECORDS` | `50000` | 单次统计/请求排查最多载入的最新日志条数，避免大日志文件导致内存暴涨 |
+| `REQUEST_BODY_LOGGING` | `false` | 将脱敏后的 JSON 请求正文写入明细日志，并启用 `/requests`；内容可能含隐私，默认关闭 |
 | `LOG_LEVEL` | `INFO` | 控制台日志级别 |
 | `LOG_FILE` | `retry_log.jsonl` | 旧版单文件日志路径，仅用于自动迁移 |
 

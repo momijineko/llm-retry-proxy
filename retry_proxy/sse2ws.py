@@ -143,6 +143,37 @@ def _dedup_context(items) -> list:
     return out
 
 
+def _merge_replay_items(previous, current) -> list:
+    previous = [_normalize_replay_item(item) for item in previous]
+    current = [_normalize_replay_item(item) for item in current]
+    if _items_have_prefix(current, previous):
+        return current
+
+    def tool_key(item):
+        if not isinstance(item, dict):
+            return None
+        kind = item.get("type")
+        if kind not in TOOL_CALL_CONTEXT_TYPES | TOOL_CALL_OUTPUT_TYPES:
+            return None
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return None
+        # 调用与结果共享 call_id，但必须各保留一项。
+        return kind, call_id
+
+    positions = {tool_key(item): index for index, item in enumerate(previous)
+                 if tool_key(item) is not None}
+    merged = list(previous)
+    for item in current:
+        key = tool_key(item)
+        if key in positions:
+            # 仅消除缓存与本轮的重叠；本轮版本优先，位置保持不变。
+            merged[positions.pop(key)] = item
+        else:
+            merged.append(item)
+    return merged
+
+
 def _build_error_event(status, message, error_type="server_error") -> str:
     message = (message or "").strip()
     if not message:
@@ -237,6 +268,8 @@ class ResponsesWSBridge:
         self.base_pool = None
         self.pool_credential_ok = False
         self.pool_access = False
+        # 目标上游无号池且下游用的是代理凭据时为 True，转发前剥掉该凭据
+        self.strip_proxy_credential = False
 
     async def run(self):
         try:
@@ -252,10 +285,13 @@ class ResponsesWSBridge:
         self.base_pool = KEY_POOLS.get(self.upstream)
         self.pool_credential_ok = can_use_key_pool(self.ws.headers)
         self.pool_access = bool(self.base_pool and self.pool_credential_ok)
+        # 无号池时按透传处理；代理凭据不是上游凭据，转发前剥掉（见 _build_outbound_headers）
         if settings.proxy_api_key and self.pool_credential_ok and self.base_pool is None:
-            await self._safe_close_error(503, "key_pool_unavailable",
-                                         "Key pool is unavailable for this upstream")
-            return
+            logger.debug(
+                f"{_tag('WS→SSE', self.path, self.provider, '', self.client_ip)}"
+                " 该上游无号池，按透传处理"
+            )
+            self.strip_proxy_credential = True
         logger.info(
             f"{_tag('WS→SSE', self.path, self.provider, '', self.client_ip)}"
             f" 建立Responses WS连接 路由→{self.upstream.split('?', 1)[0]}"
@@ -582,13 +618,9 @@ class ResponsesWSBridge:
         payload.pop("previous_response_id", None)
         needs_replay = has_previous or has_tool_output
         if needs_replay and self._replay_input is not None:
-            if not current_items:
-                full = self._replay_input
-            elif not _items_have_prefix(current_items, self._replay_input):
-                full = self._replay_input + current_items
-            else:
-                full = current_items
-            payload["input"] = full
+            payload["input"] = _merge_replay_items(
+                self._replay_input, current_items,
+            )
         payload.pop("type", None)
         payload.pop("generate", None)
         payload["stream"] = True
@@ -598,11 +630,15 @@ class ResponsesWSBridge:
     def _commit_replay(self):
         merged = list(self._pending_replay)
         if self._collected:
-            merged = merged + _dedup_context(self._collected)
+            merged = _merge_replay_items(merged, _dedup_context(self._collected))
         self._replay_input = merged
 
     def _build_outbound_headers(self, model_name):
-        headers = outbound_request_headers(self.ws.headers, self.remaining, model_name)
+        headers = outbound_request_headers(self.ws.headers, self.remaining, model_name, full_path=self.path)
+        if self.strip_proxy_credential:
+            # 代理凭据不是上游凭据，透传模式下不能发给上游
+            for name in ("authorization", (settings.key_auth_header or "authorization")):
+                headers.pop(name, None)
         for name in SKIP_UPSTREAM_WS_HEADERS:
             headers.pop(name, None)
         for name in SKIP_UPSTREAM_WS_SESSION_HEADERS:

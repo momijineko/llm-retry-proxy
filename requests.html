@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>请求排查 · llm-retry-proxy</title>
+<style>
+:root{color-scheme:light;--bg:#f4f6f8;--panel:#fff;--panel-alt:#f8fafc;--line:#e2e7ee;--line-strong:#cbd3df;--text:#0f172a;--text-2:#334155;--bright:#0f172a;--muted:#6b7280;--muted-2:#9ca3af;--green:#047857;--red:#b91c1c;--blue:#2563eb;--blue-dark:#1d4ed8;--blue-light:#eff6ff;--ok:#10b981;--radius:8px;--shadow-xs:0 1px 2px rgba(15,23,42,.04);--shadow:0 1px 3px rgba(15,23,42,.05),0 1px 2px rgba(15,23,42,.03)}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:14px/1.5 "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+header{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 28px;background:rgba(255,255,255,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.brand{display:flex;align-items:center;gap:10px;flex:0 0 200px;color:var(--bright);font-weight:700}.brand-text{display:flex;flex-direction:column;gap:0;min-width:0}.logo{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;background:var(--blue);color:white;font-size:15px;font-weight:700;box-shadow:0 2px 6px rgba(37,99,235,.24);flex-shrink:0}.brand h1{font-size:16px;margin:0;font-weight:700;letter-spacing:0;line-height:1.5}.brand .sub{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;white-space:nowrap}.brand .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.15);animation:pulse 2s infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.app-nav{display:flex;align-items:center;gap:4px;margin-left:12px;flex-wrap:wrap}.app-nav a{padding:7px 10px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:13px;font-weight:500;transition:color .15s,background .15s}.app-nav a:hover{background:var(--panel-alt);color:var(--text)}.app-nav a.active{background:var(--blue-light);color:var(--blue-dark)}.spacer{flex:1;min-width:8px}
+.tools{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}.tools select{min-width:112px}input,select,button{min-height:34px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);padding:6px 10px;font:inherit}button{cursor:pointer;transition:all .15s}button:hover{border-color:var(--blue);color:var(--blue);background:var(--blue-light)}:is(button,input,select,summary,a):focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+main{max-width:1680px;margin:0 auto;padding:24px 28px 56px}.summary{display:flex;align-items:center;gap:14px;flex-wrap:wrap;min-height:34px;margin-bottom:12px;color:var(--muted);font-size:12px}.summary strong{color:var(--bright)}.error{color:var(--red)}
+.table-wrap{overflow:auto;max-height:calc(100vh - 170px);border:1px solid var(--line);border-radius:8px;background:var(--panel)}table{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;min-width:1160px}th,td{padding:14px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;overflow-wrap:anywhere}th{position:sticky;top:0;z-index:1;background:var(--panel-alt);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}tbody tr{transition:background .12s}tbody tr:hover{background:var(--blue-light)}tbody tr:last-child td{border-bottom:0}
+.mono{font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.subtle{color:var(--muted);font-size:12px}.status{font-variant-numeric:tabular-nums}.ok{color:var(--green)}.bad{color:var(--red)}
+.prompt-text{margin:6px 0 0;max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;color:var(--bright)}details summary{color:var(--blue);cursor:pointer}details pre{max-height:320px;overflow:auto;margin:10px 0;padding:12px;background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere}.json-actions{margin-top:10px}.empty{padding:34px;text-align:center;color:var(--muted)}.badge{display:inline-block;margin-top:5px;padding:2px 7px;border-radius:99px;background:var(--blue-light);color:var(--blue);font-size:11px}
+.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;padding:20px;margin-bottom:16px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}.filters label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted);font-weight:500}.filters input,.filters select{width:100%;min-width:0;outline:none}.filters input:focus,.filters select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(37,99,235,.12)}.filter-search{grid-column:span 2}.filter-footer{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.table-wrap{max-height:65vh;box-shadow:var(--shadow)}
+.pager{display:flex;align-items:center;justify-content:center;gap:6px;padding:16px 0}.pager button{min-width:34px;padding:5px 10px}.pager button.active{background:var(--blue);border-color:var(--blue);color:#fff}.pager button:disabled{cursor:not-allowed;opacity:.45}
+@media(max-width:700px){.filters{grid-template-columns:repeat(2,minmax(0,1fr))}header{position:static;padding:10px 16px;gap:8px}.brand{width:100%;flex-basis:auto}.app-nav{margin-left:0;order:3}.tools{margin-left:auto}main{padding:14px}.summary{align-items:flex-start;flex-direction:column;gap:3px}.table-wrap{max-height:70vh}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">R</span><div class="brand-text"><h1>请求排查</h1><span class="sub"><span class="dot"></span><span>正文诊断</span></span></div></div>
+  <nav class="app-nav" aria-label="主导航"><a href="/stats">统计</a><a href="/logs">日志</a><a class="active" href="/requests">请求排查</a><a href="/key-pools">号池</a><a href="/settings">配置</a></nav>
+  <div class="spacer"></div>
+  <div class="tools"><select id="range" aria-label="时间范围"><option value="today">今天</option><option value="7d">近 7 天</option><option value="30d">近 30 天</option><option value="all">全部</option></select><button id="refresh" title="刷新请求记录">刷新</button></div>
+</header>
+<main>
+  <form id="filters" class="filters" aria-label="筛选请求">
+    <label>模型<select id="model"><option value="">全部模型</option></select></label>
+    <label>状态<select id="status"><option value="">全部状态</option><option value="error">失败（含无状态）</option><option value="2xx">2xx 成功</option><option value="4xx">4xx 客户端错误</option><option value="5xx">5xx 上游错误</option><option value="429">429 限流</option><option value="retried">发生重试</option></select></label>
+    <label>客户端 IP<input id="ip" type="search" placeholder="输入 IP 或部分地址"></label>
+    <label>Key 标识<input id="key" type="search" placeholder="输入 Key 标识或透传"></label>
+    <label class="filter-search">关键词<input id="keyword" type="search" placeholder="搜索提示词、JSON、模型、路径或供应商"></label>
+    <div class="filter-footer"><span class="subtle">筛选所选时间范围内已加载的最近 500 条请求。</span><button type="button" id="clear">清空筛选</button></div>
+  </form>
+  <div class="summary"><strong id="count">正在加载</strong><span id="updated"></span><span id="message"></span></div>
+  <div class="table-wrap" role="region" aria-label="请求记录，可横向滚动" tabindex="0"><table>
+    <colgroup><col style="width:140px"><col style="width:130px"><col style="width:170px"><col style="width:110px"><col style="width:80px"><col style="width:30%"><col></colgroup>
+    <thead><tr><th>时间</th><th>客户端</th><th>模型 / 路径</th><th>Key</th><th>状态</th><th>提示词</th><th>原始请求 JSON</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="7" class="empty">正在加载</td></tr></tbody>
+  </table></div>
+  <div id="pager" class="pager" aria-label="请求分页"></div>
+  <p class="subtle">提示词显示最近一条用户消息；JSON 为记录时保存的请求正文，可能已脱敏或省略二进制内容。</p>
+</main>
+<script>
+const range=document.getElementById('range'),rows=document.getElementById('rows'),count=document.getElementById('count'),updated=document.getElementById('updated'),message=document.getElementById('message');
+function esc(value){return String(value??'').replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]))}
+function formatTime(value){return value?new Date(value).toLocaleString():'-'}
+let records=[];
+const PREVIEW_LIMIT=12000;
+function contentText(content){
+  if(typeof content==='string')return content;
+  if(!Array.isArray(content))return '';
+  return content.map(part=>{
+    if(typeof part==='string')return part;
+    if(!part||typeof part!=='object')return '';
+    if(['text','input_text','output_text'].includes(part.type)&&typeof part.text==='string')return part.text;
+    if(['image','image_url','input_image'].includes(part.type))return '[图片]';
+    if(['audio','input_audio'].includes(part.type))return '[音频]';
+    if(['file','input_file','document'].includes(part.type))return '[文件]';
+    return '';
+  }).filter(Boolean).join('\n');
+}
+function extractPrompt(body){
+  if(!body||typeof body!=='object')return '';
+  if(typeof body.input==='string')return body.input;
+  const messages=Array.isArray(body.messages)?body.messages:Array.isArray(body.input)?body.input:[];
+  for(let i=messages.length-1;i>=0;i--){
+    const item=messages[i];
+    if(item&&item.role==='user')return contentText(item.content);
+  }
+  return typeof body.prompt==='string'?body.prompt:'';
+}
+function render(record,index,groupCount=1){
+  const status=record.final_status??0,body=record.request_body,prompt=extractPrompt(body);
+  const preview=prompt.slice(0,PREVIEW_LIMIT);
+  const session=groupCount>1?`<span class="badge">相同用户消息 ${groupCount} 条</span>`:'';
+  return `<tr><td class="mono">${esc(formatTime(record.ts))}</td><td class="mono">${esc(record.client_ip||'-')}</td><td><strong>${esc(record.model||'-')}</strong><div class="subtle mono">${esc(record.method||'')} ${esc(record.path||'')}</div><div class="subtle">${esc(record.provider||'')}</div>${session}</td><td class="mono">${esc(record.key_id||'透传')}</td><td class="status ${status>=400?'bad':'ok'}">${esc(status)}<div class="subtle">${esc(record.attempts||1)} 次尝试</div></td><td><div class="subtle">最近一条用户消息</div><div class="prompt-text" tabindex="0">${esc(preview||'未找到用户文本提示词')}</div>${prompt.length>PREVIEW_LIMIT?'<div class="subtle">提示词预览已截断</div>':''}${prompt?'<button class="json-actions" data-download="prompt" data-index="'+index+'">下载完整提示词</button>':''}</td><td>${body==null?'<span class="subtle">请求正文不可解析或不可用</span>':'<details data-index="'+index+'"><summary>查看 JSON</summary><pre class="mono" tabindex="0"></pre><div class="subtle json-note"></div></details><button class="json-actions" data-download="json" data-index="'+index+'">下载完整 JSON</button>'}</td></tr>`;
+}
+rows.addEventListener('toggle',event=>{
+  const details=event.target;
+  if(details.tagName!=='DETAILS'||!details.open||details.dataset.loaded)return;
+  const json=JSON.stringify(records[Number(details.dataset.index)].request_body,null,2);
+  details.querySelector('pre').textContent=json.slice(0,PREVIEW_LIMIT);
+  details.querySelector('.json-note').textContent=json.length>PREVIEW_LIMIT?'仅预览前 12,000 个字符，可下载完整 JSON。':'';
+  details.dataset.loaded='true';
+},true);
+rows.addEventListener('click',event=>{
+  const button=event.target.closest('[data-download]');
+  if(!button)return;
+  const record=records[Number(button.dataset.index)],isPrompt=button.dataset.download==='prompt';
+  const text=isPrompt?extractPrompt(record.request_body):JSON.stringify(record.request_body,null,2);
+  const url=URL.createObjectURL(new Blob([text],{type:isPrompt?'text/plain;charset=utf-8':'application/json'}));
+  const link=document.createElement('a');link.href=url;link.download=isPrompt?'prompt.txt':'request.json';
+  document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+const filters=document.getElementById('filters');
+const controls=Object.fromEntries(['model','status','ip','key','keyword'].map(id=>[id,document.getElementById(id)]));
+function matchesRecord(record,filter){
+  const status=Number(record.final_status)||0;
+  if(filter.model&&record.model!==filter.model)return false;
+  if(filter.status==='error'&&status>0&&status<400)return false;
+  if(filter.status==='retried'&&!(Number(record.attempts)>1))return false;
+  if(filter.status==='429'&&status!==429)return false;
+  if(['2xx','4xx','5xx'].includes(filter.status)&&Math.floor(status/100)!==Number(filter.status[0]))return false;
+  if(filter.ip&&!String(record.client_ip||'').toLowerCase().includes(filter.ip.toLowerCase()))return false;
+  if(filter.key&&!String(record.key_id||'透传').toLowerCase().includes(filter.key.toLowerCase()))return false;
+  if(filter.keyword){
+    const needle=filter.keyword.toLowerCase();
+    const meta=[record.model,record.path,record.provider,record.client_ip,record.key_id].join(' ').toLowerCase();
+    if(!meta.includes(needle)&&!JSON.stringify(record.request_body??'').toLowerCase().includes(needle))return false;
+  }
+  return true;
+}
+let currentGroups=[], currentPage=1;
+function renderPager(){const pager=document.getElementById('pager'),pages=Math.max(1,Math.ceil(currentGroups.length/20));currentPage=Math.min(currentPage,pages);pager.innerHTML=pages<=1?'':`<button data-page="prev" ${currentPage===1?'disabled':''}>上一页</button>${Array.from({length:pages},(_,i)=>`<button data-page="${i+1}" class="${currentPage===i+1?'active':''}">${i+1}</button>`).join('')}<button data-page="next" ${currentPage===pages?'disabled':''}>下一页</button>`}
+function recordPromptKey(record,index){
+  const prompt=extractPrompt(record.request_body).trim();
+  return prompt?`prompt:${prompt}`:`record:${index}`;
+}
+function applyFilters(resetPage=true){
+  if(resetPage)currentPage=1;
+  const filter=Object.fromEntries(Object.entries(controls).map(([id,node])=>[id,node.value.trim()]));
+  const matching=records.map((record,index)=>({record,index})).filter(({record})=>matchesRecord(record,filter));
+  const grouped=new Map();matching.forEach(item=>{const key=recordPromptKey(item.record,item.index);if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(item)});currentGroups=[...grouped.values()];
+  const page=currentGroups.slice((currentPage-1)*20,currentPage*20);rows.innerHTML=page.length?page.map(group=>render(group[0].record,group[0].index,group.length)).join():'<tr><td colspan="7" class="empty">没有匹配的请求，请调整筛选条件或时间范围</td></tr>';
+  count.textContent=`匹配 ${currentGroups.length} 条用户消息 / 已加载 ${records.length} 条请求`;renderPager();
+}
+function updateModels(){
+  const selected=controls.model.value;
+  const values=[...new Set(records.map(record=>record.model).filter(Boolean))].sort();
+  if(selected&&!values.includes(selected))values.push(selected);
+  controls.model.innerHTML='<option value="">全部模型</option>'+values.map(value=>`<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  controls.model.value=selected;
+}
+let filterTimer,loadVersion=0;
+filters.addEventListener('submit',event=>event.preventDefault());
+filters.addEventListener('input',()=>{clearTimeout(filterTimer);filterTimer=setTimeout(applyFilters,200)});
+document.getElementById('pager').addEventListener('click',event=>{const button=event.target.closest('[data-page]');if(!button||button.disabled)return;const pages=Math.ceil(currentGroups.length/20);currentPage=button.dataset.page==='prev'?currentPage-1:button.dataset.page==='next'?currentPage+1:Number(button.dataset.page);applyFilters(false)});
+document.getElementById('clear').addEventListener('click',()=>{
+  clearTimeout(filterTimer);Object.values(controls).forEach(control=>control.value='');applyFilters();
+});
+async function load(){
+  const version=++loadVersion;count.textContent='正在加载';message.textContent='';
+  try{
+    const response=await fetch(`/requests/api?range=${encodeURIComponent(range.value)}&limit=500`,{cache:'no-store'});
+    if(!response.ok)throw new Error(response.status===401?'管理端登录已失效':`请求失败 (${response.status})`);
+    const data=await response.json();if(version!==loadVersion)return;
+    records=data.records;updateModels();applyFilters();
+    message.className='';message.textContent=data.truncated?'日志较大，仅显示近期样本，超大单条记录可能已跳过。':'';
+    updated.textContent=`更新于 ${new Date().toLocaleTimeString()}`;
+  }catch(error){
+    if(version!==loadVersion)return;records=[];clearTimeout(filterTimer);
+    rows.innerHTML='<tr><td colspan="7" class="empty">无法加载请求记录</td></tr>';
+    count.textContent='加载失败';updated.textContent='';message.className='error';message.textContent=error.message;
+  }
+}
+document.getElementById('refresh').addEventListener('click',load);range.addEventListener('change',load);load();
+</script>
+</body>
+</html>

@@ -43,9 +43,15 @@ http://127.0.0.1:8080/stats
 
 日志数据量仍会线性占用服务端和浏览器内存。长期、高流量运行且内存受限时，应同时使用 JSONL 明细日志做持久化分析，并按部署容量规划服务重启周期。工具栏的“清空”只清除当前页面的数据，不删除服务端内存记录或 JSONL 文件；刷新页面后，本次运行的日志会重新出现。
 
+## 请求排查页面
+
+默认不记录请求正文。设置 `REQUEST_BODY_LOGGING=true` 并重启后，管理导航会显示 `/requests`，页面可按时间范围查看最近 500 条请求的客户端 IP、时间、模型、状态、Key 标识和 JSON 请求内容。接口最多返回 2000 条。记录使用 DLP 处理后的正文；未启用 DLP 时，正文可能包含提示词、个人信息或业务机密。图片、音频和文件等二进制字段以 `[omitted]` 代替。只有在管理密码保护下访问，日志按 `LOG_RETENTION_DAYS` 清理；关闭该开关后新请求不再记录正文，已写入的正文会保留到日志清理或人工清除。
+
+请求排查页面支持模型、状态（含失败、限流和重试）、客户端 IP、Key 标识与关键词组合筛选，范围为所选时间段已加载的最近 500 条记录。提示词列显示最近一条用户消息；原始请求 JSON 独立折叠显示，长内容限制预览并支持完整下载。记录中的 JSON 仍为脱敏、二进制字段省略后的版本。
+
 ## 管理页面鉴权
 
-管理页面需要 `ADMIN_PASSWORD`。浏览器首次打开 `/stats` 或 `/logs` 时会跳转登录页，登录状态通过 `HttpOnly` Cookie 保存 30 天。HTTPS 部署应设置 `ADMIN_COOKIE_SECURE=true`。API 客户端也可直接把同一密码作为 Bearer 凭据：
+管理页面需要 `ADMIN_PASSWORD`。浏览器首次打开 `/stats`、`/logs` 或启用后的 `/requests` 时会跳转登录页，登录状态通过 `HttpOnly` Cookie 保存 30 天。HTTPS 部署应设置 `ADMIN_COOKIE_SECURE=true`。API 客户端也可直接把同一密码作为 Bearer 凭据：
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN_PASSWORD" http://127.0.0.1:8080/stats/api

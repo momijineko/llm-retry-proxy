@@ -9,6 +9,7 @@ from retry_proxy.sse2ws import (
     _embedded_failure_status,
     _extract_input_items,
     _items_have_prefix,
+    _merge_replay_items,
     is_responses_ws_path,
 )
 
@@ -141,6 +142,68 @@ class ReplayContextTests(unittest.TestCase):
         }
         body = bridge._prepare_turn_payload(payload)
         self.assertEqual(body["input"], [user_msg])
+
+    def test_full_history_with_output_metadata_not_duplicated(self):
+        bridge = self.make_bridge()
+        user = {"role": "user", "content": "hi"}
+        call = {"type": "function_call", "call_id": "call_1",
+                "name": "ls", "arguments": "{}"}
+        result = {"type": "function_call_output", "call_id": "call_1",
+                  "output": "file.txt"}
+        bridge._replay_input = [user, call]
+        body = bridge._prepare_turn_payload({
+            "type": "response.create", "previous_response_id": "resp_1",
+            "input": [user, dict(call, id="fc_1", status="completed"), result],
+        })
+        self.assertEqual(body["input"], [user, call, result])
+
+    def test_partial_replay_prefers_current_call_and_retains_result(self):
+        bridge = self.make_bridge()
+        user = {"role": "user", "content": "hi"}
+        call = {"type": "function_call", "call_id": "call_1",
+                "name": "ls", "arguments": "{}"}
+        updated = dict(call, arguments='{"path":"."}')
+        result = {"type": "function_call_output", "call_id": "call_1",
+                  "output": "file.txt"}
+        bridge._replay_input = [user, call]
+        body = bridge._prepare_turn_payload({
+            "type": "response.create", "input": [updated, result],
+        })
+        self.assertEqual(body["input"], [user, updated, result])
+        self.assertEqual(bridge._replay_input, [user, call])
+        bridge._collected = [dict(updated, id="fc_1")]
+        bridge._commit_replay()
+        self.assertEqual(bridge._replay_input, [user, updated, result])
+
+    def test_merge_keeps_call_and_output_for_each_tool_type(self):
+        for kind, output_kind in (
+            ("function_call", "function_call_output"),
+            ("custom_tool_call", "custom_tool_call_output"),
+            ("tool_search_call", "tool_search_output"),
+            ("mcp_tool_call", "mcp_tool_call_output"),
+        ):
+            with self.subTest(kind=kind):
+                call = {"type": kind, "call_id": "call_1"}
+                result = {"type": output_kind, "call_id": "call_1",
+                          "output": "old"}
+                updated = dict(result, output="new")
+                self.assertEqual(_merge_replay_items([call, result], [updated]),
+                                 [call, updated])
+
+    def test_merge_preserves_messages_and_distinct_calls(self):
+        message = {"role": "user", "content": "continue"}
+        call = {"type": "function_call", "call_id": "call_1",
+                "name": "ls", "arguments": "{}"}
+        other = dict(call, call_id="call_2")
+        self.assertEqual(_merge_replay_items([message, call], [message, other]),
+                         [message, call, message, other])
+        self.assertEqual(_merge_replay_items([message, call], []), [message, call])
+
+    def test_merge_does_not_hide_conflicts_inside_client_input(self):
+        call = {"type": "function_call", "call_id": "call_1"}
+        conflict = dict(call, name="other")
+        self.assertEqual(_merge_replay_items([], [call, conflict]),
+                         [call, conflict])
 
 
 class TerminalOutcomeTests(unittest.TestCase):

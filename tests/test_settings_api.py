@@ -393,6 +393,16 @@ class SettingsPageToggleTests(unittest.IsolatedAsyncioTestCase):
                 text = body.decode("utf-8") if isinstance(body, bytes) else str(body)
                 self.assertIn('<a href="/settings">配置</a>', text)
 
+    async def test_request_diagnostics_nav_is_hidden_by_default(self):
+        from retry_proxy.api import create_handlers
+
+        handlers = create_handlers(None, None, None)
+        pages = [handlers[1], handlers[3]]
+        for page in pages:
+            with patch.object(settings, "request_body_logging", False):
+                response = await page()
+            self.assertNotIn('<a href="/requests">请求排查</a>', response.body.decode("utf-8"))
+
 
 class EffectiveValueIpTests(unittest.TestCase):
     """IP/CIDR 元组键的生效值必须还原为纯 CIDR 逗号串，不得泄漏 Python repr"""
