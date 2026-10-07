@@ -7,9 +7,10 @@ from datetime import datetime, timedelta
 from urllib.parse import unquote
 
 import httpx
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
+from .log_reader import load_async
 from .access_control import resolve_client_ip
 from .config import can_use_key_pool, log_capture, logger, settings
 from .dlp import decode_inbound_body, inspect_json_body
@@ -519,6 +520,7 @@ def _admin_page_html(html: str) -> str:
 
 
 def create_handlers(service, store, pool_sync=None):
+    analysis_gate = asyncio.Lock()
     async def health():
         return {"status": "ok"}
 
@@ -528,9 +530,17 @@ def create_handlers(service, store, pool_sync=None):
             with open(stats_path, encoding="utf-8") as f: return Response(_admin_page_html(f.read()), media_type="text/html; charset=utf-8")
         return Response("stats.html not found", status_code=404)
 
-    async def stats_api(range="today", model="", provider="", plan_start="", rate_mode=""):
+    async def _stats_api(range="today", model="", provider="", plan_start="", rate_mode=""):
         days = {"today": 1, "7d": 7, "30d": 30, "all": 0}.get(range, 1)
-        records = store.load(days)
+        analysis_limit = max(1, int(getattr(settings, "log_analysis_max_records", 50000)))
+        history = await load_async(store, 0 if days <= 0 else 30, analysis_limit, include_body=False)
+        detail_truncated = getattr(history, "truncated", False)
+        def recent(days):
+            cutoff = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+            return [record for record in history if record.get("ts", "")[:10] >= cutoff]
+        records = history if days <= 0 else recent(days)
+        window = recent(2)
+        rate = recent(30)
         selected_models = {m.strip() for m in model.split(",") if m.strip()} if model else set()
         selected_providers = {p.strip() for p in provider.split(",") if p.strip()} if provider else set()
         available_providers = sorted({r.get("provider", "") for r in records if r.get("provider")})
@@ -539,7 +549,6 @@ def create_handlers(service, store, pool_sync=None):
         available_models = sorted({r.get("model", "") for r in records if r.get("model")})
         if selected_models:
             records = [r for r in records if r.get("model") in selected_models]
-        window = store.load(2); rate = store.load(30)
         if selected_providers:
             window = [r for r in window if r.get("provider") in selected_providers]
             rate = [r for r in rate if r.get("provider") in selected_providers]
@@ -580,11 +589,19 @@ def create_handlers(service, store, pool_sync=None):
             if not selected_providers or pool_provider in selected_providers:
                 pool_configs.append({"id": url, "upstream": url, "provider": pool_provider,
                                      "keys": pool.status()})
-        return {"detail": compute_stats(records, range, cfg), "cumulative": _cumulative(store.summary), "range": range,
-                "record_count": len(records), "available_models": available_models,
+        return {"detail": await asyncio.to_thread(compute_stats, records, range, cfg), "cumulative": _cumulative(store.summary), "range": range,
+                "record_count": len(records), "analysis_truncated": detail_truncated,
+                "statistics_source": "incremental_index" if getattr(store, "stats_index", None) is not None else "bounded_logs",
+                "available_models": available_models,
                 "available_providers": available_providers, "upstream_windows": _upstream_window_stats(window),
-                "key_pools": compute_key_pool_stats(records, pool_configs, health_records=window),
+                "key_pools": await asyncio.to_thread(compute_key_pool_stats, records, pool_configs, health_records=window),
                 "rate_counts": {"5h": c5h, "week": c_week, "month": c_month}}
+
+    async def stats_api(range="today", model="", provider="", plan_start="", rate_mode=""):
+        if analysis_gate.locked():
+            raise HTTPException(503, "日志分析正在运行，请稍后重试")
+        async with analysis_gate:
+            return await _stats_api(range, model, provider, plan_start, rate_mode)
 
     async def logs_page():
         logs_path = getattr(settings, "logs_html_path", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs.html"))
@@ -629,12 +646,16 @@ def create_handlers(service, store, pool_sync=None):
             return Response("request diagnostics disabled", status_code=404)
         days = {"today": 1, "7d": 7, "30d": 30, "all": 0}.get(range, 1)
         limit = max(1, min(int(limit), 2000))
-        records = store.load(days)
+        if analysis_gate.locked():
+            raise HTTPException(503, "日志分析正在运行，请稍后重试")
+        async with analysis_gate:
+            records = await load_async(store, days, limit)
+        truncated = getattr(records, "truncated", False)
         records = [record for record in records if record.get("request_body") is not None
                    or record.get("request_body_unavailable")]
         records = records[-limit:]
         records.reverse()
-        return {"records": records, "range": range, "count": len(records)}
+        return {"records": records, "range": range, "count": len(records), "truncated": truncated}
 
     async def proxy(path: str, request: Request):
         # 管理路由的拼写错误、子路径和错误方法不能落入通用上游代理。

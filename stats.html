@@ -864,7 +864,11 @@ async function load(){
     const mode=getRateMode();
     if(mode)url+='&rate_mode='+encodeURIComponent(mode);
     const r=await fetch(new URL(url,window.location.origin).toString());const d=await r.json();
+    if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:('HTTP '+r.status));
     const detail=d.detail||{};const cum=d.cumulative||{};
+    let notice=document.getElementById('logReadNotice');
+    if(!notice){notice=document.createElement('div');notice.id='logReadNotice';notice.style.cssText='padding:12px;color:#b45309;text-align:center';document.body.prepend(notice)}
+    notice.textContent=d.analysis_truncated?'日志较大，明细、窗口与速率统计仅覆盖近期样本；累计统计仍为历史汇总。':'';
     renderKeyPools(d.key_pools||[]);
     if(d.available_providers){
       const changed=JSON.stringify(d.available_providers)!==JSON.stringify(availableProviders);

@@ -12,6 +12,7 @@ from .stats import (_model_key, _normalize_provider, _req_cancelled,
 # 汇总落盘的最小间隔（秒）。每条日志仍即时追加到 JSONL，但累计汇总
 # 按此间隔节流，避免高 QPS 下每请求全量序列化+fsync 成为瓶颈。
 SUMMARY_FLUSH_INTERVAL = 5.0
+MAX_LOG_FILE_BYTES = 32 * 1024 * 1024
 
 
 class RetryLogStore:
@@ -20,6 +21,9 @@ class RetryLogStore:
         self.summary_cache = None
         self._summary_dirty = False
         self._last_flush_at = 0.0
+        self._active_log_files = {}
+        self.stats_index = None
+        self._last_stat_shard = None
 
     def _new_summary(self):
         return {"version": 7, "total_requests": 0, "total_retries": 0, "total_succeeded": 0,
@@ -83,6 +87,8 @@ class RetryLogStore:
         try:
             with open(tmp, "w", encoding="utf-8") as f: json.dump(self.summary_cache, f, ensure_ascii=False)
             os.replace(tmp, settings.summary_file)
+            if self.stats_index is not None:
+                self.stats_index.snapshot(self.summary_cache)
             return True
         except Exception as e: logger.warning(f"写累计汇总失败: {e}")
         return False
@@ -264,6 +270,42 @@ class RetryLogStore:
         self._summary_dirty = False
         self._last_flush_at = time.monotonic()
         if self.summary_cache.get("total_requests", 0) or recovered: self._save()
+        try:
+            from .stats_index import StatsIndex
+            self.stats_index = StatsIndex(settings.log_dir)
+            recovery = self.stats_index.recover(self._log_files(),
+                lambda record: bool(record.get("model")) and not is_excluded_path(record.get("path", "")))
+            if recovery["skipped"]:
+                logger.warning("统计索引回填跳过 %s 条无效或超大记录", recovery["skipped"])
+            self.stats_index.snapshot(self.summary_cache)
+            names = self._log_files()
+            self._last_stat_shard = names[-1] if names else None
+        except Exception as exc:
+            self.stats_index = None
+            logger.warning("统计索引初始化失败，使用受限明细读取: %s", exc)
+
+
+    def _write_filename(self, date_str, payload_bytes):
+        prefix = f"retry_{date_str}"
+        filename = self._active_log_files.get(date_str)
+        if filename is None:
+            names = [name for name in self._log_files()
+                     if name == prefix + ".jsonl"
+                     or (name.startswith(prefix + "_")
+                         and name[len(prefix) + 1:-6].isdigit())]
+            filename = names[-1] if names else prefix + ".jsonl"
+        path = os.path.join(settings.log_dir, filename)
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        if size and size + payload_bytes > MAX_LOG_FILE_BYTES:
+            suffix = filename[len(prefix):-6]
+            index = int(suffix[1:]) if suffix.startswith("_") else 0
+            filename = f"{prefix}_{index + 1:06d}.jsonl"
+            # Never append to or overwrite an existing later shard.
+            while os.path.exists(os.path.join(settings.log_dir, filename)):
+                index += 1
+                filename = f"{prefix}_{index + 1:06d}.jsonl"
+        self._active_log_files[date_str] = filename
+        return filename
 
     async def write(self, record):
         if not record.get("model"): return
@@ -271,18 +313,31 @@ class RetryLogStore:
         async with self.lock:
             try:
                 os.makedirs(settings.log_dir, exist_ok=True)
-                filename = f"retry_{date_str}.jsonl"
                 payload = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+                filename = self._write_filename(date_str, len(payload))
                 with open(os.path.join(settings.log_dir, filename), "ab") as f:
                     f.write(payload)
                     offset = f.tell()
             except Exception as e: logger.warning(f"写重试日志失败: {e}")
+            rotated_stats = False
+            if self.stats_index is not None and "offset" in locals():
+                try:
+                    rotated_stats = self._last_stat_shard != filename
+                    if self._last_stat_shard != filename and self.summary_cache is not None:
+                        self.stats_index.snapshot(self.summary_cache)
+                    self.stats_index.append(filename, offset, record)
+                    self._last_stat_shard = filename
+                except Exception as exc:
+                    self.stats_index = None
+                    logger.warning("统计索引追加失败，使用受限明细读取: %s", exc)
             if self.summary_cache is not None:
                 self._update(self.summary_cache, record)
                 if "offset" in locals():
                     self.summary_cache.setdefault("log_offsets", {})[filename] = offset
                 self._summary_dirty = True
                 self._maybe_flush()
+                if rotated_stats:
+                    self.flush()
 
     def _maybe_flush(self):
         if not self._summary_dirty:
@@ -301,25 +356,16 @@ class RetryLogStore:
                 self._summary_dirty = False
                 self._last_flush_at = time.monotonic()
 
-    def load(self, days=1):
-        records = []
-        if not os.path.isdir(settings.log_dir): return records
-        today = datetime.now()
-        files = sorted(os.listdir(settings.log_dir)) if days <= 0 else [f"retry_{(today - timedelta(days=i)).strftime('%Y-%m-%d')}.jsonl" for i in range(days)]
-        for fname in files:
-            if not fname.startswith("retry_") or not fname.endswith(".jsonl"): continue
-            fpath = os.path.join(settings.log_dir, fname)
-            if not os.path.exists(fpath): continue
-            try:
-                with open(os.path.join(settings.log_dir, fname), encoding="utf-8") as f:
-                    for line in f:
-                        try:
-                            rec = json.loads(line)
-                            if not is_excluded_path(rec.get("path", "")) and rec.get("model"):
-                                rec["provider"] = _normalize_provider(rec.get("provider", "")); records.append(rec)
-                        except json.JSONDecodeError: pass
-            except Exception as e: logger.warning(f"读取日志文件 {fname} 失败: {e}")
-        return records
+    def load(self, days=1, max_records=None, include_body=True):
+        from .log_reader import load_records
+        return load_records(days, max_records, include_body, log_dir=settings.log_dir)
+
+    def load_stats(self, days=1, max_records=50000):
+        if self.stats_index is None:
+            return self.load(days, max_records, include_body=False)
+        cutoff = ((datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+                  if days > 0 else "")
+        return self.stats_index.load(cutoff, max_records)
 
     @property
     def summary(self):
