@@ -134,7 +134,8 @@ class NewAPIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session["session_id"], "sid-1")
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["key"], "sk-full-one")
-        self.assertEqual(entries[0]["label"], "coding-VIP")
+        self.assertEqual(entries[0]["label"], "coding-vip")
+        self.assertEqual(entries[0]["group_name"], "vip")
         self.assertEqual(entries[0]["sort"], "0.25")
         self.assertEqual(entries[0]["group_id"], "vip")
         self.assertEqual(entries[0]["routing_capabilities"], {
@@ -487,10 +488,50 @@ class NewAPIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created["requested"], 1)
         self.assertEqual(created["errors"], [])
         self.assertEqual(created_bodies[0]["group"], "default")
+        self.assertEqual(created_bodies[0]["name"], "default")
         self.assertEqual(created_bodies[0]["expired_time"], -1)
         self.assertTrue(created_bodies[0]["unlimited_quota"])
         self.assertEqual(deleted["requested"], 1)
         self.assertEqual(deleted_paths, ["/api/token/31"])
+
+    async def test_create_names_fit_utf8_byte_limit_and_preserve_group(self):
+        groups = ["short-id", "a" * 60, "中文分组" * 20, "a" * 48 + "图", "😀" * 20]
+        description = "很长的分组说明" * 30
+        bodies = []
+
+        async def handler(request):
+            if request.url.path == "/api/user/self/groups":
+                return api_response({group: {"desc": description} for group in groups})
+            if request.url.path == "/api/token/" and request.method == "GET":
+                return api_response({"items": [], "total": 0})
+            if request.url.path == "/api/token/" and request.method == "POST":
+                body = json.loads(request.content)
+                if len(body["name"].encode("utf-8")) > 50:
+                    return httpx.Response(200, json={"success": False, "message": "令牌名称过长"})
+                bodies.append(body)
+                return api_response(None)
+            raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            for prefix in ("", "前缀" * 20):
+                with self.subTest(prefix=prefix):
+                    bodies.clear()
+                    _, result = await NewAPIAdapter().create_keys(
+                        client, {"base_url": "https://new-api.test"},
+                        {"access_token": "test-access"}, [], only_missing=True,
+                        options={"delay_seconds": 0, "name_prefix": prefix},
+                    )
+                    self.assertEqual(result["errors"], [])
+                    self.assertEqual(len(result["created"]), len(groups))
+                    self.assertEqual([body["group"] for body in bodies], groups)
+                    for body, created in zip(bodies, result["created"]):
+                        self.assertTrue(body["name"])
+                        self.assertLessEqual(len(body["name"].encode("utf-8")), 50)
+                        self.assertNotIn("�", body["name"])
+                        self.assertEqual(created["name"], body["name"])
+                        self.assertEqual(created["group_name"], body["group"])
+                    if not prefix:
+                        self.assertEqual(bodies[0]["name"], "short-id")
 
     async def test_sync_deletes_removed_group_tokens_and_hides_group(self):
         deleted_paths = []

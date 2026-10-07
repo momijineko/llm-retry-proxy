@@ -236,12 +236,13 @@ class NewAPIAdapter(PoolSyncAdapter):
         return session
 
     async def _request(self, client, source, session, method, path, *, params=None,
-                       body=None, retry=True):
+                       body=None, retry=True, sender=None, preserve_envelope=False):
         session = _copy_session(session)
         if not session.get("access_token") and (session.get("cookies") or {}).get(
                 "new_api_refresh"):
             session = await self._refresh(client, source, session)
-        response = await request_with_retry(
+        send = sender or request_with_retry
+        response = await send(
             client, method, source["base_url"] + path, params=params, json=body,
             headers=self._headers(source, session), timeout=20,
         )
@@ -253,7 +254,7 @@ class NewAPIAdapter(PoolSyncAdapter):
                 refreshed = await self._refresh(client, source, refreshed)
                 return await self._request(
                     client, source, refreshed, method, path, params=params, body=body,
-                    retry=False,
+                    retry=False, sender=sender, preserve_envelope=preserve_envelope,
                 )
             if session.get("access_token") and session.get("cookies"):
                 # Some New API forks send a short-lived bearer together with a
@@ -261,13 +262,14 @@ class NewAPIAdapter(PoolSyncAdapter):
                 # bearer so the server can authenticate the cookie instead.
                 cookie_session = _copy_session(session)
                 cookie_session["access_token"] = ""
-                cookie_response = await client.request(
-                    method, source["base_url"] + path, params=params, json=body,
+                cookie_response = await send(
+                    client, method, source["base_url"] + path, params=params, json=body,
                     headers=self._headers(source, cookie_session), timeout=20,
                 )
                 self._merge_response_cookies(cookie_session, cookie_response)
                 if not _is_auth_failure(cookie_response):
-                    return cookie_session, _unwrap(cookie_response)
+                    data = _unwrap(cookie_response)
+                    return cookie_session, cookie_response.json() if preserve_envelope else data
             username = str(session.get("username") or "").strip()
             password = session.get("password") or ""
             if username and password:
@@ -276,9 +278,10 @@ class NewAPIAdapter(PoolSyncAdapter):
                 )
                 return await self._request(
                     client, source, relogged, method, path, params=params, body=body,
-                    retry=False,
+                    retry=False, sender=sender, preserve_envelope=preserve_envelope,
                 )
-        return session, _unwrap(response)
+        data = _unwrap(response)
+        return session, response.json() if preserve_envelope else data
 
     async def _fetch_all_tokens(self, client, source, session):
         items = []
@@ -426,7 +429,7 @@ class NewAPIAdapter(PoolSyncAdapter):
         for group_id, metadata in (groups or {}).items():
             metadata = metadata if isinstance(metadata, dict) else {}
             catalog.append({
-                "id": str(group_id), "name": str(metadata.get("desc") or group_id),
+                "id": str(group_id), "name": str(group_id),
                 "platform": "", "allow_image_generation": None,
                 "routing_capabilities": {},
                 "rate_multiplier": _number_text(metadata.get("ratio")),
@@ -472,7 +475,7 @@ class NewAPIAdapter(PoolSyncAdapter):
             group_id = _token_group(item, session.get("user_group"))
             metadata = groups.get(group_id)
             metadata = metadata if isinstance(metadata, dict) else {}
-            group_name = str(metadata.get("desc") or group_id)
+            group_name = str(group_id)
             key_name = str(item.get("name") or "").strip()
             label = key_name or group_name
             if key_name and group_name.lower() not in key_name.lower():
@@ -532,8 +535,10 @@ class NewAPIAdapter(PoolSyncAdapter):
         for index, group in enumerate(targets):
             if index:
                 await asyncio.sleep(delay_seconds)
-            name = f"{prefix}-{group['name']}" if prefix else str(group["name"])
-            name = name[:50]
+            # Catalog names may be long descriptions. New API's Go len check
+            # limits token names to 50 UTF-8 bytes, not Python characters.
+            name = f"{prefix}-{group['id']}" if prefix else str(group["id"])
+            name = name.encode("utf-8")[:50].decode("utf-8", errors="ignore")
             try:
                 session, _ = await self._request(
                     client, source, session, "POST", "/api/token/", body={

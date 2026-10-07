@@ -1793,6 +1793,93 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
             persisted = json.load(f)
         self.assertEqual(persisted["sources"][0]["experience_source"], {})
 
+    async def test_non_passed_detection_status_disables_mapped_group_until_snapshot_changes(self):
+        client = FakeClient()
+        original_get = client.get
+        external_url = "https://metrics.test/group-detection"
+        external_items = [{"group_id": "remote-2", "status": "suspected"}]
+
+        async def get_with_detection(url, params=None, headers=None, timeout=None):
+            if url == external_url:
+                return response({"data": {"items": list(external_items)}})
+            return await original_get(url, params, headers, timeout)
+
+        client.get = get_with_detection
+        pools = {"https://upstream.test": KeyPool([])}
+        manager = PoolSyncManager(pools, self.config, client, {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        await manager.set_experience_source(source_id, external_url, transform={
+            "items_path": "data.items", "id_path": "group_id",
+            "ttft_path": "latency",
+            "detection_path": "status",
+        })
+        await manager.set_experience_mapping(source_id, {"2": "remote-2"})
+
+        pool = pools["https://upstream.test"]
+        self.assertEqual(pool.entries, [])
+        status = manager.status()["sources"][0]
+        detected_key = next(item for item in status["keys"] if item["group_id"] == "2")
+        self.assertFalse(detected_key["enabled"])
+        self.assertEqual(detected_key["disabled_reason"], "detection")
+        self.assertEqual(detected_key["detection_status"], "suspected")
+
+        manager._save_state()
+        restored_pools = {}
+        restored = PoolSyncManager(
+            restored_pools, self.config, FakeClient(), {"sub2api": Sub2APIAdapter()},
+        )
+        restored.load_state()
+        self.assertEqual(restored_pools["https://upstream.test"].entries, [])
+
+        external_items[0]["status"] = "passed"
+        await manager._refresh_experience_locked(manager.sources[source_id])
+        manager._activate(manager.sources[source_id])
+
+        self.assertEqual([entry.group_id for entry in pool.entries], ["2"])
+        status = manager.status()["sources"][0]
+        detected_key = next(item for item in status["keys"] if item["group_id"] == "2")
+        self.assertTrue(detected_key["enabled"])
+        self.assertEqual(detected_key["detection_status"], "passed")
+
+    async def test_unknown_and_unmapped_detection_groups_remain_enabled(self):
+        client = FakeClient()
+        client.created.append(3)
+        original_get = client.get
+        external_url = "https://metrics.test/group-detection"
+
+        async def get_with_detection(url, params=None, headers=None, timeout=None):
+            if url == external_url:
+                return response({"data": {"items": [
+                    {"group_id": "unknown", "status": "", "latency": 1000},
+                    {"group_id": "bad", "status": "detection_failed", "latency": 1000},
+                    {"group_id": "remote-3", "status": "not_configured", "latency": 1000},
+                ]}})
+            return await original_get(url, params, headers, timeout)
+
+        client.get = get_with_detection
+        pools = {"https://upstream.test": KeyPool([])}
+        manager = PoolSyncManager(pools, self.config, client, {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        await manager.set_experience_source(source_id, external_url, transform={
+            "items_path": "data.items", "id_path": "group_id",
+            "ttft_path": "latency",
+            "detection_path": "status",
+        })
+        await manager.set_experience_mapping(source_id, {
+            "2": "unknown", "3": "remote-3",
+        })
+
+        self.assertEqual([entry.group_id for entry in pools["https://upstream.test"].entries], ["2"])
+        status = manager.status()["sources"][0]
+        self.assertTrue(next(item for item in status["keys"] if item["group_id"] == "2")["enabled"])
+        self.assertFalse(next(item for item in status["keys"] if item["group_id"] == "3")["enabled"])
+
     async def test_external_refresh_failure_does_not_fail_normal_pool_sync(self):
         client = FakeClient()
         original_get = client.get

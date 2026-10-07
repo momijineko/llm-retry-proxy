@@ -252,7 +252,8 @@ class KeyPool:
     def has_routing_capabilities(self):
         return any(entry.routing_capabilities for entry in self.entries)
 
-    def for_request(self, model="", path="", endpoint_family="", model_scope=""):
+    def for_request(self, model="", path="", endpoint_family="", model_scope="",
+                    ignore_manual_rules=False):
         model = (model or "").lower()
         path = (path or "").lstrip("/").lower()
         endpoint_family = (endpoint_family or "").lower()
@@ -264,10 +265,13 @@ class KeyPool:
             )]
             if not candidates:
                 return None
-        matched = [entry for entry in candidates if
-                   (model and any(fnmatch.fnmatchcase(model, pattern) for pattern in entry.models)) or
-                   (path and any(fnmatch.fnmatchcase(path, pattern) for pattern in entry.paths))]
-        selected = matched or [entry for entry in candidates if not entry.models and not entry.paths]
+        if ignore_manual_rules:
+            selected = list(candidates)
+        else:
+            matched = [entry for entry in candidates if
+                       (model and any(fnmatch.fnmatchcase(model, pattern) for pattern in entry.models)) or
+                       (path and any(fnmatch.fnmatchcase(path, pattern) for pattern in entry.paths))]
+            selected = matched or [entry for entry in candidates if not entry.models and not entry.paths]
         if not selected:
             return None
         entry_ids = tuple(id(entry) for entry in selected)
@@ -403,6 +407,7 @@ class KeyPool:
                 "cache_input_tokens": 0, "cache_cached_tokens": 0,
                 "cache_last_ts": 0.0, "cache_low_streak": 0,
                 "cache_eligible_samples": 0,
+                "detection_status": "",
             })
             group["entries"].append(entry)
             group["sort"] = min(group["sort"], self._sort_value(entry))
@@ -414,6 +419,7 @@ class KeyPool:
             prior_strength = 0.0
         for key, group in groups.items():
             prior = self.prior_metrics.get(key) or {}
+            group["detection_status"] = str(prior.get("detection_status") or "").lower()
             external_ttft = prior.get("ttft")
             external_last_ts = float(prior.get("last_ts") or 0.0)
             external_fresh = (
@@ -557,6 +563,10 @@ class KeyPool:
     def _pick_group(self, entries):
         groups = self._group_metrics(entries)
         self._selection_count += 1
+        passed = {key: item for key, item in groups.items()
+                  if item.get("detection_status") in {"passed", "pass", "ok", "success", "通过"}}
+        if passed:
+            groups = passed
         unknown = [(key, item) for key, item in groups.items() if item["ttft"] is None]
         if self.strategy == "ttft":
             stale_after = max(float(self._setting("key_ttft_stale_after", 300)), 0.0)

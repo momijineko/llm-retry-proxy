@@ -124,6 +124,8 @@
     .metric label{display:block;color:var(--muted);font-size:11px;margin-bottom:5px;font-weight:500;text-transform:uppercase;letter-spacing:.03em}
     .metric span{font-weight:700;font-size:14px;color:var(--text);font-variant-numeric:tabular-nums}
     .source-error{color:var(--danger-d);background:var(--danger-l);padding:10px 18px;border-bottom:1px solid #fecaca;font-size:12px}
+    #groupCreationErrors{white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto;max-height:180px;flex-shrink:0}
+    #groupCreationErrors[hidden]{display:none}
     .scheduler{border-bottom:1px solid var(--border)}
     .scheduler-head{display:flex;align-items:center;justify-content:space-between;padding:9px 18px;background:var(--card-2);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.03em}
     .scheduler .table-wrap{max-height:260px}
@@ -225,6 +227,48 @@
     @media(max-width:1050px){.form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.transform-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:820px){header{padding:10px 16px;gap:8px}.header-actions{width:100%}main{padding:16px 16px 40px}}
     @media(max-width:760px){.form-grid,.credentials,.manual-meta,.manual-edit-body .form-grid,.experience-grid,.transform-grid{grid-template-columns:1fr}.query-param-row{grid-template-columns:1fr auto}.query-param-row input:last-of-type{grid-column:1}.query-param-row .btn{grid-column:2;grid-row:1/3}.header-actions{flex-wrap:wrap}.source-head{align-items:flex-start;flex-wrap:wrap}.source-toggle{width:100%;flex-basis:100%}.source-glance{margin-left:auto}.source-actions{width:100%;margin-left:0;flex-wrap:wrap}.source-policy{align-items:flex-start}.strategy-control{align-items:flex-start;flex-direction:column;gap:8px}.strategy-scroll{width:100%}.source-meta{grid-template-columns:repeat(2,1fr)}.modal{padding:10px}.experience-dialog{height:calc(100vh - 20px);max-height:calc(100vh - 20px)}.experience-config-body{max-height:38vh}.group-tools{flex-direction:column;align-items:stretch}.group-tools .field{width:100%}.dialog-actions{flex-wrap:wrap}.dialog-actions .summary{width:100%;margin:0}}
+
+    /* External source editor: one scrolling body, persistent actions. */
+    #experienceModal .experience-dialog{width:min(960px,100%);height:min(860px,calc(100dvh - 48px));max-height:calc(100dvh - 48px)}
+    .experience-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
+    #experienceModal [hidden]{display:none!important}
+    #experienceModal .experience-config{background:var(--card)}
+    #experienceModal .experience-config>summary{min-height:52px;padding:0 24px;background:var(--card-2);font-size:13px}
+    #experienceModal .experience-config-body{max-height:none;overflow:visible}
+    #experienceModal .experience-section{padding:22px 24px}
+    #experienceModal .experience-section h3{font-size:14px;margin:0 0 12px}
+    .experience-help{font-size:12px;line-height:1.7;color:var(--muted);margin:8px 0 0}
+    .experience-section>h3+.experience-help{margin:-6px 0 16px}
+    .experience-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 20px}
+    #experienceModal .field{min-width:0}
+    #experienceModal .field label{color:var(--text-2)}
+    #experienceModal .field input,#experienceModal .field select{height:40px}
+    #experienceModal input::placeholder,#experienceModal textarea::placeholder{color:var(--muted-2)}
+    .experience-auth{margin-top:16px;max-width:430px}
+    #experienceModal .query-param-head{margin-top:20px}
+    #experienceModal small{font-size:11px;color:var(--muted-2);margin-left:5px}
+    .experience-rule{margin-top:16px;padding:16px;background:var(--card-2);border:1px solid var(--border);border-radius:8px}
+    .experience-formula{font-size:12px;color:var(--text-2);margin:0 0 16px}
+    .experience-optional{margin-top:18px}
+    .experience-optional>summary{cursor:pointer;font-size:12px;color:var(--text-2);padding:6px 0}
+    .experience-optional>summary span{color:var(--muted);margin-left:8px;font-weight:400}
+    .experience-optional[open]>summary{margin-bottom:12px}
+    #experienceModal textarea{width:100%;display:block;resize:vertical;min-height:80px;padding:10px 12px;border:1px solid var(--border-strong);border-radius:6px;background:var(--card);color:var(--text);font:12px/1.6 ui-monospace,monospace}
+    #experienceModal textarea:focus{outline:2px solid var(--primary);outline-offset:1px}
+    #experienceModal .form-actions{align-items:center;flex-wrap:wrap;padding:16px 24px}
+    #experienceModal .experience-status{white-space:normal;overflow-wrap:anywhere}
+    #experienceModal .experience-mapping-head{padding:22px 24px 12px}
+    #experienceModal #experienceTable{min-height:160px;overflow:auto}
+    #experienceModal .dialog-head,#experienceModal .dialog-actions{padding:16px 24px}
+    @media(max-width:600px){
+      #experienceModal .experience-dialog{height:calc(100dvh - 20px);max-height:calc(100dvh - 20px)}
+      #experienceModal .experience-section{padding:20px 16px}
+      #experienceModal .dialog-head,#experienceModal .dialog-actions,#experienceModal .form-actions{padding:14px 16px}
+      .experience-fields{grid-template-columns:1fr;gap:14px}
+      .experience-optional>summary span{display:none}
+      #experienceModal .experience-status{flex-basis:100%;margin-bottom:4px}
+      #experienceModal .experience-config>summary{padding:0 16px}
+    }
   </style>
 </head>
 <body>
@@ -288,6 +332,7 @@
       <button class="btn" id="selectMissing" type="button">选择缺失分组</button>
       <button class="btn" id="selectAllGroups" type="button">全选</button>
     </div>
+    <div id="groupCreationErrors" class="source-error" role="alert" hidden></div>
     <div class="group-table" id="groupTable"><div class="empty">正在载入</div></div>
     <div class="dialog-actions"><span class="summary" id="groupSummary"></span><span class="operation-progress" id="operationProgress" aria-live="polite"></span><button class="btn danger" id="clearSelected" type="button">清空选中分组</button><button class="btn" id="createMissing" type="button">一键补齐</button><button class="btn primary" id="createSelected" type="button">为选中分组创建 Key</button></div>
   </section>
@@ -302,36 +347,50 @@
 <div class="modal" id="experienceModal" role="dialog" aria-modal="true" aria-labelledby="experienceDialogTitle">
   <section class="dialog experience-dialog">
     <div class="dialog-head"><h2 id="experienceDialogTitle">外部数据源</h2><button class="btn" id="closeExperience" type="button">关闭</button></div>
+
+    <div class="experience-scroll" id="experienceScroll">
     <details class="experience-config" id="experienceConfigPanel" open>
-      <summary>接口与字段配置<span id="experienceConfigSummary">尚未配置</span></summary>
+      <summary>数据源配置<span id="experienceConfigSummary">尚未配置</span></summary>
       <div class="experience-config-body">
-        <div class="experience-section">
+        <section class="experience-section">
           <h3>接口请求</h3>
-          <div class="experience-grid">
-            <div class="field"><label for="experienceUrl">GET 接口 URL</label><input id="experienceUrl" type="url" placeholder="https://example.com/api/metrics"></div>
-          </div>
-          <div class="query-param-head"><span>查询参数（可选）</span><button class="btn" id="addExperienceQueryParam" type="button">添加参数</button></div>
+          <p class="experience-help">连接数据接口，读取外部分组的延迟与检测结果。</p>
+<div class="field"><label for="experienceUrl">接口地址</label><input id="experienceUrl" type="url" placeholder="https://example.com/api/metrics"></div>
+          <div class="field experience-auth"><label for="experienceAuth">鉴权方式</label><select id="experienceAuth"><option value="none">无鉴权</option><option value="source_session">复用 New API 登录会话（同源 HTTPS）</option></select></div>
+          <div class="query-param-head"><span>查询参数 <small>可选</small></span><button class="text-action" id="addExperienceQueryParam" type="button">＋ 添加参数</button></div>
           <div class="query-param-list" id="experienceQueryParams"></div>
-        </div>
-        <div class="experience-section">
-          <h3>返回数据映射</h3>
-          <div class="transform-grid">
-            <div class="field"><label for="experienceItemsPath">记录列表路径</label><input id="experienceItemsPath" placeholder="例如 data.items；顶层数组填 $"></div>
-            <div class="field"><label for="experienceIdPath">唯一标识字段</label><input id="experienceIdPath" placeholder="例如 id"></div>
-            <div class="field"><label for="experienceTtftPath">延迟值字段</label><input id="experienceTtftPath" placeholder="例如 metrics.ttft"></div>
-            <div class="field"><label for="experienceTtftUnit">延迟单位</label><select id="experienceTtftUnit"><option value="ms">毫秒</option><option value="s">秒</option></select></div>
-            <div class="field"><label for="experienceNamePath">显示名称字段（可选）</label><input id="experienceNamePath" placeholder="例如 name"></div>
-            <div class="field"><label for="experiencePlatformPath">分类字段（可选）</label><input id="experiencePlatformPath" placeholder="例如 provider"></div>
-            <div class="field"><label for="experienceRatePath">成本或倍率字段（可选）</label><input id="experienceRatePath" placeholder="例如 rate"></div>
-            <div class="field"><label for="experienceCountPath">样本数字段（可选）</label><input id="experienceCountPath" placeholder="例如 sample_count"></div>
-            <div class="field"><label for="experienceTimePath">采集时间字段（可选）</label><input id="experienceTimePath" placeholder="例如 updated_at"></div><div class="field"><label for="experienceDetectionPath">状态字段（可选）</label><input id="experienceDetectionPath" placeholder="例如 model_detection.status"></div><div class="field"><label for="experienceDetectionMap">状态显示映射（可选 JSON）</label><input id="experienceDetectionMap" placeholder="{&quot;passed&quot;:&quot;通过&quot;}"></div>
+        </section>
+        <section class="experience-section">
+          <h3>数据字段</h3>
+          <p class="experience-help">填写 JSON 中的字段路径，例如 data.items。</p>
+<div class="experience-fields"><div class="field"><label for="experienceItemsPath">记录列表</label><input id="experienceItemsPath" type="text" placeholder="data.items；顶层数组填 $"></div><div class="field"><label for="experienceIdPath">唯一标识</label><input id="experienceIdPath" type="text" placeholder="id"></div><div class="field"><label for="experienceTtftPath">延迟值</label><input id="experienceTtftPath" type="text" placeholder="metrics.ttft"></div><div class="field"><label for="experienceTtftUnit">延迟单位</label><select id="experienceTtftUnit"><option value="ms">毫秒</option><option value="s">秒</option></select></div></div>
+          <details class="experience-optional"><summary>更多字段 <span>名称、分类、倍率与采集信息</span></summary>
+<div class="experience-fields"><div class="field"><label for="experienceNamePath">显示名称</label><input id="experienceNamePath" type="text" placeholder="name"></div><div class="field"><label for="experiencePlatformPath">分类</label><input id="experiencePlatformPath" type="text" placeholder="provider"></div><div class="field"><label for="experienceRatePath">成本或倍率</label><input id="experienceRatePath" type="text" placeholder="rate"></div><div class="field"><label for="experienceCountPath">样本数</label><input id="experienceCountPath" type="text" placeholder="sample_count"></div><div class="field"><label for="experienceTimePath">采集时间</label><input id="experienceTimePath" type="text" placeholder="updated_at"></div></div>
+          </details>
+        </section>
+        <section class="experience-section">
+          <h3>检测规则</h3>
+          <div class="field"><label for="experienceDetectionMode">判断方式</label><select id="experienceDetectionMode"><option value="field">读取状态字段</option><option value="pass_ratio">计算通过率</option></select></div>
+          <div id="experienceFieldRule" class="experience-rule">
+<div class="field"><label for="experienceDetectionPath">状态字段 · 可选</label><input id="experienceDetectionPath" type="text" placeholder="model_detection.status"></div>
+            <p class="experience-help">留空则不依据外部检测状态禁用分组。</p>
           </div>
-        </div>
-        <div class="form-actions"><span class="experience-status" id="experienceStatus"></span><button class="btn danger" id="removeExperience" type="button">移除数据源</button><button class="btn primary" id="loadExperience" type="button">读取并保存</button></div>
+          <div id="experienceRatioRule" class="experience-rule" hidden>
+            <p class="experience-formula">通过率 = 通过次数 ÷（通过次数 + 失败次数）</p>
+<div class="experience-fields"><div class="field"><label for="experiencePassPath">通过次数</label><input id="experiencePassPath" type="text" placeholder="checks.pass"></div><div class="field"><label for="experienceFailPath">失败次数</label><input id="experienceFailPath" type="text" placeholder="checks.fail"></div><div class="field"><label for="experienceHealthyThreshold">通过阈值（%）</label><input id="experienceHealthyThreshold" type="number" placeholder="90"></div><div class="field"><label for="experienceWarningThreshold">警告阈值（%）</label><input id="experienceWarningThreshold" type="number" placeholder="70"></div></div>
+            <p class="experience-help">达到通过阈值或暂无数据时启用；警告和异常时禁用。</p>
+          </div>
+          <details class="experience-optional"><summary>自定义状态文案 <span>可选</span></summary>
+            <div class="field"><label for="experienceDetectionMap">状态与显示名称（JSON）</label><textarea id="experienceDetectionMap" rows="3" spellcheck="false" placeholder='{"pass":"通过","unknown":"暂无数据"}'></textarea></div>
+            <p class="experience-help">通过率模式支持 pass、degraded、critical、unknown。</p>
+          </details>
+        </section>
+        <div class="form-actions"><span class="experience-status" id="experienceStatus" role="status"></span><button class="btn danger" id="removeExperience" type="button">移除数据源</button><button class="btn primary" id="loadExperience" type="button">读取并保存</button></div>
       </div>
     </details>
     <div class="experience-mapping-head"><h3>分组映射</h3></div>
     <div class="group-table" id="experienceTable"><div class="empty">请先读取数据源</div></div>
+    </div>
     <div class="dialog-actions"><span class="summary" id="experienceSummary"></span><button class="btn" id="autoMatchExperience" type="button">自动匹配</button><button class="btn primary" id="saveExperienceMapping" type="button">保存映射</button></div>
   </section>
 </div>
@@ -394,7 +453,7 @@ function keyRows(keys,sourceId,isManual=false){
   ordered.sort((a,b)=>{const tie=()=>String(a.group_name||'').localeCompare(String(b.group_name||''),'zh-CN')||String(a.label||'').localeCompare(String(b.label||''),'zh-CN');if(keySortMode==='group')return tie()*keySortDirection;if(keySortMode==='rate'){const ar=Number.parseFloat(a.sort),br=Number.parseFloat(b.sort),av=Number.isFinite(ar)?ar:Number.POSITIVE_INFINITY,bv=Number.isFinite(br)?br:Number.POSITIVE_INFINITY;return(av-bv||tie())*keySortDirection}if(keySortMode==='latency'||keySortMode==='cache'){const field=keySortMode==='latency'?'ttft_ewma':'cache_hit_rate',av=a[field],bv=b[field],ak=av!=null&&Number.isFinite(Number(av)),bk=bv!=null&&Number.isFinite(Number(bv));if(!ak&&!bk)return tie();if(!ak)return 1;if(!bk)return-1;return((Number(av)-Number(bv))*keySortDirection)||tie()}return 0});
   return ordered.map(k=>{
     const automatic=capabilityText(k),rules=[...(k.models||[]),...(k.paths||[])].join('; '),minutes=Math.max(1,Math.ceil((k.cooldown_remaining||0)/60));
-    let status,actions;if(!k.enabled){status='已停用';actions=`<button class="text-action" type="button" data-key-state="1" data-source-key-id="${esc(k.source_key_id)}" data-source-id="${esc(sourceId)}">启用</button>`}else if(k.cooled){const circuitLabel=k.last_failure_kind==='probe'?'检测熔断':k.last_failure_kind==='cache_miss'?'缓存熔断':'熔断';status=`<span title="最近失败 ${esc(k.last_failure_status||k.last_failure_kind||'-')}，剩余约 ${minutes} 分钟">${circuitLabel}</span>`;actions=`<button class="text-action" type="button" data-reset-group="${esc(k.group_id||k.source_key_id)}" data-source-id="${esc(sourceId)}">解除熔断</button><button class="text-action danger" type="button" data-key-state="0" data-source-key-id="${esc(k.source_key_id)}" data-source-id="${esc(sourceId)}">停用</button>`}else{status='可用';actions=`<button class="text-action danger" type="button" data-key-state="0" data-source-key-id="${esc(k.source_key_id)}" data-source-id="${esc(sourceId)}">停用</button>`}const groupId=String(k.group_id||''),showGroupCheck=!isManual&&groupId&&!renderedCheckGroups.has(groupId);if(showGroupCheck){renderedCheckGroups.add(groupId);const checkKey=groupCheckKey(sourceId,groupId),running=activeGroupChecks.has(checkKey),progress=groupCheckProgress.get(checkKey);actions=`<button class="text-action" type="button" data-action="check-group" data-source-id="${esc(sourceId)}" data-group-id="${esc(groupId)}" data-group-name="${esc(k.group_name||k.label)}" ${running?'disabled':''}>${running?`检测中 ${progress?.done||0}/${progress?.total||'?'}`:'检测可用模型'}</button>`+actions}
+    let status,actions;if(!k.enabled){status=k.disabled_reason==='detection'?'检测状态不合格，自动禁用':'已停用';actions=k.disabled_reason==='detection'?'':`<button class="text-action" type="button" data-key-state="1" data-source-key-id="${esc(k.source_key_id)}" data-source-id="${esc(sourceId)}">启用</button>`}else if(k.cooled){const circuitLabel=k.last_failure_kind==='probe'?'检测熔断':k.last_failure_kind==='cache_miss'?'缓存熔断':'熔断';status=`<span title="最近失败 ${esc(k.last_failure_status||k.last_failure_kind||'-')}，剩余约 ${minutes} 分钟">${circuitLabel}</span>`;actions=`<button class="text-action" type="button" data-reset-group="${esc(k.group_id||k.source_key_id)}" data-source-id="${esc(sourceId)}">解除熔断</button><button class="text-action danger" type="button" data-key-state="0" data-source-key-id="${esc(k.source_key_id)}" data-source-id="${esc(sourceId)}">停用</button>`}else{status='可用';actions=`<button class="text-action danger" type="button" data-key-state="0" data-source-key-id="${esc(k.source_key_id)}" data-source-id="${esc(sourceId)}">停用</button>`}const groupId=String(k.group_id||''),showGroupCheck=!isManual&&groupId&&!renderedCheckGroups.has(groupId);if(showGroupCheck){renderedCheckGroups.add(groupId);const checkKey=groupCheckKey(sourceId,groupId),running=activeGroupChecks.has(checkKey),progress=groupCheckProgress.get(checkKey);actions=`<button class="text-action" type="button" data-action="check-group" data-source-id="${esc(sourceId)}" data-group-id="${esc(groupId)}" data-group-name="${esc(k.group_name||k.label)}" ${running?'disabled':''}>${running?`检测中 ${progress?.done||0}/${progress?.total||'?'}`:'检测可用模型'}</button>`+actions}
     if(isManual)actions+=`<button class="text-action" type="button" data-manual-edit="${esc(k.source_key_id)}" data-source-id="${esc(sourceId)}">编辑</button><button class="text-action danger" type="button" data-manual-remove="${esc(k.source_key_id)}" data-source-id="${esc(sourceId)}">删除</button>`;
     const platformCell=isManual?'':`<td>${esc(k.platform||'-')}</td>`,detectionCell=isManual?'':`<td>${detectionStatusMarkup(k.detection_status,k.detection_label)}</td>`,cacheCell=isManual?'':`<td class="num" data-cache-source="${esc(sourceId)}" data-cache-key="${esc(k.source_key_id)}">${cacheMarkup(k)}</td>`,capabilityCell=isManual?'':`<td class="rules capabilities" title="${esc(automatic)}">${capabilityMarkup(k)}</td>`,rulesCell=isManual?'':`<td class="rules" title="${esc(rules)}">${esc(rules||'-')}</td>`;
     return `<tr class="${k.enabled?'':'disabled-key'}"><td><strong>${esc(k.label)}</strong></td><td>${esc(k.key_masked)}</td><td>${esc(k.group_name||'-')}</td>${platformCell}${detectionCell}<td class="num">${esc(k.sort||'-')}</td><td class="num" data-latency-source="${esc(sourceId)}" data-latency-key="${esc(k.source_key_id)}">${latencyMarkup(k)}</td>${cacheCell}${capabilityCell}${rulesCell}<td class="${k.cooled?'cooled':''}">${status}</td><td><div class="key-actions">${actions}</div></td></tr>`
@@ -437,22 +496,39 @@ function toggleSource(sourceId){const source=document.querySelector(`.source[dat
 function groupCheckKey(sourceId,groupId){return `${sourceId}\u0000${groupId}`}
 function renderGroups(){const missing=groupCatalog.filter(g=>g.key_count===0).length;$('groupSummary').textContent=`${groupCatalog.length} 个分组，${missing} 个缺少 Key`;$('groupTable').innerHTML=groupCatalog.length?`<table><thead><tr><th style="width:44px"></th><th>分组</th><th>平台</th><th>生图权限</th><th class="num">倍率</th><th class="num">Key</th><th class="num">有效</th><th>操作</th></tr></thead><tbody>${groupCatalog.map(g=>{const checkKey=groupCheckKey(activeSource,g.id),running=activeGroupChecks.has(checkKey),progress=groupCheckProgress.get(checkKey),disabled=!g.key_count||running;return `<tr><td><input type="checkbox" data-group-id="${esc(g.id)}" data-missing="${g.key_count===0?'1':'0'}" aria-label="选择 ${esc(g.name)}"></td><td><strong>${esc(g.name)}</strong>${g.key_count===0?' <span class="pill warn">缺失</span>':''}</td><td>${esc(g.platform||'-')}</td><td>${g.allow_image_generation===true?'<span class="pill ok">已开启</span>':g.allow_image_generation===false?'<span class="pill muted">未开启</span>':'<span class="pill muted">未知</span>'}</td><td class="num">${esc(g.rate_multiplier||'-')}</td><td class="num">${g.key_count}</td><td class="num">${g.active_key_count}</td><td><button class="text-action" type="button" data-action="check-group" data-source-id="${esc(activeSource)}" data-group-id="${esc(g.id)}" ${disabled?'disabled':''}>${running?`检测中 ${progress?.done||0}/${progress?.total||'?'}`:'检测可用模型'}</button></td></tr>`}).join('')}</tbody></table>`:'<div class="empty">没有可用分组</div>'}
 function renderMapping(){const table=$('mappingTable');table.innerHTML=groupCatalog.length?`<table><thead><tr><th>分组</th><th>平台</th><th>自动能力</th><th class="num">倍率</th><th>手工模型</th><th>手工路径</th></tr></thead><tbody>${groupCatalog.map(g=>{const automatic=capabilityText(g);return `<tr><td><strong>${esc(g.name)}</strong></td><td>${esc(g.platform||'-')}</td><td class="rules capabilities" title="${esc(automatic)}">${capabilityMarkup(g)}</td><td class="num">${esc(g.rate_multiplier||'-')}</td><td><input class="rule-input" data-rule-models="${esc(g.id)}" value="${esc((g.models||[]).join('; '))}" placeholder="例如 image2-*"></td><td><input class="rule-input" data-rule-paths="${esc(g.id)}" value="${esc((g.paths||[]).join('; '))}" placeholder="例如 v1/images/*"></td></tr>`}).join('')}</tbody></table>`:'<div class="empty">没有可用分组</div>'}
-async function openGroups(sourceId){activeSource=sourceId;groupCatalog=[];$('groupModal').classList.add('open');$('groupTable').innerHTML='<div class="empty">正在载入</div>';$('groupSummary').textContent='';try{const data=await api('catalog?source_id='+encodeURIComponent(sourceId));groupCatalog=data.groups||[];renderGroups()}catch(e){$('groupTable').innerHTML='<div class="empty">载入失败</div>';notice(e.message,'error')}}
+async function openGroups(sourceId){showCreationErrors();activeSource=sourceId;groupCatalog=[];$('groupModal').classList.add('open');$('groupTable').innerHTML='<div class="empty">正在载入</div>';$('groupSummary').textContent='';try{const data=await api('catalog?source_id='+encodeURIComponent(sourceId));groupCatalog=data.groups||[];renderGroups()}catch(e){$('groupTable').innerHTML='<div class="empty">载入失败</div>';notice(e.message,'error')}}
 async function openMapping(sourceId){activeSource=sourceId;groupCatalog=[];$('mappingModal').classList.add('open');$('mappingTable').innerHTML='<div class="empty">正在载入</div>';try{const data=await api('catalog?source_id='+encodeURIComponent(sourceId));groupCatalog=data.groups||[];renderMapping()}catch(e){$('mappingTable').innerHTML='<div class="empty">载入失败</div>';notice(e.message,'error')}}
 function setGroupBusy(busy,message=''){const modal=$('groupModal');modal.dataset.busy=busy?'1':'';modal.querySelectorAll('button,input').forEach(control=>{control.disabled=busy});$('operationProgress').textContent=message}
 async function pollOperation(request){let settled=false;request.then(()=>{settled=true},()=>{settled=true});while(!settled){try{const current=await api('status');state=current;const source=(current.sources||[]).find(item=>item.id===activeSource),operation=source?.operation||{};if(operation.running)$('operationProgress').textContent=`处理中 ${operation.done||0}/${operation.total||'?'}，成功 ${operation.created||0}，失败 ${operation.failed||0}`;await new Promise(resolve=>setTimeout(resolve,500))}catch(e){await new Promise(resolve=>setTimeout(resolve,500))}}}
 async function pollCheck(request){let settled=false;request.then(()=>{settled=true},()=>{settled=true});while(!settled){await new Promise(resolve=>setTimeout(resolve,500));if(settled)break;try{state=await api('status');render()}catch{}}}
-async function createKeys(onlyMissing,groupIds=[]){setGroupBusy(true,'准备创建...');const request=api('create-keys',{method:'POST',body:JSON.stringify({source_id:activeSource,group_ids:groupIds,only_missing:onlyMissing})});const poll=pollOperation(request);try{const result=await request;await poll;state=result.state;render();const made=result.creation?.created?.length||0,failed=result.creation?.errors?.length||0;$('groupModal').classList.remove('open');notice(failed?`已创建 ${made} 个，失败 ${failed} 个`:`已创建 ${made} 个 Key`,failed?'error':'ok')}catch(e){await poll;notice(e.message,'error')}finally{setGroupBusy(false)}}
+function showCreationErrors(message=''){const el=$('groupCreationErrors');el.textContent=message;el.hidden=!message}
+async function createKeys(onlyMissing,groupIds=[]){
+  showCreationErrors();setGroupBusy(true,'准备创建...');
+  const request=api('create-keys',{method:'POST',body:JSON.stringify({source_id:activeSource,group_ids:groupIds,only_missing:onlyMissing})});
+  const poll=pollOperation(request);
+  try{
+    const result=await request;await poll;state=result.state;render();
+    const made=result.creation?.created?.length||0,errors=result.creation?.errors||[];
+    if(errors.length){
+      const summary=`已创建 ${made} 个，失败 ${errors.length} 个`;
+      showCreationErrors(summary+'\n'+errors.map(item=>`${item.group_name||item.group_id||'未知分组'}：${item.error||'上游未返回错误详情'}`).join('\n'));
+      notice(summary,'error');
+      try{const catalog=await api('catalog?source_id='+encodeURIComponent(activeSource));groupCatalog=catalog.groups||[];renderGroups()}catch(e){showCreationErrors($('groupCreationErrors').textContent+'\n刷新分组失败：'+e.message)}
+    }else{$('groupModal').classList.remove('open');notice(`已创建 ${made} 个 Key`)}
+  }catch(e){await poll;showCreationErrors(e.message);notice(e.message,'error')}
+  finally{setGroupBusy(false)}
+}
 async function clearKeys(groupIds=[]){const button=$('clearSelected');button.disabled=true;try{const result=await api('clear-keys',{method:'POST',body:JSON.stringify({source_id:activeSource,group_ids:groupIds})});state=result.state;render();const deleted=result.deletion?.deleted?.length||0,failed=result.deletion?.errors?.length||0;$('groupModal').classList.remove('open');notice(failed?`已清空 ${deleted} 个，失败 ${failed} 个`:`已清空 ${deleted} 个 Key`,failed?'error':'ok')}catch(e){notice(e.message,'error')}finally{button.disabled=false}}
 async function saveGroupRules(){const button=$('saveGroupRules');const rules={};document.querySelectorAll('#mappingTable [data-rule-models]').forEach(input=>{const id=input.dataset.ruleModels;rules[id]={models:input.value,paths:document.querySelector(`#mappingTable [data-rule-paths="${CSS.escape(id)}"]`)?.value||''}});button.disabled=true;try{state=await api('group-rules',{method:'POST',body:JSON.stringify({source_id:activeSource,rules})});$('mappingModal').classList.remove('open');render();notice('分组映射已保存')}catch(e){notice(e.message,'error')}finally{button.disabled=false}}
-const experienceDefaults={items_path:'',id_path:'',name_path:'',platform_path:'',rate_path:'',ttft_path:'',ttft_unit:'ms',samples_path:'',timestamp_path:'',detection_path:'',detection_map:{}};
+const experienceDefaults={items_path:'',id_path:'',name_path:'',platform_path:'',rate_path:'',ttft_path:'',ttft_unit:'ms',samples_path:'',timestamp_path:'',detection_path:'',detection_map:{},detection_mode:'field',pass_path:'',fail_path:'',healthy_threshold:90,warning_threshold:70};
 function currentSource(){return(state.sources||[]).find(item=>String(item.id)===String(activeSource))}
-function experienceTransform(){let detectionMap={};try{detectionMap=JSON.parse($('experienceDetectionMap').value||'{}')}catch{throw new Error('状态显示映射必须是有效 JSON')}return{items_path:$('experienceItemsPath').value.trim(),id_path:$('experienceIdPath').value.trim(),name_path:$('experienceNamePath').value.trim(),platform_path:$('experiencePlatformPath').value.trim(),rate_path:$('experienceRatePath').value.trim(),ttft_path:$('experienceTtftPath').value.trim(),ttft_unit:$('experienceTtftUnit').value,samples_path:$('experienceCountPath').value.trim(),timestamp_path:$('experienceTimePath').value.trim(),detection_path:$('experienceDetectionPath').value.trim(),detection_map:detectionMap}}
+function experienceTransform(){let detectionMap={};try{detectionMap=JSON.parse($('experienceDetectionMap').value||'{}')}catch{throw new Error('状态显示映射必须是有效 JSON')}return{items_path:$('experienceItemsPath').value.trim(),id_path:$('experienceIdPath').value.trim(),name_path:$('experienceNamePath').value.trim(),platform_path:$('experiencePlatformPath').value.trim(),rate_path:$('experienceRatePath').value.trim(),ttft_path:$('experienceTtftPath').value.trim(),ttft_unit:$('experienceTtftUnit').value,samples_path:$('experienceCountPath').value.trim(),timestamp_path:$('experienceTimePath').value.trim(),detection_path:$('experienceDetectionPath').value.trim(),detection_map:detectionMap,detection_mode:$('experienceDetectionMode').value,pass_path:$('experiencePassPath').value.trim(),fail_path:$('experienceFailPath').value.trim(),healthy_threshold:Number($('experienceHealthyThreshold').value),warning_threshold:Number($('experienceWarningThreshold').value)}}
 function renderExperienceQueryParams(params={}){const rows=Object.entries(params);$('experienceQueryParams').innerHTML=rows.map(([name,value])=>`<div class="query-param-row"><input data-query-name value="${esc(name)}" placeholder="参数名" aria-label="查询参数名"><input data-query-value value="${esc(value)}" placeholder="参数值" aria-label="查询参数值"><button class="btn danger" data-remove-query type="button">删除</button></div>`).join('')}
 function addExperienceQueryParam(name='',value=''){const row=document.createElement('div');row.className='query-param-row';row.innerHTML=`<input data-query-name value="${esc(name)}" placeholder="参数名" aria-label="查询参数名"><input data-query-value value="${esc(value)}" placeholder="参数值" aria-label="查询参数值"><button class="btn danger" data-remove-query type="button">删除</button>`;$('experienceQueryParams').append(row);row.querySelector('[data-query-name]').focus()}
 function experienceQueryParams(){const params={};for(const row of document.querySelectorAll('#experienceQueryParams .query-param-row')){const name=row.querySelector('[data-query-name]').value.trim(),value=row.querySelector('[data-query-value]').value;if(!name&&!value)continue;if(!name)throw new Error('查询参数名不能为空');if(Object.prototype.hasOwnProperty.call(params,name))throw new Error(`查询参数重复：${name}`);params[name]=value}return params}
 function experienceSourceSummary(config){if(!config.url)return'尚未配置';let host=config.url;try{host=new URL(config.url).host}catch{}return`${host} · ${(config.items||[]).length} 条记录`}
-function fillExperienceForm(source){const config=source?.experience||{},transform={...experienceDefaults,...(config.transform||{})},queryParams=config.query_params||(config.sample_param?{[config.sample_param]:config.samples}:{});$('experienceUrl').value=config.url||'';renderExperienceQueryParams(queryParams);$('experienceItemsPath').value=transform.items_path;$('experienceIdPath').value=transform.id_path;$('experienceNamePath').value=transform.name_path;$('experiencePlatformPath').value=transform.platform_path;$('experienceRatePath').value=transform.rate_path;$('experienceTtftPath').value=transform.ttft_path;$('experienceTtftUnit').value=transform.ttft_unit;$('experienceCountPath').value=transform.samples_path;$('experienceTimePath').value=transform.timestamp_path;$('experienceDetectionPath').value=transform.detection_path;$('experienceDetectionMap').value=JSON.stringify(transform.detection_map||{});$('experienceConfigSummary').textContent=experienceSourceSummary(config);$('experienceStatus').textContent=config.last_error?`读取失败：${config.last_error}`:config.last_sync_at?`最近读取 ${fmtTime(config.last_sync_at)}`:'尚未配置'}
+function updateExperienceRule(){const ratio=$('experienceDetectionMode').value==='pass_ratio';$('experienceFieldRule').hidden=ratio;$('experienceRatioRule').hidden=!ratio}
+function fillExperienceForm(source){const config=source?.experience||{},transform={...experienceDefaults,...(config.transform||{})},queryParams=config.query_params||(config.sample_param?{[config.sample_param]:config.samples}:{});$('experienceUrl').value=config.url||'';document.getElementById('experienceAuth').value=config.auth_mode||'none';renderExperienceQueryParams(queryParams);$('experienceItemsPath').value=transform.items_path;$('experienceIdPath').value=transform.id_path;$('experienceNamePath').value=transform.name_path;$('experiencePlatformPath').value=transform.platform_path;$('experienceRatePath').value=transform.rate_path;$('experienceTtftPath').value=transform.ttft_path;$('experienceTtftUnit').value=transform.ttft_unit;$('experienceCountPath').value=transform.samples_path;$('experienceTimePath').value=transform.timestamp_path;$('experienceDetectionMode').value=transform.detection_mode;$('experiencePassPath').value=transform.pass_path;$('experienceFailPath').value=transform.fail_path;$('experienceHealthyThreshold').value=transform.healthy_threshold;$('experienceWarningThreshold').value=transform.warning_threshold;$('experienceDetectionPath').value=transform.detection_path;$('experienceDetectionMap').value=JSON.stringify(transform.detection_map||{},null,2);updateExperienceRule();$('experienceConfigSummary').textContent=experienceSourceSummary(config);$('experienceStatus').textContent=config.last_error?`读取失败：${config.last_error}`:config.last_sync_at?`最近读取 ${fmtTime(config.last_sync_at)}`:'尚未配置'}
 function experienceInputLabel(item){return`${item.name||item.id} · ID ${item.id}`}
 function experienceSearchText(item){return normalizedMatchValue([item.name,item.id,item.platform,item.rate_multiplier].join(' '))}
 function detectionLabel(status){const value=String(status||'').toLowerCase();if(['passed','pass','ok','success','通过'].includes(value))return '<span class="pill ok">通过</span>';if(['suspected','疑似'].includes(value))return '<span class="pill warn">疑似</span>';if(['insufficient_evidence','detection_failed','not_configured'].includes(value))return `<span class="pill muted">${esc(value)}</span>`;return '<span class="pill muted">未知</span>'}
@@ -466,7 +542,7 @@ function syncExperienceSelection(input){const items=currentSource()?.experience?
 function normalizedMatchValue(value){return String(value||'').trim().toLocaleLowerCase()}
 function autoMatchExperience(){const items=currentSource()?.experience?.items||[];let matched=0;for(const input of document.querySelectorAll('[data-experience-local]')){if(input.dataset.experienceSelected)continue;const localId=String(input.dataset.experienceLocal),localName=normalizedMatchValue(input.dataset.localName),localPlatform=normalizedMatchValue(input.dataset.localPlatform);let match=items.find(item=>String(item.id)===localId);if(!match&&localName){const named=items.filter(item=>normalizedMatchValue(item.name)===localName),candidates=localPlatform?named.filter(item=>normalizedMatchValue(item.platform)===localPlatform):named;if(candidates.length===1)match=candidates[0]}if(match){input.value=experienceInputLabel(match);input.dataset.experienceSelected=String(match.id);input.classList.remove('unresolved');matched++}}return matched}
 function openExperience(sourceId){activeSource=sourceId;const source=currentSource(),configured=Boolean(source?.experience?.url);fillExperienceForm(source);renderExperienceTable();if(configured)autoMatchExperience();$('experienceConfigPanel').open=!configured;$('experienceModal').classList.add('open');if(!configured)$('experienceUrl').focus()}
-async function loadExperience(){const button=$('loadExperience'),url=$('experienceUrl').value.trim();if(!url){notice('请填写数据接口 URL','error');return}button.disabled=true;try{state=await api('experience-source',{method:'POST',body:JSON.stringify({source_id:activeSource,url,query_params:experienceQueryParams(),transform:experienceTransform()})});fillExperienceForm(currentSource());renderExperienceTable();const matched=autoMatchExperience();$('experienceConfigPanel').open=false;render();notice(matched?`外部数据已读取，自动匹配 ${matched} 个分组`:'外部数据已读取')}catch(e){notice(e.message,'error')}finally{button.disabled=false}}
+async function loadExperience(){const button=$('loadExperience'),url=$('experienceUrl').value.trim();if(!url){notice('请填写数据接口 URL','error');return}button.disabled=true;try{state=await api('experience-source',{method:'POST',body:JSON.stringify({source_id:activeSource,url,auth_mode:document.getElementById('experienceAuth').value,query_params:experienceQueryParams(),transform:experienceTransform()})});fillExperienceForm(currentSource());renderExperienceTable();const matched=autoMatchExperience();$('experienceConfigPanel').open=false;render();notice(matched?`外部数据已读取，自动匹配 ${matched} 个分组`:'外部数据已读取')}catch(e){notice(e.message,'error')}finally{button.disabled=false}}
 async function removeExperience(){if(!currentSource()?.experience?.url)return;if(!confirm('确定移除外部数据源和全部分组映射吗？'))return;const button=$('removeExperience');button.disabled=true;try{state=await api('experience-source',{method:'POST',body:JSON.stringify({source_id:activeSource,url:''})});fillExperienceForm(currentSource());renderExperienceTable();$('experienceConfigPanel').open=true;render();notice('外部数据源已移除')}catch(e){notice(e.message,'error')}finally{button.disabled=false}}
 async function saveExperienceMapping(){const button=$('saveExperienceMapping'),mappings={};let unresolved=false;document.querySelectorAll('[data-experience-local]').forEach(input=>{if(input.value&&!input.dataset.experienceSelected){input.classList.add('unresolved');unresolved=true}else if(input.dataset.experienceSelected)mappings[input.dataset.experienceLocal]=input.dataset.experienceSelected});if(unresolved){notice('请从候选列表中选择外部分组，或清空未完成的输入','error');return}button.disabled=true;try{state=await api('experience-mapping',{method:'POST',body:JSON.stringify({source_id:activeSource,mappings})});renderExperienceTable();render();notice('外部数据映射已保存')}catch(e){notice(e.message,'error')}finally{button.disabled=false}}
 function reconnectSource(sourceId){const source=(state.sources||[]).find(item=>item.id===sourceId);if(!source)return;configureForm();$('adapter').value=source.adapter;$('baseUrl').value=source.base_url;$('routePrefix').value=source.route_prefix||'';$('provider').value=source.provider||'';renderCredentialFields();$('connectPanel').classList.add('open');$('credentials').querySelector('input')?.focus()}
@@ -515,6 +591,7 @@ $('manualEditForm').addEventListener('submit',async e=>{e.preventDefault();const
 $('content').addEventListener('click',async e=>{const button=e.target.closest('button[data-reset-group]');if(!button)return;button.disabled=true;try{state=await api('reset-group',{method:'POST',body:JSON.stringify({source_id:button.dataset.sourceId,group_id:button.dataset.resetGroup})});render();notice('分组已解除熔断')}catch(err){notice(err.message,'error');button.disabled=false}});
 $('closeGroups').addEventListener('click',()=>$('groupModal').classList.remove('open'));
 $('closeMapping').addEventListener('click',()=>$('mappingModal').classList.remove('open'));
+$('experienceDetectionMode').addEventListener('change',updateExperienceRule);
 $('closeExperience').addEventListener('click',()=>$('experienceModal').classList.remove('open'));
 $('groupModal').addEventListener('click',e=>{if(e.target===$('groupModal')&&!$('groupModal').dataset.busy)$('groupModal').classList.remove('open')});
 $('mappingModal').addEventListener('click',e=>{if(e.target===$('mappingModal'))$('mappingModal').classList.remove('open')});
@@ -532,6 +609,7 @@ $('experienceTable').addEventListener('keydown',e=>{if(!e.target.matches('[data-
 $('experienceOptions').addEventListener('mousedown',e=>e.preventDefault());
 $('experienceOptions').addEventListener('click',e=>{const option=e.target.closest('[data-experience-option]');if(!option||!activeExperienceInput)return;const item=(currentSource()?.experience?.items||[]).find(candidate=>String(candidate.id)===option.dataset.experienceOption);if(item)selectExperienceOption(activeExperienceInput,item)});
 $('experienceTable').addEventListener('scroll',closeExperienceOptions);
+$('experienceScroll').addEventListener('scroll',closeExperienceOptions);
 window.addEventListener('resize',closeExperienceOptions);
 document.addEventListener('mousedown',e=>{if(activeExperienceInput&&!e.target.closest('.experience-combobox')&&!e.target.closest('#experienceOptions'))closeExperienceOptions()});
 $('autoMatchExperience').addEventListener('click',()=>{const matched=autoMatchExperience();notice(matched?`自动匹配 ${matched} 个分组`:'没有找到新的可靠匹配',matched?'ok':'warn')});

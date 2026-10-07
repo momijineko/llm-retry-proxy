@@ -131,7 +131,7 @@ Key 与在线同步得到的 Key 使用同一状态文件及加密策略：配�
 
 `sub2api` 适配器使用邮箱密码完成首次登录，随后仅保存刷新令牌，密码不会落盘。它同步完整 Key、Key 名称、分组名称、启用状态、默认倍率及用户专属倍率。已有 Key 的 `models`、`paths` 规则和运行时熔断状态会在热更新时保留。
 
-`newapi` 适配器适用于 [QuantumNous/New-API](https://github.com/QuantumNous/new-api) 及兼容的二次部署。它使用用户名（也可填写站点接受的邮箱）和密码登录，同步当前用户拥有的启用 Token、名称、分组倍率及 Token 模型限制。新版 New API 的列表只返回掩码 Token，适配器会通过受保护的批量接口读取完整 Key；也兼容仍在列表中返回完整 Key、使用 Cookie 会话的旧版本。对于同时返回短期 Bearer 和旧式 `session` Cookie 的兼容部署，Bearer 失效后会自动退回 Cookie 会话重试。管理页可按 New API 用户分组创建无限额度、永不过期的 Token，或清空所选分组的远程 Token。
+`newapi` 适配器适用于 [QuantumNous/New-API](https://github.com/QuantumNous/new-api) 及兼容的二次部署。它使用用户名（也可填写站点接受的邮箱）和密码登录，同步当前用户拥有的启用 Token、名称、分组倍率及 Token 模型限制。新版 New API 的列表只返回掩码 Token，适配器会通过受保护的批量接口读取完整 Key；也兼容仍在列表中返回完整 Key、使用 Cookie 会话的旧版本。对于同时返回短期 Bearer 和旧式 `session` Cookie 的兼容部署，Bearer 失效后会自动退回 Cookie 会话重试。管理页可按 New API 用户分组创建无限额度、永不过期的 Token，或清空所选分组的远程 Token。新建 Token 使用分组标识而非分组描述作为名称，包含可选前缀的最终名称按 UTF-8 截断至 50 字节，避免中文说明触发上游名称长度限制；实际分组绑定保持不变。
 
 支持刷新 Cookie 的新版 New API 只保留自动续期所需的刷新 Cookie，短期 `access_token` 和登录密码会在写盘前剔除。没有刷新 Cookie、同时依赖 Bearer 和旧式 `session` Cookie 的兼容部署无法续签短期 Bearer，因此会在状态文件中保留 Bearer、登录 Cookie 和密码；会话失效时适配器自动重新登录，以维持定时同步。因此必须保护 `KEY_POOL_SYNC_STATE_FILE`，不要把它提交到版本库或通过不受信任的文件共享服务分发。状态文件权限默认为 `0600`；配置 `KEY_POOL_SYNC_SECRET`（留空时回退到 `ADMIN_PASSWORD`）后，落盘的密码、令牌、Cookie 和同步得到的完整上游 Key 会用 Fernet 加密，内存中仍保持明文供适配器使用。两者均未设置时不加密，向后兼容旧明文状态文件——首次加载后下次保存会自动迁移为密文。密钥不匹配时无法解密，该连接会话和本地 Key 快照会被清空并要求重新登录同步。启用两步验证、强制人机验证或禁用密码登录的账号无法使用自动重新登录。
 
@@ -164,9 +164,17 @@ Key 与在线同步得到的 Key 使用同一状态文件及加密策略：配�
 
 在线号池可以从管理页配置一个独立的 HTTP(S) JSON 数据源。弹窗将配置分为三部分：接口请求、返回数据映射和分组映射。接口请求支持任意数量的 GET 查询参数；返回数据映射不预设任何站点结构，只要求记录列表、记录唯一标识和延迟值，显示名称、分类、成本或倍率、样本数和采集时间均可留空。没有样本数字段时，每条记录按一个观测样本使用。
 
-字段路径使用点分隔，例如 `data.items` 或 `metrics.ttft`；接口直接返回顶层数组时，记录列表路径填写 `$`。延迟单位可以选择毫秒或秒。URL 可以自带其它查询参数，但必须解析到公网 IP；私有、回环、链路本地及其它非公网地址会在请求前被拒绝。代理不会把号池登录令牌或 Key 发送给该地址。当前数据源请求固定使用 GET，不支持自定义请求头或执行 JavaScript。
+字段路径使用点分隔，例如 `data.items` 或 `metrics.ttft`；接口直接返回顶层数组时，记录列表路径填写 `$`。可选的 `detection_path` 用于读取模型检测状态（例如 AIHub 的 `model_detection.status`）；映射到外部分组后，状态为未知或 `passed`、`pass`、`ok`、`success`、`通过` 的本地分组保持启用，其它明确状态（包括 `insufficient_evidence`、`suspected`、`detection_failed`、`not_configured`）会自动禁用且不再参与路由。禁用仅作用于本地映射分组；状态变为通过或未知后会自动恢复，数据源刷新失败时继续使用上次成功的状态快照。延迟单位可以选择毫秒或秒。URL 可以自带其它查询参数，但必须解析到公网 IP；私有、回环、链路本地及其它非公网地址会在请求前被拒绝。默认不发送号池登录令牌或 Key。鉴权方式可选“复用 New API 登录会话”，仅允许与当前连接同源（协议、域名和端口一致）的 HTTPS 接口；请求仍校验并固定公网 IP，禁止重定向。会话失效时沿用 New API 的刷新、Cookie 回退及重新登录机制，不需要另填 JWT。其它适配器暂不支持此鉴权方式。当前数据源请求固定使用 GET，不支持任意自定义请求头或执行 JavaScript。启用登录会话鉴权的数据源仅放行 `pass` 和未知状态（缺失、空值、`unknown`、`unknown_status`、`未知`）；`fail`、`error`、`running`、`pending` 等其它状态禁用映射分组，后续恢复通过或未知时自动恢复。检测规则作用于整个映射分组。
 
 例如 `aihub.top` 的公开接口可以添加查询参数 `samples=100`，并将记录列表映射为 `data.items`、唯一标识映射为 `group_id`、延迟值映射为 `avg_ttft_ms`，延迟单位选择毫秒；其它返回字段按需配置。该示例只是一个映射实例，不是页面内置的数据格式。
+
+AIHub 供应商大厅可使用以下配置：URL 填 `https://aihub.top/api/v2/public/providers`，查询参数填 `timezone=Asia/Shanghai`；记录列表 `data.items`，唯一 ID `group_id`，名称 `code`，分类 `platform`，倍率 `rate_multiplier`，TTFT `avg_ttft_ms`（毫秒），采集时间 `model_detection.detected_at`，检测状态 `model_detection.status`。保存并完成分组映射后，只有状态未知或检测通过的分组保持启用；`suspected`、`insufficient_evidence`、`detection_failed` 和 `not_configured` 会自动禁用。API 返回的检测状态是当前快照，数据源刷新失败时代理继续使用上一次成功快照。
+
+通用的“检测判断方式 → 按通过次数 / 总次数判断”使用通过率 `通过 / (通过 + 失败)`，可配置 `pass_path`、`fail_path`、`healthy_threshold`（默认 90%）、`warning_threshold`（默认 70%），`detection_mode` 为 `pass_ratio`。达到通过阈值输出 `pass`，达到警告阈值但未达到通过阈值输出 `degraded`，更低输出 `critical`，通过和失败均为零输出 `unknown`。仅通过和未知保持启用。可用“状态显示映射”自定义这四种状态的文案；不读取状态字段。次数必须为非负整数，缺失或格式损坏会使刷新失败并保留上次快照，不会当作未知放行。旧配置默认仍读取状态字段。
+
+例如 ShuaiAPI 的数学检测：URL 填 `https://api.shuaiapi.com/api/model_probe/overview`，鉴权选复用 New API 登录会话，查询参数 `hours=24`、`lang=zh`。记录列表 `data.targets`，唯一 ID `group`，名称 `group_name`，分类 `model`，倍率 `group_ratio`，延迟 `math.latest.first_token_ms`（毫秒），采集时间 `math.latest.ts`，样本数留空。判断方式选通过率，通过次数填 `math.pass`，失败次数填 `math.fail`，阈值填 90 和 70；显示映射填 `{"pass":"智力正常","degraded":"偶发答错","critical":"疑似降智","unknown":"暂无数据"}`。仅绘图检测的数据源可将对应字段改为 `drawing` 下的字段；转换器不根据站点或 `kinds` 自动切换字段。请使用与网站一致的统计窗口，不要用最近一次状态或把窗口总次数作为最近一次延迟的样本数。
+
+点击“读取并保存”，检查分组对应关系后点击“保存映射”。原 URL、列表路径及 ID 路径不变时保留已有映射。
 
 数据读取成功后，“接口与字段配置”会自动折叠，页面将主要空间留给分组映射表；需要修改接口时可以再次展开。外部分组使用可输入的候选框，可以按名称、ID 或分类关键字筛选。系统会优先按相同 ID 建议外部分组，其次匹配唯一的同名、同分类记录，“自动匹配”也可以重新补全尚未选择的行。建议结果只修改页面中的待保存选择，确认无误后仍需点击“保存映射”。配置、标准化后的最近快照和映射保存在 `KEY_POOL_SYNC_STATE_FILE`；之后每次正常号池同步都会刷新外部数据。移除数据源会同时清除映射。
 
@@ -174,7 +182,7 @@ Key 与在线同步得到的 Key 使用同一状态文件及加密策略：配�
 
 “兼顾三者”只按配置权重使用尚未过期的外部 TTFT 调整低倍率复测顺序，是否降回仍完全由真实复测结果决定；同倍率层内的选择使用本地真实响应累计的 CH，不使用外部数据。“最低倍率优先”不读取外部参考。所有候选仍通过游标轮转，外部数据较慢或缺失的分组不会被永久跳过。外部接口超时、返回错误或格式变化不会导致正常号池同步失败；代理继续使用最后一次成功快照，快照超过现有 `KEY_TTFT_STALE_AFTER` 后会忽略外部参考。Key 表会分别显示“真实”和“外部参考”，两种原始数据不会混写；实时调度中的“本地+外部”值仅为排序分数。
 
-管理页使用受限字段转换而不是执行 JavaScript 或 Python 代码。这样可以适配不同 JSON 结构，同时避免把管理配置变成服务端任意代码执行入口。当前转换器只读取 JSON 对象中的点分隔字段，不执行表达式、网络请求或文件操作。
+管理页使用受限字段转换而不是执行 JavaScript 或 Python 代码。这样可以适配不同 JSON 结构，同时避免把管理配置变成服务端任意代码执行入口。当前转换器支持 JSON 对象中的点分隔字段及可配置的通过率算法，不执行表达式、网络请求或文件操作。
 
 号池页面的“检测可用性”只在手动点击时执行，不会后台轮询模型。检测最多同时发起 2 个请求，按分组依次尝试 Key；组内任一 Key 成功后立即停止检测该组。状态刷新不会向上游增加请求。上方“调用模型检测”继续使用页面指定模型调用 `POST /v1/chat/completions`；分组后的“检测可用模型”则扫描该组全部具体模型，并依据模型类型与分组能力分别使用 Chat、Responses、Messages、Gemini、图片、嵌入、音频或 Realtime 的最小请求。图片协议识别覆盖带供应商前缀的 Gemini 图片模型及常见的 GPT Image、DALL-E、Flux、Seedream、Recraft、Ideogram、Stable Diffusion 和 SDXL 命名；只有一个已知端点族时直接使用该端点，避免未知命名回退到 Chat。真实生成返回 `2xx/3xx` 才视为可用。检测记录的是完整探测响应耗时，仅用于人工查看，不再写入真实首 Token 指标或参与自动调度。明确返回 `model_not_found`、`model_disabled`、模型无权限等模型能力错误时，会按分组、模型及端点族持久记录并从对应协议的后续路由中排除，但不会熔断 Key；同一模型的其它协议不会被误伤。页面仅对全局模型拒绝或缺少生图权限的模型整体划线，端点级拒绝会显示“端点不可用”标签。其它请求格式类 `4xx` 只报告为“不支持该模型或请求”，不改变运行状态。普通 `401/403` 鉴权失败、`429`、`5xx` 或网络异常导致组内全部 Key 失败时才熔断整个分组。检测熔断沿用 `KEY_COOLDOWN_5XX`，到期自动恢复，也可以从页面解除单个分组或全部分组的熔断。
 
@@ -212,3 +220,5 @@ IMAGE_UPSTREAM_ORIGINATOR=
 新增其它中转适配时，实现 `PoolSyncAdapter` 的认证与标准化接口，并按需覆盖 `routing_capabilities(group)` 返回可靠能力；无法可靠判断时返回空对象即可保留旧行为。适配器在 `retry_proxy/sync_adapters/__init__.py` 注册后，管理 API、持久化、定时任务和热替换逻辑不需要修改。
 
 不同中转站还可以在标准化 entry 中返回 `auth: {"header": "x-api-key", "scheme": ""}`。鉴权配置随 Key 进入候选池和重试链路，不再要求所有上游共用同一套全局 Header；未提供该字段的适配器继续使用全局配置。若站点的协议格式不同，适配器应覆盖 `availability_request(source, model, endpoint_family)`，返回自己的检测 URL、请求体和附加 Header。
+
+shuaiapi 检测接口可配置为 `https://api.shuaiapi.com/api/model_probe/overview`，查询参数 `hours=24`、`lang=zh`，鉴权选择复用登录会话。字段映射：列表 `data.targets`、唯一标识 `group`、名称 `group_name`、倍率 `group_ratio`、延迟 `math.latest.first_token_ms`（毫秒）、时间 `math.latest.ts`（Unix 秒）、检测状态 `math.latest.status`。样本数留空，状态显示映射可用 `{"pass":"智力正常","fail":"答题异常","error":"检测出错","running":"检测中"}`。读取数据后保存分组映射才会参与调度；状态显示文字不改变启停规则。

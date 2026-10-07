@@ -278,8 +278,10 @@ class PoolSyncManager:
             str(value) for value in source.get("disabled_key_ids", [])
             if value not in (None, "")
         }
+        detection_disabled_groups = self._detection_disabled_group_ids(source)
         for item in source.get("entries", []):
-            if str(item.get("source_key_id")) in disabled_key_ids:
+            if (str(item.get("source_key_id")) in disabled_key_ids
+                    or str(item.get("group_id") or "") in detection_disabled_groups):
                 continue
             pool.entries.append(KeyEntry(
                 item["key"], item.get("label", ""), item.get("models", ()),
@@ -311,6 +313,28 @@ class PoolSyncManager:
             }
         pool.finalize_entries()
         return pool
+
+    @staticmethod
+    def _detection_disabled_group_ids(source):
+        external_items = {
+            str(item.get("id")): item
+            for item in source.get("experience_items", [])
+            if isinstance(item, dict) and item.get("id") not in (None, "")
+        }
+        mappings = source.get("experience_mappings") or {}
+        allowed_statuses = {"", "unknown", "未知", "unknown_status",
+                            "passed", "pass", "ok", "success", "通过"}
+        if (source.get("experience_source") or {}).get("auth_mode") == "source_session":
+            allowed_statuses = {"", "unknown", "未知", "unknown_status", "pass"}
+        disabled = set()
+        for local_group_id, external_group_id in mappings.items():
+            item = external_items.get(str(external_group_id))
+            if not item:
+                continue
+            status = str(item.get("detection_status") or "").strip().lower()
+            if status not in allowed_statuses:
+                disabled.add(str(local_group_id))
+        return disabled
 
     @staticmethod
     def _pool_url(source):
@@ -716,7 +740,7 @@ class PoolSyncManager:
 
     @staticmethod
     def _normalize_experience_source(url, samples=100, sample_param="samples",
-                                     transform=None, query_params=None):
+                                     transform=None, query_params=None, auth_mode="none"):
         url = str(url or "").strip()
         if not url:
             return {}
@@ -764,7 +788,8 @@ class PoolSyncManager:
                 if name in transform:
                     normalized_transform[name] = transform[name]
         for name in normalized_transform:
-            if name in ("ttft_unit", "detection_map"):
+            if name in ("ttft_unit", "detection_map", "detection_mode",
+                        "healthy_threshold", "warning_threshold"):
                 continue
             value = str(normalized_transform.get(name) or "").strip()
             if name in ("items_path", "id_path", "ttft_path") and not value:
@@ -774,6 +799,18 @@ class PoolSyncManager:
             if value != "$" and value and not _EXPERIENCE_PATH_PATTERN.fullmatch(value):
                 raise PoolSyncError(f"外部数据字段路径无效: {value}")
             normalized_transform[name] = value
+        if normalized_transform.get("detection_mode") not in ("field", "pass_ratio"):
+            raise PoolSyncError("外部数据检测判断方式无效")
+        if normalized_transform["detection_mode"] == "pass_ratio":
+            if not all(normalized_transform[key] for key in ("pass_path", "fail_path")):
+                raise PoolSyncError("通过率判断需要通过次数和失败次数字段")
+        for key in ("healthy_threshold", "warning_threshold"):
+            value = normalized_transform[key]
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise PoolSyncError("通过率阈值必须为有限数字")
+        if not (0 <= normalized_transform["warning_threshold"]
+                <= normalized_transform["healthy_threshold"] <= 100):
+            raise PoolSyncError("阈值必须满足 0 ≤ 警告阈值 ≤ 通过阈值 ≤ 100")
         if normalized_transform.get("detection_map") is None:
             normalized_transform["detection_map"] = {}
         if not isinstance(normalized_transform.get("detection_map"), dict):
@@ -783,20 +820,60 @@ class PoolSyncManager:
         if unit not in ("ms", "s"):
             raise PoolSyncError("TTFT 单位必须是 ms 或 s")
         normalized_transform["ttft_unit"] = unit
-        config = {"url": url, "transform": normalized_transform}
+        if auth_mode not in ("none", "source_session"):
+            raise PoolSyncError("外部数据鉴权模式无效")
+        config = {"url": url, "transform": normalized_transform, "auth_mode": auth_mode}
         if normalized_params is not None:
             config["query_params"] = normalized_params
         else:
             config.update({"samples": samples, "sample_param": sample_param})
         return config
 
-    async def _fetch_experience_items(self, config):
+    async def _fetch_experience_items(self, config, source=None):
         if "query_params" in config:
             params = config.get("query_params") or None
         else:
             params = ({config["sample_param"]: config["samples"]}
                       if config.get("sample_param") else None)
         timeout = float(getattr(self.config, "key_pool_experience_timeout", 60))
+        if config.get("auth_mode") == "source_session":
+            if not source or source.get("adapter") != "newapi":
+                raise PoolSyncError("登录会话鉴权目前仅支持 New API 连接")
+            target = urlsplit(config["url"])
+            base = urlsplit(source["base_url"])
+
+            def origin(parsed):
+                return (parsed.scheme, parsed.hostname,
+                        parsed.port or (443 if parsed.scheme == "https" else 80))
+
+            if origin(target) != origin(base) or target.scheme != "https":
+                raise PoolSyncError("登录会话鉴权仅允许同源 HTTPS 接口")
+            if target.username or target.password or target.fragment:
+                raise PoolSyncError("外部数据 URL 不能包含账号、密码或片段")
+            adapter = self._adapter("newapi")
+            if not adapter.connected(source.get("session") or {}):
+                raise PoolSyncError("该连接尚未登录")
+
+            async def send(client, method, url, **kwargs):
+                if method != "GET":
+                    raise PoolSyncError("外部数据仅支持 GET")
+                response = await _get_pinned_public_url(
+                    config["url"], params=kwargs.get("params"),
+                    headers=kwargs.get("headers"), timeout=timeout,
+                )
+                if 300 <= response.status_code < 400:
+                    raise PoolSyncError("鉴权数据源不允许重定向")
+                # Cookie domain matching must use the logical host, not the
+                # validated IP used by the pinned transport.
+                response.request = httpx.Request("GET", config["url"])
+                return response
+
+            session, payload = await adapter._request(
+                self.client, source, source.get("session") or {}, "GET", "",
+                params=params, sender=send, preserve_envelope=True,
+            )
+            source["session"] = session
+            return _parse_experience_payload(payload, config.get("transform"))
         if isinstance(self.client, httpx.AsyncClient):
             response = await _get_pinned_public_url(
                 config["url"], params=params,
@@ -822,7 +899,7 @@ class PoolSyncManager:
         if not config.get("url"):
             return []
         try:
-            items = await self._fetch_experience_items(config)
+            items = await self._fetch_experience_items(config, source)
             source["experience_items"] = items
             source["experience_last_sync_at"] = _now_iso()
             source["experience_last_error"] = ""
@@ -842,9 +919,9 @@ class PoolSyncManager:
 
     async def set_experience_source(self, source_id, url, samples=100,
                                     sample_param="samples", transform=None,
-                                    query_params=None):
+                                    query_params=None, auth_mode="none"):
         config = self._normalize_experience_source(
-            url, samples, sample_param, transform, query_params,
+            url, samples, sample_param, transform, query_params, auth_mode,
         )
         async with self._lock:
             source = self.sources.get(source_id)
@@ -859,7 +936,7 @@ class PoolSyncManager:
                 self._activate(source)
                 self._save_state()
                 return self.status()
-            items = await self._fetch_experience_items(config)
+            items = await self._fetch_experience_items(config, source)
             previous_config = source.get("experience_source") or {}
             previous_transform = previous_config.get("transform") or {}
             identity_changed = any((
@@ -1562,21 +1639,28 @@ class PoolSyncManager:
         return result
 
     def _visible_entry(self, source, item, pool, runtime, cache_runtime,
-                       disabled_key_ids, now):
+                       disabled_key_ids, detection_disabled_groups, now):
         raw_key = item.get("key", "")
         entry = runtime.get(raw_key)
-        prior = pool.prior_metrics.get(str(item.get("group_id") or "")) if pool else None
+        group_id = str(item.get("group_id") or "")
+        prior = pool.prior_metrics.get(group_id) if pool else None
         if prior is None:
             external_items = {str(value.get("id")): value for value in source.get("experience_items", []) if isinstance(value, dict)}
-            direct = external_items.get(str(item.get("group_id") or ""))
+            external_group_id = (source.get("experience_mappings") or {}).get(group_id)
+            direct = external_items.get(str(external_group_id or group_id))
             if direct:
                 prior = direct
         group_key = pool._group_key(entry) if pool and entry else ""
         cache = cache_runtime.get(group_key) or {}
         ttft_stale_after = getattr(self.config, "key_ttft_stale_after", 300)
+        source_key_id = str(item.get("source_key_id"))
+        detection_disabled = group_id in detection_disabled_groups
+        manually_disabled = source_key_id in disabled_key_ids
         return {
             "source_key_id": item.get("source_key_id"),
-            "enabled": str(item.get("source_key_id")) not in disabled_key_ids,
+            "enabled": not (manually_disabled or detection_disabled),
+            "disabled_reason": ("detection" if detection_disabled else
+                                "manual" if manually_disabled else ""),
             "key_masked": _mask_key(raw_key),
             "label": item.get("label", ""), "sort": item.get("sort", ""),
             "group_id": str(item.get("group_id") or ""),
@@ -1623,9 +1707,11 @@ class PoolSyncManager:
             str(value) for value in source.get("disabled_key_ids", [])
             if value not in (None, "")
         }
+        detection_disabled_groups = self._detection_disabled_group_ids(source)
         visible_entries = [
             self._visible_entry(
-                source, item, pool, runtime, cache_runtime, disabled_key_ids, now,
+                source, item, pool, runtime, cache_runtime, disabled_key_ids,
+                detection_disabled_groups, now,
             )
             for item in (source.get("entries") or [])
         ]

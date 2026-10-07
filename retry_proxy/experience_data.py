@@ -23,12 +23,40 @@ _EXPERIENCE_TRANSFORM_DEFAULTS = {
     "timestamp_path": "",
     "detection_path": "",
     "detection_map": {},
+    "detection_mode": "field",
+    "pass_path": "",
+    "fail_path": "",
+    "healthy_threshold": 90,
+    "warning_threshold": 70,
 }
+
+
+def _ratio_detection(raw, transform):
+    counts = [_experience_value(raw, transform[key])
+              for key in ("pass_path", "fail_path")]
+    if any(type(value) is not int or value < 0 for value in counts):
+        raise PoolSyncError("通过次数和失败次数必须为非负整数")
+    passed, failed = counts
+    total = passed + failed
+    if not total:
+        status, label = "unknown", "暂无数据"
+    elif passed * 100 >= total * transform["healthy_threshold"]:
+        status, label = "pass", "通过"
+    elif passed * 100 >= total * transform["warning_threshold"]:
+        status, label = "degraded", "警告"
+    else:
+        status, label = "critical", "异常"
+    return status, str((transform.get("detection_map") or {}).get(status) or label)
 
 
 def _experience_timestamp(value):
     if not value:
         return 0.0
+    try:
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) and numeric > 0 else 0.0
+    except (TypeError, ValueError, OverflowError):
+        pass
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if parsed.tzinfo is None:
@@ -100,7 +128,9 @@ def _parse_experience_payload(payload, transform=None):
                 raw, transform["timestamp_path"],
             )),
         }
-        if transform.get("detection_path"):
+        if transform.get("detection_mode") == "pass_ratio":
+            item["detection_status"], item["detection_label"] = _ratio_detection(raw, transform)
+        elif transform.get("detection_path"):
             status = str(_experience_value(raw, transform["detection_path"]) or "").strip().lower()
             item["detection_status"] = status
             item["detection_label"] = str((transform.get("detection_map") or {}).get(status, "")).strip()

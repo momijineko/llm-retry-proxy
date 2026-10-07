@@ -637,6 +637,7 @@ async def key_pools_experience_source(request: Request):
             body.get("source_id"), body.get("url"), body.get("samples", 100),
             body.get("sample_param", "samples"), body.get("transform"),
             body.get("query_params") if "query_params" in body else None,
+            body.get("auth_mode", "none"),
         )
     except PoolSyncError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

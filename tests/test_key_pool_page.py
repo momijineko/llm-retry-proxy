@@ -40,7 +40,7 @@ class KeyPoolPageTests(unittest.TestCase):
     def test_external_source_is_configured_and_mapped_in_page(self):
         self.assertIn('.source-policy [hidden]{display:none!important}', self.html)
         self.assertIn('<h3>接口请求</h3>', self.html)
-        self.assertIn('<h3>返回数据映射</h3>', self.html)
+        self.assertIn('<h3>数据字段</h3>', self.html)
         self.assertIn('<h3>分组映射</h3>', self.html)
         self.assertIn('id="experienceConfigPanel"', self.html)
         self.assertIn('class="dialog experience-dialog"', self.html)
