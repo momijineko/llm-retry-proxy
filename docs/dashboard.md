@@ -60,3 +60,13 @@ curl -H "Authorization: Bearer $ADMIN_PASSWORD" http://127.0.0.1:8080/stats/api
 数据接口：`GET /stats/api`，返回聚合后的 JSON。`/health` 仅返回最小探活状态，不需要鉴权。
 
 > **可用率口径**：上游可用率是首次尝试即成功的请求占比（`retries==0 && final_status<400`）；下游可用率是经重试后最终成功的请求占比（`final_status<400`）。两者差值即为重试挽救的请求数。
+
+## 统一外观
+
+五个管理页共用 `admin_theme.css`（设计 token、顶栏、按钮、提示条、空状态）与 `admin_ui.js`（右上角「外观」菜单）。两个文件由 `/admin/assets/` 下的固定路径提供，与页面同权限，需登录后才能读取，不额外暴露静态目录。
+
+- **主题**：跟随系统 / 浅色 / 深色。选择存在浏览器 `localStorage`（`lrp.theme`），首屏由页面内联脚本提前应用，不会出现深色下闪白；统计图表在切换后重新取色并重绘。
+- **密度**：舒适 / 紧凑（`lrp.density`），只压缩留白与行高，不改变字号层级。
+- **导航**：`/settings` 与会话/请求正文相关的入口仍由服务端按 `SETTINGS_PAGE_ENABLED`、`REQUEST_BODY_LOGGING` 裁剪；`/requests` 页面自身不重复显示「请求排查」。
+
+> 自定义这两个文件后无需重建镜像（源码运行时直接生效）；Docker 部署需重新构建以把文件复制进镜像。

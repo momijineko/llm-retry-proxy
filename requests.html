@@ -4,44 +4,55 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>请求排查 · llm-retry-proxy</title>
+<script data-admin-boot>/* 首屏应用主题与密度，避免刷新闪烁 */(function(){try{var r=document.documentElement,t=localStorage.getItem("lrp.theme")||"auto",d=localStorage.getItem("lrp.density")||"comfortable",q=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)");r.setAttribute("data-theme",t==="dark"||(t==="auto"&&q&&q.matches)?"dark":"light");r.setAttribute("data-theme-mode",t);r.setAttribute("data-density",d==="compact"?"compact":"comfortable");}catch(e){}})();</script>
+<link rel="stylesheet" href="/admin/assets/admin_theme.css">
 <style>
-:root{color-scheme:light;--bg:#f4f6f8;--panel:#fff;--panel-alt:#f8fafc;--line:#e2e7ee;--line-strong:#cbd3df;--text:#0f172a;--text-2:#334155;--bright:#0f172a;--muted:#6b7280;--muted-2:#9ca3af;--green:#047857;--red:#b91c1c;--blue:#2563eb;--blue-dark:#1d4ed8;--blue-light:#eff6ff;--ok:#10b981;--radius:8px;--shadow-xs:0 1px 2px rgba(15,23,42,.04);--shadow:0 1px 3px rgba(15,23,42,.05),0 1px 2px rgba(15,23,42,.03)}
+:root{color-scheme:light;--bg:#f5f7fa;--panel:var(--card);--panel-alt:var(--card-2);--panel-3:var(--card-3);--line:var(--border);--line-strong:var(--border-strong);--text:#0f172a;--text-2:#334155;--bright:var(--text);--muted:#64748b;--muted-2:#94a3b8;--green:var(--ok-d);--red:var(--danger-d);--blue:var(--primary);--blue-dark:var(--primary-d);--blue-light:var(--primary-l);--ok:#059669;--warn:#d97706;--danger:#dc2626;--radius:10px;--radius-sm:8px;--shadow-xs:0 1px 2px rgba(15,23,42,.04);--shadow:0 1px 3px rgba(15,23,42,.06);--shadow-lg:0 12px 32px -8px rgba(15,23,42,.12);--header-h:56px;--ring:0 0 0 3px rgba(37,99,235,.15)}
 *{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:14px/1.5 "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
-header{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 28px;background:rgba(255,255,255,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
-.brand{display:flex;align-items:center;gap:10px;flex:0 0 200px;color:var(--bright);font-weight:700}.brand-text{display:flex;flex-direction:column;gap:0;min-width:0}.logo{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;background:var(--blue);color:white;font-size:15px;font-weight:700;box-shadow:0 2px 6px rgba(37,99,235,.24);flex-shrink:0}.brand h1{font-size:16px;margin:0;font-weight:700;letter-spacing:0;line-height:1.5}.brand .sub{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;white-space:nowrap}.brand .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(16,185,129,.15);animation:pulse 2s infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-.app-nav{display:flex;align-items:center;gap:4px;margin-left:12px;flex-wrap:wrap}.app-nav a{padding:7px 10px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:13px;font-weight:500;transition:color .15s,background .15s}.app-nav a:hover{background:var(--panel-alt);color:var(--text)}.app-nav a.active{background:var(--blue-light);color:var(--blue-dark)}.spacer{flex:1;min-width:8px}
-.tools{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}.tools select{min-width:112px}input,select,button{min-height:34px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);padding:6px 10px;font:inherit}button{cursor:pointer;transition:all .15s}button:hover{border-color:var(--blue);color:var(--blue);background:var(--blue-light)}:is(button,input,select,summary,a):focus-visible{outline:2px solid var(--blue);outline-offset:3px}
-main{max-width:1680px;margin:0 auto;padding:24px 28px 56px}.summary{display:flex;align-items:center;gap:14px;flex-wrap:wrap;min-height:34px;margin-bottom:12px;color:var(--muted);font-size:12px}.summary strong{color:var(--bright)}.error{color:var(--red)}
-.table-wrap{overflow:auto;max-height:calc(100vh - 170px);border:1px solid var(--line);border-radius:8px;background:var(--panel)}table{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;min-width:1160px}th,td{padding:14px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;overflow-wrap:anywhere}th{position:sticky;top:0;z-index:1;background:var(--panel-alt);color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}tbody tr{transition:background .12s}tbody tr:hover{background:var(--blue-light)}tbody tr:last-child td{border-bottom:0}
-.mono{font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.subtle{color:var(--muted);font-size:12px}.status{font-variant-numeric:tabular-nums}.ok{color:var(--green)}.bad{color:var(--red)}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}
+header{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:0 24px;min-height:var(--header-h);background:var(--header-bg,rgba(255,255,255,.92));border-bottom:1px solid var(--line);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.brand{display:flex;align-items:center;gap:10px;flex:0 0 200px;min-width:0;color:var(--bright);font-weight:700}.brand-text{display:flex;flex-direction:column;gap:0;min-width:0}.logo{display:grid;place-items:center;width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--blue),#4f46e5);color:white;font-size:15px;font-weight:700;box-shadow:0 2px 6px rgba(37,99,235,.22);flex-shrink:0}.brand h1{font-size:16px;margin:0;font-weight:700;letter-spacing:-.01em;line-height:1.4}.brand .sub{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;white-space:nowrap;line-height:1.4}.brand .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(5,150,105,.15);animation:pulse 2s infinite;flex-shrink:0}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.app-nav{display:flex;align-items:center;gap:2px;flex-wrap:wrap}.app-nav a{padding:7px 12px;border-radius:8px;color:var(--muted);text-decoration:none;font-size:13px;font-weight:500;transition:color .15s,background .15s}.app-nav a:hover{background:var(--panel-3);color:var(--text)}.app-nav a.active{background:var(--blue-light);color:var(--blue-dark);font-weight:600}.spacer{flex:1;min-width:8px}
+.tools{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}.tools select{min-width:112px}input,select,button{min-height:32px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);padding:5px 10px;font:inherit}button{cursor:pointer;transition:all .15s}button:hover{border-color:var(--blue);color:var(--blue);background:var(--blue-light)}:is(button,input,select,summary,a):focus-visible{outline:2px solid var(--blue);outline-offset:2px}input:focus,select:focus{border-color:var(--blue);box-shadow:var(--ring);outline:none}
+main{max-width:1680px;margin:0 auto;padding:20px 24px 56px}.summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:24px;margin-bottom:12px;color:var(--muted);font-size:12px}.summary strong{color:var(--bright);font-weight:600}.error{color:var(--red)}
+.summary .callout{margin:0;padding:5px 10px;width:auto;border-radius:6px;font-size:11px}
+.table-wrap{overflow:auto;max-height:calc(100vh - 250px);border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);box-shadow:var(--shadow-xs)}table{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;min-width:1160px}th,td{padding:12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;overflow-wrap:anywhere}th{position:sticky;top:0;z-index:1;background:var(--panel-alt);color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.02em;white-space:nowrap}tbody tr{transition:background .12s}tbody tr:hover{background:var(--blue-light)}tbody tr:last-child td{border-bottom:0}
+.mono{font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.subtle{color:var(--muted);font-size:12px}.status{font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:6px;flex-wrap:wrap}.ok{color:var(--green)}.bad{color:var(--red)}
+.status-pill{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:99px;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;background:var(--panel-3);color:var(--muted)}
+.status-pill.s2{background:var(--ok-l);color:var(--ok-d)}.status-pill.s4{background:var(--warn-l);color:var(--warn-d)}.status-pill.s5{background:var(--danger-l);color:var(--danger-d)}.status-pill.s0{background:var(--panel-3);color:var(--muted)}
 .model-declared{display:inline-block;max-width:100%;margin-top:4px;padding:1px 7px;border-radius:6px;font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;font-weight:600;background:var(--blue-light);color:var(--blue-dark);border:1px solid rgba(37,99,235,.2);overflow-wrap:anywhere}
-.prompt-text{margin:6px 0 0;max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;color:var(--bright)}details summary{color:var(--blue);cursor:pointer}details pre{max-height:320px;overflow:auto;margin:10px 0;padding:12px;background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere}.json-actions{margin-top:10px}.empty{padding:34px;text-align:center;color:var(--muted)}.badge{display:inline-block;margin-top:5px;padding:2px 7px;border-radius:99px;background:var(--blue-light);color:var(--blue);font-size:11px}
-.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;padding:20px;margin-bottom:16px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}.filters label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted);font-weight:500}.filters input,.filters select{width:100%;min-width:0;outline:none}.filters input:focus,.filters select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(37,99,235,.12)}.filter-search{grid-column:span 2}.filter-footer{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.table-wrap{max-height:65vh;box-shadow:var(--shadow)}
-.pager{display:flex;align-items:center;justify-content:center;gap:6px;padding:16px 0}.pager button{min-width:34px;padding:5px 10px}.pager button.active{background:var(--blue);border-color:var(--blue);color:#fff}.pager button:disabled{cursor:not-allowed;opacity:.45}
-@media(max-width:700px){.filters{grid-template-columns:repeat(2,minmax(0,1fr))}header{position:static;padding:10px 16px;gap:8px}.brand{width:100%;flex-basis:auto}.app-nav{margin-left:0;order:3}.tools{margin-left:auto}main{padding:14px}.summary{align-items:flex-start;flex-direction:column;gap:3px}.table-wrap{max-height:70vh}}
+.prompt-text{margin:6px 0 0;max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;color:var(--text-2);background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;padding:8px 10px}details summary{color:var(--blue);cursor:pointer;font-size:12px}details pre{max-height:320px;overflow:auto;margin:10px 0;padding:12px;background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere}.json-actions{margin-top:10px;font-size:12px;min-height:28px}.empty{padding:48px 20px;text-align:center;color:var(--muted)}.empty .icon{display:block;font-size:32px;opacity:.3;margin-bottom:8px}.badge{display:inline-block;margin-top:5px;padding:2px 7px;border-radius:99px;background:var(--blue-light);color:var(--blue);font-size:11px}
+.filters{display:grid;grid-template-columns:minmax(220px,2fr) repeat(4,minmax(0,1fr));gap:10px;padding:14px 16px;margin-bottom:14px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-xs);align-items:end}.filters label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--muted);font-weight:600;min-width:0}.filters input,.filters select{width:100%;min-width:0;height:34px}.filter-search{grid-column:auto}.filter-footer{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-top:2px}
+.chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:12px}.chips:empty{display:none}.chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 4px 0 9px;border-radius:99px;border:1px solid var(--line-strong);background:var(--panel);color:var(--text-2);font-size:11px}.chip b{font-weight:600;color:var(--text)}.chip button{min-height:0;height:18px;width:18px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--muted);font-size:12px;line-height:1}
+.pager{display:flex;align-items:center;justify-content:center;gap:6px;padding:16px 0;flex-wrap:wrap}.pager button{min-width:32px;height:32px;padding:0 9px;border-radius:6px}.pager button.active{background:var(--blue);border-color:var(--blue);color:#fff}.pager button:disabled{cursor:not-allowed;opacity:.45}
+.callout{display:flex;align-items:flex-start;gap:8px;width:100%;padding:9px 12px;border-radius:var(--radius-sm);border:1px solid var(--line);border-left:3px solid var(--muted-2);background:var(--panel-alt);color:var(--text-2);font-size:12px;line-height:1.6;margin-bottom:12px}
+.callout.warn{border-left-color:var(--warn);background:var(--warn-l);color:var(--warn-d);border-color:rgba(217,119,6,.22)}
+@media(max-width:1100px){.filters{grid-template-columns:minmax(200px,2fr) repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.filters{grid-template-columns:repeat(2,minmax(0,1fr));padding:12px}.filters .filter-search{grid-column:1/-1}header{padding:10px 16px;gap:8px}.brand{width:100%;flex-basis:auto}.app-nav{order:3}.tools{margin-left:auto}main{padding:14px}.summary{align-items:flex-start;flex-direction:column;gap:3px}.table-wrap{max-height:70vh}}
 </style>
 </head>
 <body>
 <header>
-  <div class="brand"><span class="logo">R</span><div class="brand-text"><h1>请求排查</h1><span class="sub"><span class="dot"></span><span>正文诊断</span></span></div></div>
-  <nav class="app-nav" aria-label="主导航"><a href="/stats">统计</a><a href="/logs">日志</a><a class="active" href="/requests">请求排查</a><a href="/key-pools">号池</a><a href="/settings">配置</a></nav>
+  <div class="brand"><span class="logo" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></span><div class="brand-text"><h1>请求排查</h1><span class="sub"><span class="dot"></span><span>正文诊断</span></span></div></div>
+  <nav class="app-nav" aria-label="主导航"><a href="/stats">统计</a><a href="/logs">日志</a><a class="active" href="/requests" aria-current="page">请求排查</a><a href="/key-pools">号池</a><a href="/settings">配置</a></nav>
   <div class="spacer"></div>
   <div class="tools"><select id="range" aria-label="时间范围"><option value="today">今天</option><option value="7d">近 7 天</option><option value="30d">近 30 天</option><option value="all">全部</option></select><button id="refresh" title="刷新请求记录">刷新</button></div>
 </header>
 <main>
   <form id="filters" class="filters" aria-label="筛选请求">
-    <label>模型<select id="model"><option value="">全部模型</option></select></label>
-    <label>状态<select id="status"><option value="">全部状态</option><option value="error">失败（含无状态）</option><option value="2xx">2xx 成功</option><option value="4xx">4xx 客户端错误</option><option value="5xx">5xx 上游错误</option><option value="429">429 限流</option><option value="retried">发生重试</option></select></label>
-    <label>客户端 IP<input id="ip" type="search" placeholder="输入 IP 或部分地址"></label>
-    <label>Key 标识<input id="key" type="search" placeholder="输入 Key 标识或透传"></label>
-    <label class="filter-search">关键词<input id="keyword" type="search" placeholder="搜索提示词、JSON、模型、路径、供应商或上游模型"></label>
+    <label class="filter-search">关键词<input id="keyword" type="search" placeholder="搜索提示词、JSON、模型、路径、供应商或上游模型" aria-label="关键词"></label>
+    <label>模型<select id="model" aria-label="模型"><option value="">全部模型</option></select></label>
+    <label>状态<select id="status" aria-label="状态"><option value="">全部状态</option><option value="error">失败（含无状态）</option><option value="2xx">2xx 成功</option><option value="4xx">4xx 客户端错误</option><option value="5xx">5xx 上游错误</option><option value="429">429 限流</option><option value="retried">发生重试</option></select></label>
+    <label>客户端 IP<input id="ip" type="search" placeholder="IP 或部分地址" aria-label="客户端 IP"></label>
+    <label>Key 标识<input id="key" type="search" placeholder="Key 标识或透传" aria-label="Key 标识"></label>
     <div class="filter-footer"><span class="subtle">筛选所选时间范围内已加载的最近 500 条请求。</span><button type="button" id="clear">清空筛选</button></div>
   </form>
+  <div class="chips" id="chips" aria-live="polite"></div>
   <div class="summary"><strong id="count">正在加载</strong><span id="updated"></span><span id="message"></span></div>
   <div class="table-wrap" role="region" aria-label="请求记录，可横向滚动" tabindex="0"><table>
     <colgroup><col style="width:140px"><col style="width:130px"><col style="width:170px"><col style="width:110px"><col style="width:80px"><col style="width:30%"><col></colgroup>
     <thead><tr><th>时间</th><th>客户端</th><th>模型 / 路径</th><th>Key</th><th>状态</th><th>提示词</th><th>原始请求 JSON</th></tr></thead>
-    <tbody id="rows"><tr><td colspan="7" class="empty">正在加载</td></tr></tbody>
+    <tbody id="rows"><tr><td colspan="7" class="empty"><span class="icon">○</span>正在加载</td></tr></tbody>
   </table></div>
   <div id="pager" class="pager" aria-label="请求分页"></div>
   <p class="subtle">提示词显示最近一条用户消息；JSON 为记录时保存的请求正文，可能已脱敏或省略二进制内容。</p>
@@ -80,7 +91,8 @@ function render(record,index,groupCount=1){
   const preview=prompt.slice(0,PREVIEW_LIMIT);
   const session=groupCount>1?`<span class="badge">相同用户消息 ${groupCount} 条</span>`:'';
   const declared=record.upstream_model?`<span class="model-declared" title="上游响应自报的模型">⇢ ${esc(record.upstream_model)}</span>`:'';
-  return `<tr><td class="mono">${esc(formatTime(record.ts))}</td><td class="mono">${esc(record.client_ip||'-')}</td><td><strong>${esc(record.model||'-')}</strong>${declared}<div class="subtle mono">${esc(record.method||'')} ${esc(record.path||'')}</div><div class="subtle">${esc(record.provider||'')}</div>${session}</td><td class="mono">${esc(record.key_id||'透传')}</td><td class="status ${status>=400?'bad':'ok'}">${esc(status)}<div class="subtle">${esc(record.attempts||1)} 次尝试</div></td><td><div class="subtle">最近一条用户消息</div><div class="prompt-text" tabindex="0">${esc(preview||'未找到用户文本提示词')}</div>${prompt.length>PREVIEW_LIMIT?'<div class="subtle">提示词预览已截断</div>':''}${prompt?'<button class="json-actions" data-download="prompt" data-index="'+index+'">下载完整提示词</button>':''}</td><td>${body==null?'<span class="subtle">请求正文不可解析或不可用</span>':'<details data-index="'+index+'"><summary>查看 JSON</summary><pre class="mono" tabindex="0"></pre><div class="subtle json-note"></div></details><button class="json-actions" data-download="json" data-index="'+index+'">下载完整 JSON</button>'}</td></tr>`;
+  const statusClass=`status-pill s${Math.floor(status/100)}`;
+  return `<tr><td class="mono">${esc(formatTime(record.ts))}</td><td class="mono">${esc(record.client_ip||'-')}</td><td><strong>${esc(record.model||'-')}</strong>${declared}<div class="subtle mono">${esc(record.method||'')} ${esc(record.path||'')}</div><div class="subtle">${esc(record.provider||'')}</div>${session}</td><td class="mono">${esc(record.key_id||'透传')}</td><td class="status"><span class="${statusClass}">${esc(status)}</span><div class="subtle">${esc(record.attempts||1)} 次尝试</div></td><td><div class="subtle">最近一条用户消息</div><div class="prompt-text" tabindex="0">${esc(preview||'未找到用户文本提示词')}</div>${prompt.length>PREVIEW_LIMIT?'<div class="subtle">提示词预览已截断</div>':''}${prompt?'<button class="json-actions" data-download="prompt" data-index="'+index+'">下载完整提示词</button>':''}</td><td>${body==null?'<span class="subtle">请求正文不可解析或不可用</span>':'<details data-index="'+index+'"><summary>查看 JSON</summary><pre class="mono" tabindex="0"></pre><div class="subtle json-note"></div></details><button class="json-actions" data-download="json" data-index="'+index+'">下载完整 JSON</button>'}</td></tr>`;
 }
 rows.addEventListener('toggle',event=>{
   const details=event.target;
@@ -128,8 +140,16 @@ function applyFilters(resetPage=true){
   const filter=Object.fromEntries(Object.entries(controls).map(([id,node])=>[id,node.value.trim()]));
   const matching=records.map((record,index)=>({record,index})).filter(({record})=>matchesRecord(record,filter));
   const grouped=new Map();matching.forEach(item=>{const key=recordPromptKey(item.record,item.index);if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(item)});currentGroups=[...grouped.values()];
-  const page=currentGroups.slice((currentPage-1)*20,currentPage*20);rows.innerHTML=page.length?page.map(group=>render(group[0].record,group[0].index,group.length)).join():'<tr><td colspan="7" class="empty">没有匹配的请求，请调整筛选条件或时间范围</td></tr>';
+  renderChips(filter);
+  const page=currentGroups.slice((currentPage-1)*20,currentPage*20);rows.innerHTML=page.length?page.map(group=>render(group[0].record,group[0].index,group.length)).join():'<tr><td colspan="7" class="empty"><span class="icon">○</span>没有匹配的请求，请调整筛选条件或时间范围</td></tr>';
   count.textContent=`匹配 ${currentGroups.length} 条用户消息 / 已加载 ${records.length} 条请求`;renderPager();
+}
+const CHIP_LABELS={model:'模型',status:'状态',ip:'客户端 IP',key:'Key',keyword:'关键词'};
+const STATUS_LABELS={error:'失败（含无状态）','2xx':'2xx 成功','4xx':'4xx 客户端错误','5xx':'5xx 上游错误','429':'429 限流',retried:'发生重试'};
+function renderChips(filter){
+  const chips=document.getElementById('chips');if(!chips)return;
+  const items=Object.entries(filter).filter(([,value])=>value);
+  chips.innerHTML=items.length?items.map(([id,value])=>`<span class="chip">${esc(CHIP_LABELS[id]||id)}<b>${esc(id==='status'?STATUS_LABELS[value]||value:value)}</b><button type="button" data-clear="${esc(id)}" aria-label="移除筛选">✕</button></span>`).join('')+'<button type="button" class="chip" data-clear="all" style="padding:0 10px">全部清除</button>':'';
 }
 function updateModels(){
   const selected=controls.model.value;
@@ -145,6 +165,13 @@ document.getElementById('pager').addEventListener('click',event=>{const button=e
 document.getElementById('clear').addEventListener('click',()=>{
   clearTimeout(filterTimer);Object.values(controls).forEach(control=>control.value='');applyFilters();
 });
+document.getElementById('chips').addEventListener('click',event=>{
+  const button=event.target.closest('[data-clear]');if(!button)return;
+  clearTimeout(filterTimer);
+  if(button.dataset.clear==='all')Object.values(controls).forEach(control=>control.value='');
+  else if(controls[button.dataset.clear])controls[button.dataset.clear].value='';
+  applyFilters();
+});
 async function load(){
   const version=++loadVersion;count.textContent='正在加载';message.textContent='';
   try{
@@ -152,15 +179,16 @@ async function load(){
     if(!response.ok)throw new Error(response.status===401?'管理端登录已失效':`请求失败 (${response.status})`);
     const data=await response.json();if(version!==loadVersion)return;
     records=data.records;updateModels();applyFilters();
-    message.className='';message.textContent=data.truncated?'日志较大，仅显示近期样本，超大单条记录可能已跳过。':'';
+    message.className=data.truncated?'callout warn':'';message.textContent=data.truncated?'日志较大，仅显示近期样本，超大单条记录可能已跳过。':'';
     updated.textContent=`更新于 ${new Date().toLocaleTimeString()}`;
   }catch(error){
     if(version!==loadVersion)return;records=[];clearTimeout(filterTimer);
-    rows.innerHTML='<tr><td colspan="7" class="empty">无法加载请求记录</td></tr>';
+    rows.innerHTML='<tr><td colspan="7" class="empty"><span class="icon">!</span>无法加载请求记录</td></tr>';
     count.textContent='加载失败';updated.textContent='';message.className='error';message.textContent=error.message;
   }
 }
 document.getElementById('refresh').addEventListener('click',load);range.addEventListener('change',load);load();
 </script>
+<script src="/admin/assets/admin_ui.js" defer></script>
 </body>
 </html>

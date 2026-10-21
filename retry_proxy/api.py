@@ -502,6 +502,10 @@ async def _read_request_body_limited(request, limit):
 _SETTINGS_NAV_LINK_RE = re.compile(r"\s*<a href=\"/settings\">配置</a>")
 _REQUESTS_NAV_LINK_RE = re.compile(r"\s*<a href=\"/requests\">请求排查</a>")
 
+# 共享样式/脚本：页面通过固定 <link>/<script> 引用，服务端按需改写
+_THEME_LINK_RE = re.compile(r"\s*<link rel=\"stylesheet\" href=\"/admin/assets/admin_theme\.css\">")
+_UI_SCRIPT_RE = re.compile(r"\s*<script src=\"/admin/assets/admin_ui\.js\" defer></script>")
+
 
 def _with_settings_nav(html: str) -> str:
     """Apply runtime-dependent entries to shared admin navigation."""
@@ -516,8 +520,18 @@ def _with_request_diagnostics_nav(html: str) -> str:
     return _REQUESTS_NAV_LINK_RE.sub("", html)
 
 
-def _admin_page_html(html: str) -> str:
-    return _with_request_diagnostics_nav(_with_settings_nav(html))
+def _with_admin_assets(html: str) -> str:
+    """移除共享资源引用（用于直接返回未装配的页面）。"""
+    return _UI_SCRIPT_RE.sub("", _THEME_LINK_RE.sub("", html))
+
+
+def _admin_page_html(html: str, *, settings_nav: bool = True, requests_nav: bool = True) -> str:
+    """按运行配置裁剪各页共用的导航与可选入口。"""
+    if settings_nav:
+        html = _with_settings_nav(html)
+    if requests_nav:
+        html = _with_request_diagnostics_nav(html)
+    return html
 
 
 def create_handlers(service, store, pool_sync=None):
@@ -633,13 +647,29 @@ def create_handlers(service, store, pool_sync=None):
         return StreamingResponse(event_gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
+    async def admin_asset(name: str):
+        """管理页共享的样式/脚本；只允许白名单文件名。"""
+        assets = {
+            "admin_theme.css": "text/css; charset=utf-8",
+            "admin_ui.js": "application/javascript; charset=utf-8",
+        }
+        media_type = assets.get(name)
+        if media_type is None:
+            return Response("not found", status_code=404)
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), name)
+        if not os.path.exists(path):
+            return Response(f"{name} not found", status_code=404)
+        with open(path, encoding="utf-8") as f:
+            return Response(f.read(), media_type=media_type,
+                            headers={"Cache-Control": "no-cache"})
+
     async def requests_page():
         if not getattr(settings, "request_body_logging", False):
             return Response("request diagnostics disabled", status_code=404)
         path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "requests.html")
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
-                return Response(_admin_page_html(f.read()), media_type="text/html; charset=utf-8")
+                return Response(_admin_page_html(f.read(), requests_nav=False), media_type="text/html; charset=utf-8")
         return Response("requests.html not found", status_code=404)
 
     async def requests_api(range="today", limit=500):
@@ -1065,4 +1095,4 @@ def create_handlers(service, store, pool_sync=None):
                             extra["stream_status"] = stream_override
                         await write_log(response.status_code, succeeded, **extra)
         return StreamingResponse(body_gen(), status_code=response.status_code, headers=headers, media_type=response.headers.get("content-type"))
-    return health, stats_page, stats_api, logs_page, logs_history, logs_stream, requests_page, requests_api, proxy
+    return health, stats_page, stats_api, logs_page, logs_history, logs_stream, requests_page, requests_api, admin_asset, proxy

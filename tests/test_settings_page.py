@@ -12,7 +12,7 @@ class SettingsPageTests(unittest.TestCase):
         cls.html = (ROOT / "settings.html").read_text(encoding="utf-8")
 
     def test_page_has_nav_and_save_actions(self):
-        self.assertIn('href="/key-pools">号池</a><a class="active" href="/settings">配置</a>', self.html)
+        self.assertIn('<a href="/key-pools">号池</a><a class="active" href="/settings" aria-current="page">配置</a>', self.html)
         self.assertIn('id="saveBtn"', self.html)
         self.assertIn('id="resetAll"', self.html)
         self.assertIn('id="persistBanner"', self.html)
@@ -238,7 +238,7 @@ class SettingsPageTests(unittest.TestCase):
 
 class NavLinkTests(unittest.TestCase):
     def test_all_pages_link_to_settings(self):
-        for name in ("stats.html", "logs.html", "key_pool.html"):
+        for name in ("stats.html", "logs.html", "key_pool.html", "requests.html"):
             text = (ROOT / name).read_text(encoding="utf-8")
             self.assertIn('<a href="/settings">配置</a>', text, name)
 

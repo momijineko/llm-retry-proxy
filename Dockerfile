@@ -19,5 +19,7 @@ COPY logs.html ./
 COPY requests.html ./
 COPY key_pool.html ./
 COPY settings.html ./
+COPY admin_theme.css ./
+COPY admin_ui.js ./
 
 CMD ["python", "main.py"]

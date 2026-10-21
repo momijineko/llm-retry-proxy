@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from .access_control import IPBlocklistMiddleware, resolve_client_ip
 from .admin_session import create_session as create_admin_session
 from .admin_session import revoke as revoke_admin_session
-from .api import _with_settings_nav, create_handlers
+from .api import _admin_page_html, _with_settings_nav, create_handlers
 from .pool_sync import PoolSyncManager
 from .sync_adapters import PoolSyncError
 from .config import HOT_PARSERS, log_capture, logger, require_admin, settings
@@ -223,7 +223,7 @@ app.add_middleware(
     state_file=settings.ip_ban_state_file,
 )
 service = RetryProxy(client=None, pools=KEY_POOLS, log_store=store)
-health, stats_page, stats_api, logs_page, logs_history, logs_stream, requests_page, requests_api, proxy = create_handlers(
+health, stats_page, stats_api, logs_page, logs_history, logs_stream, requests_page, requests_api, admin_asset, proxy = create_handlers(
     service, store, pool_sync,
 )
 if not settings.request_body_logging:
@@ -356,7 +356,8 @@ async def settings_page():
     path = settings.settings_html_path
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
-            return HTMLResponse(f.read())
+            # 配置页自身不再重复显示"配置"入口，但仍需按开关裁剪"请求排查"
+            return HTMLResponse(_admin_page_html(f.read(), settings_nav=False))
     return HTMLResponse("settings.html not found", status_code=404)
 
 
@@ -858,6 +859,8 @@ else:
 app.add_api_route("/logs", logs_page, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/logs/history", logs_history, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/logs/stream", logs_stream, methods=["GET"], dependencies=admin_dependencies)
+# 管理页共享样式/脚本：与页面同权限，避免通过静态目录绕过登录
+app.add_api_route("/admin/assets/{name}", admin_asset, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/{path:path}", proxy, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
 if settings.sse2ws_mode in ("bridge", "on", "1", "true"):
     sse2ws_handler = create_sse2ws_handler(service, store)

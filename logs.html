@@ -4,31 +4,67 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>实时日志 · llm-retry-proxy</title>
+<script data-admin-boot>/* 首屏应用主题与密度，避免刷新闪烁 */(function(){try{var r=document.documentElement,t=localStorage.getItem("lrp.theme")||"auto",d=localStorage.getItem("lrp.density")||"comfortable",q=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)");r.setAttribute("data-theme",t==="dark"||(t==="auto"&&q&&q.matches)?"dark":"light");r.setAttribute("data-theme-mode",t);r.setAttribute("data-density",d==="compact"?"compact":"comfortable");}catch(e){}})();</script>
+<link rel="stylesheet" href="/admin/assets/admin_theme.css">
 <style>
   :root {
-    --bg: #0d1117;
-    --bg-elevated: #161b22;
-    --bg-header: #0d1117;
-    --border: #30363d;
-    --border-strong: #484f58;
-    --text: #c9d1d9;
-    --text-bright: #e6edf3;
-    --text-dim: #8b949e;
-    --text-faint: #484f58;
-    --primary: #6366f1;
-    --primary-d: #4f46e5;
-    --accent-purple: #8b5cf6;
-    --ok: #3fb950;
-    --warn: #d29922;
-    --danger: #f85149;
-    --debug: #56d4dd;
-    --info: #3fb950;
+    --bg: #0b1220;
+    --bg-elevated: #111a2b;
+    --bg-header: #0b1220;
+    --border: #24304a;
+    --border-strong: #38455f;
+    --text: #cbd5e1;
+    --text-bright: #f1f5f9;
+    --text-dim: #94a3b8;
+    --text-faint: #5b6a83;
+    --primary: #3b82f6;
+    --primary-d: #2563eb;
+    --accent-purple: #6366f1;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --debug: #67e8f9;
+    --info: #34d399;
     --radius: 10px;
     --radius-sm: 8px;
     --radius-xs: 6px;
+    --header-h: 56px;
+    --ring: 0 0 0 3px rgba(59,130,246,.22);
     --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+    --bg-header: var(--bg);
+    --status-dot-ring: rgba(52, 211, 153, .16);
   }
+
+  /* 浅色主题：日志页保留等宽终端观感，但配色跟随全局主题 */
+  html[data-theme="light"] {
+    --bg: #f8fafc;
+    --bg-elevated: #ffffff;
+    --bg-header: rgba(255, 255, 255, .92);
+    --border: #e4e9f0;
+    --border-strong: #cbd5e1;
+    --text: #334155;
+    --text-bright: #0f172a;
+    --text-dim: #64748b;
+    --text-faint: #94a3b8;
+    --primary: #2563eb;
+    --primary-d: #1d4ed8;
+    --ok: #047857;
+    --warn: #b45309;
+    --danger: #b91c1c;
+    --debug: #0e7490;
+    --info: #047857;
+    --ring: 0 0 0 3px rgba(37, 99, 235, .15);
+  }
+  html[data-theme="light"] header { background: rgba(255, 255, 255, .92); }
+  html[data-theme="light"] .terminal {
+    background: linear-gradient(180deg, rgba(248, 250, 252, 0) 0px, var(--bg) 8px), var(--bg);
+  }
+  html[data-theme="light"] .log-line:hover { background: rgba(37, 99, 235, .05); }
+  html[data-theme="light"] .terminal::-webkit-scrollbar-thumb { background: #cbd5e1; }
+  html[data-theme="light"] .terminal::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  html[data-theme="light"] .resume-hint { background: rgba(255, 255, 255, .97); }
+  html[data-theme="light"] .app-nav a.active { background: rgba(37, 99, 235, .1); color: #1d4ed8; }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -44,21 +80,25 @@
     overflow: hidden;
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+  }
+
   /* ── Sticky Header ── */
   header {
     position: sticky;
     top: 0;
     z-index: 100;
-    background: rgba(13, 17, 23, 0.95);
+    background: var(--bg-header, rgba(11, 18, 32, 0.94));
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
-    padding: 12px 28px;
+    padding: 0 24px;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 14px;
-    min-height: 56px;
+    gap: 16px;
+    min-height: var(--header-h);
   }
 
   header .brand {
@@ -66,11 +106,12 @@
     align-items: center;
     gap: 10px;
     flex: 0 0 200px;
+    min-width: 0;
   }
-  .app-nav { display:flex; align-items:center; gap:4px; margin-left:12px; }
-  .app-nav a { color:var(--text-dim); text-decoration:none; padding:7px 10px; border-radius:6px; font-size:13px; font-weight:500; }
+  .app-nav { display:flex; align-items:center; gap:2px; flex-wrap:wrap; }
+  .app-nav a { color:var(--text-dim); text-decoration:none; padding:7px 12px; border-radius:8px; font-size:13px; font-weight:500; transition:color .15s,background .15s; }
   .app-nav a:hover { background:var(--bg-elevated); color:var(--text-bright); }
-  .app-nav a.active { background:rgba(99,102,241,.16); color:#a5b4fc; }
+  .app-nav a.active { background:rgba(59,130,246,.16); color:#93c5fd; font-weight:600; }
 
   header .logo {
     width: 30px;
@@ -83,7 +124,7 @@
     color: #fff;
     font-size: 15px;
     font-weight: 700;
-    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.32);
     flex-shrink: 0;
   }
 
@@ -123,19 +164,19 @@
 
   header .sub .status-dot.connected {
     background: var(--ok);
-    box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.15);
+    box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.16);
     animation: pulse 2s infinite;
   }
 
   header .sub .status-dot.connecting {
     background: var(--warn);
-    box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.15);
+    box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.16);
     animation: pulse 1s infinite;
   }
 
   header .sub .status-dot.disconnected {
     background: var(--danger);
-    box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.15);
+    box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.16);
   }
 
   @keyframes pulse {
@@ -161,10 +202,11 @@
   }
 
   .btn {
+    height: 32px;
     border: 1px solid var(--border);
     background: var(--bg-elevated);
     color: var(--text);
-    padding: 5px 12px;
+    padding: 0 12px;
     border-radius: var(--radius-xs);
     cursor: pointer;
     font-size: 12px;
@@ -179,40 +221,43 @@
   }
 
   .btn:hover {
-    border-color: var(--border-strong);
-    background: #1f242c;
+    border-color: var(--primary);
+    background: rgba(59, 130, 246, 0.1);
     color: var(--text-bright);
   }
+
+  .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
   .btn:active { transform: translateY(1px); }
 
   .btn.active {
     border-color: var(--primary);
-    color: var(--primary);
-    background: rgba(99, 102, 241, 0.08);
+    color: #93c5fd;
+    background: rgba(59, 130, 246, 0.14);
   }
 
   .btn-danger:hover {
     border-color: var(--danger);
     color: var(--danger);
-    background: rgba(248, 81, 73, 0.06);
+    background: rgba(248, 113, 113, 0.1);
   }
 
   .search-input {
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-xs);
-    padding: 5px 10px;
+    padding: 0 10px;
+    height: 32px;
     color: var(--text);
     font-size: 12px;
     font-family: var(--font-sans);
     outline: none;
-    width: 180px;
-    transition: border-color 0.15s;
+    width: 200px;
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
 
   .search-input::placeholder { color: var(--text-faint); }
-  .search-input:focus { border-color: var(--primary); }
+  .search-input:focus { border-color: var(--primary); box-shadow: var(--ring); }
 
   .level-filter {
     display: flex;
@@ -275,14 +320,14 @@
     scroll-behavior: smooth;
     /* subtle top gradient to blend with header */
     background:
-      linear-gradient(180deg, rgba(13,17,23,0) 0px, var(--bg) 8px),
+      linear-gradient(180deg, rgba(11,18,32,0) 0px, var(--bg) 8px),
       var(--bg);
   }
 
   .terminal::-webkit-scrollbar { width: 8px; }
   .terminal::-webkit-scrollbar-track { background: transparent; }
-  .terminal::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
-  .terminal::-webkit-scrollbar-thumb:hover { background: #484f58; }
+  .terminal::-webkit-scrollbar-thumb { background: #24304a; border-radius: 4px; }
+  .terminal::-webkit-scrollbar-thumb:hover { background: #38455f; }
 
   /* ── Log Line ── */
   .log-line {
@@ -301,7 +346,7 @@
   .log-line:hover { background: rgba(255,255,255,0.03); }
 
   .log-ts {
-    color: #6e7681;
+    color: #7b8aa5;
     font-size: 12px;
     flex-shrink: 0;
     user-select: text;
@@ -326,26 +371,26 @@
 
   .log-level.debug {
     color: var(--debug);
-    background: rgba(86, 212, 221, 0.08);
-    border: 1px solid rgba(86, 212, 221, 0.15);
+    background: rgba(103, 232, 249, 0.08);
+    border: 1px solid rgba(103, 232, 249, 0.16);
   }
 
   .log-level.info {
     color: var(--info);
-    background: rgba(63, 185, 80, 0.08);
-    border: 1px solid rgba(63, 185, 80, 0.15);
+    background: rgba(52, 211, 153, 0.08);
+    border: 1px solid rgba(52, 211, 153, 0.16);
   }
 
   .log-level.warning {
     color: var(--warn);
-    background: rgba(210, 153, 34, 0.08);
-    border: 1px solid rgba(210, 153, 34, 0.15);
+    background: rgba(251, 191, 36, 0.08);
+    border: 1px solid rgba(251, 191, 36, 0.16);
   }
 
   .log-level.error {
     color: var(--danger);
-    background: rgba(248, 81, 73, 0.08);
-    border: 1px solid rgba(248, 81, 73, 0.15);
+    background: rgba(248, 113, 113, 0.08);
+    border: 1px solid rgba(248, 113, 113, 0.16);
   }
 
   .log-message {
@@ -392,10 +437,10 @@
     bottom: 20px;
     left: 50%;
     transform: translateX(-50%);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-xs);
-    padding: 6px 14px;
+    background: rgba(17, 26, 43, .96);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 16px;
     font-size: 12px;
     color: var(--text-dim);
     cursor: pointer;
@@ -411,25 +456,30 @@
 
   .resume-hint:hover {
     border-color: var(--primary);
-    color: var(--primary);
-    background: #1f242c;
+    color: #93c5fd;
+    background: #172034;
   }
 
   .resume-hint.show { display: inline-flex; }
 
   /* ── Responsive ── */
+  @media (max-width: 860px) {
+    header { padding: 10px 16px; gap: 8px; }
+    header .brand { flex-basis: auto; }
+    .toolbar { width: 100%; justify-content: flex-start; }
+    .search-input { flex: 1 1 160px; width: auto; }
+  }
+
   @media (max-width: 720px) {
-    header { padding: 8px 12px; gap: 8px; }
     header h1 { font-size: 14px; }
-    .search-input { width: 140px; }
     .level-filter { gap: 6px; font-size: 11px; }
     .log-ts { min-width: 130px; font-size: 11px; }
     .log-level { flex-basis: 60px; width: 60px; }
     .terminal { padding: 10px 10px 80px; font-size: 12px; }
+    .toolbar-sep { display: none; }
   }
 
   @media (max-width: 480px) {
-    .search-input { width: 100px; }
     .line-count { font-size: 10px; }
     .log-ts { min-width: 110px; font-size: 10px; }
     .log-level { flex-basis: 58px; width: 58px; }
@@ -456,7 +506,9 @@
 <div class="page">
   <header>
     <div class="brand">
-      <div class="logo">R</div>
+      <div class="logo" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      </div>
       <div class="brand-text">
         <h1>实时日志</h1>
         <span class="sub">
@@ -465,7 +517,7 @@
         </span>
       </div>
     </div>
-    <nav class="app-nav" aria-label="主导航"><a href="/stats">统计</a><a class="active" href="/logs">日志</a><a href="/requests">请求排查</a><a href="/key-pools">号池</a><a href="/settings">配置</a></nav>
+    <nav class="app-nav" aria-label="主导航"><a href="/stats">统计</a><a class="active" href="/logs" aria-current="page">日志</a><a href="/requests">请求排查</a><a href="/key-pools">号池</a><a href="/settings">配置</a></nav>
     <div class="spacer"></div>
     <div class="toolbar">
       <div class="toolbar-group">
@@ -484,10 +536,7 @@
       </div>
       <div class="toolbar-sep"></div>
       <div class="toolbar-group">
-        <input type="text" class="search-input" id="searchInput" placeholder="搜索日志内容...">
-      </div>
-      <div class="toolbar-sep"></div>
-      <div class="toolbar-group">
+        <input type="text" class="search-input" id="searchInput" placeholder="搜索日志内容..." aria-label="搜索日志内容">
         <span class="line-count" id="lineCount">0 <span class="sep">/</span> 0</span>
       </div>
     </div>
@@ -498,7 +547,8 @@
       <div class="virtual-list" id="virtualList"></div>
       <div class="empty-state" id="emptyState">
         <span class="icon">$</span>
-        <span>等待日志数据...</span>
+        <span>等待日志数据…</span>
+        <span style="font-size:12px;color:var(--text-faint)">连接建立后日志会实时滚动显示</span>
       </div>
     </div>
   </div>
@@ -830,5 +880,6 @@
   init();
 })();
 </script>
+<script src="/admin/assets/admin_ui.js" defer></script>
 </body>
 </html>

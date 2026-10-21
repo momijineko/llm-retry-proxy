@@ -27,6 +27,7 @@
 - **Codex Responses WebSocket 桥接 (SSE2WS)**：双向桥接 `/v1/responses`。`WS → SSE`（请求方向，客户端 WebSocket `response.create` → 上游 HTTP/SSE 请求）+ `SSE → WS`（响应方向，上游 SSE 事件流 → WebSocket JSON 文本帧），多轮 `response.create` 自动衔接（见 [configuration](docs/configuration.md) 的 SSE2WS 段）
 - 按天 JSONL 明细日志、Token/缓存累计汇总和内置可视化分析面板
 - **配置中心管理页**：`/settings` 网页查看/修改全部配置项，重试与 DLP 等运行时参数保存即生效（见 [configuration](docs/configuration.md) 的配置中心页面段）
+- 管理页统一外观：浅色/深色/跟随系统主题与舒适/紧凑密度可切换（见 [dashboard](docs/dashboard.md) 的统一外观段）
 
 ## 快速开始
 
