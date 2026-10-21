@@ -250,6 +250,77 @@ class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source["group_model_cache"]["2"], ["gpt-5.4", "gpt-4.1"])
         self.assertTrue(entries[0]["routing_capabilities"]["model_list_known"])
 
+    async def test_composite_group_fetches_models_and_protocols(self):
+        adapter = Sub2APIAdapter()
+        client = FakeClient()
+        original_get = client.get
+
+        async def composite_group(url, params=None, headers=None, timeout=None):
+            result = await original_get(url, params=params, headers=headers, timeout=timeout)
+            if url.endswith("/groups/available"):
+                payload = result.json()
+                payload["data"][0]["platform"] = "composite"
+                return response(payload)
+            if url.endswith("/keys"):
+                payload = result.json()
+                for item in payload["data"]["items"]:
+                    if isinstance(item.get("group"), dict):
+                        item["group"]["platform"] = "composite"
+                return response(payload)
+            return result
+
+        client.get = composite_group
+        source = {"base_url": "https://upstream.test"}
+        session = {"access_token": "access-1", "refresh_token": "refresh-1"}
+
+        _, entries = await adapter.fetch(client, source, session)
+
+        capabilities = entries[0]["routing_capabilities"]
+        self.assertEqual(capabilities["platform"], "composite")
+        self.assertEqual(capabilities["endpoint_families"], [
+            "chat", "gemini", "messages", "responses",
+        ])
+        self.assertEqual(capabilities["model_patterns"], ["gpt-5.4", "gpt-4.1"])
+        self.assertTrue(capabilities["model_list_known"])
+        self.assertEqual(source["group_model_cache"]["2"], ["gpt-5.4", "gpt-4.1"])
+
+    async def test_vendor_platform_fetches_models_without_endpoint_guessing(self):
+        adapter = Sub2APIAdapter()
+        client = FakeClient()
+        original_get = client.get
+
+        async def deepseek_group(url, params=None, headers=None, timeout=None):
+            result = await original_get(url, params=params, headers=headers, timeout=timeout)
+            if url.endswith("/groups/available"):
+                payload = result.json()
+                payload["data"][0].update({
+                    "platform": "deepseek", "allow_image_generation": True,
+                })
+                return response(payload)
+            if url.endswith("/keys"):
+                payload = result.json()
+                for item in payload["data"]["items"]:
+                    if isinstance(item.get("group"), dict):
+                        item["group"].update({
+                            "platform": "deepseek", "allow_image_generation": True,
+                        })
+                return response(payload)
+            return result
+
+        client.get = deepseek_group
+        source = {"base_url": "https://upstream.test"}
+        session = {"access_token": "access-1", "refresh_token": "refresh-1"}
+
+        _, entries = await adapter.fetch(client, source, session)
+
+        capabilities = entries[0]["routing_capabilities"]
+        self.assertEqual(capabilities["platform"], "deepseek")
+        self.assertNotIn("endpoint_families", capabilities)
+        self.assertNotIn("image_generation", capabilities)
+        self.assertEqual(capabilities["model_patterns"], ["gpt-5.4", "gpt-4.1"])
+        self.assertTrue(capabilities["model_list_known"])
+        self.assertEqual(source["group_model_cache"]["2"], ["gpt-5.4", "gpt-4.1"])
+
     async def test_sync_deletes_orphaned_group_key_and_hides_group_from_catalog(self):
         adapter = Sub2APIAdapter()
         client = FakeClient()
@@ -356,8 +427,25 @@ class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(capabilities["model_scopes"], ["claude", "gemini_image"])
         self.assertEqual(capabilities["model_patterns"], ["claude-*", "gemini-*"])
 
-    def test_unknown_platform_omits_automatic_routing(self):
-        self.assertEqual(Sub2APIAdapter.routing_capabilities({"platform": "future"}), {})
+    def test_unknown_platform_keeps_model_only_routing(self):
+        capabilities = Sub2APIAdapter.routing_capabilities({
+            "platform": "future",
+            "allow_image_generation": True,
+        })
+
+        self.assertEqual(capabilities, {
+            "platform": "future", "model_patterns": [], "model_scopes": [],
+        })
+        self.assertEqual(Sub2APIAdapter.routing_capabilities({"platform": ""}), {})
+
+    def test_composite_platform_supports_shared_text_protocols(self):
+        capabilities = Sub2APIAdapter.routing_capabilities({"platform": "composite"})
+
+        self.assertEqual(capabilities["platform"], "composite")
+        self.assertEqual(capabilities["endpoint_families"], [
+            "chat", "gemini", "messages", "responses",
+        ])
+        self.assertNotIn("model_list_known", capabilities)
 
     async def test_expired_access_token_rotates_refresh_token(self):
         adapter = Sub2APIAdapter()

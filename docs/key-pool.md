@@ -198,7 +198,7 @@ AIHub 供应商大厅可使用以下配置：URL 填 `https://aihub.top/api/v2/p
 
 当在线号池包含能力元数据、请求端点可识别，但没有兼容 Key 时，代理返回 HTTP 403 和 `key_pool_no_compatible_route`，不会向上游发送请求。错误体同时包含请求模型、端点族、供应商、上游和未匹配原因。静态 CSV、旧同步快照以及未返回可靠能力元数据的适配器继续沿用原有 `models`、`paths` 与默认池行为。
 
-当前 `sub2api` 平台映射如下：`openai` 使用 Chat、Responses、Embeddings、Audio 和 Realtime；开启 Messages 调度后也可使用 Messages；`anthropic` 使用 Messages；`gemini` 使用 Gemini 原生端点；`antigravity` 使用 Chat、Messages 和 Gemini 原生端点；`grok` 使用 Chat 和 Responses。开启生图权限的分组额外获得 Images 能力；即使上游 `/v1/models` 错误列出了 `gpt-image-*`、`imagen*` 等生图模型，没有生图权限的分组也会被自动排除。未知平台不根据名称猜测，保持旧选择行为。
+当前 `sub2api` 平台映射如下：`openai` 使用 Chat、Responses、Embeddings、Audio 和 Realtime；开启 Messages 调度后也可使用 Messages；`anthropic` 使用 Messages；`gemini` 使用 Gemini 原生端点；`antigravity` 使用 Chat、Messages 和 Gemini 原生端点；`grok` 使用 Chat 和 Responses；`composite` 按模型路由到具体平台，因此使用 Chat、Responses、Messages 和 Gemini 原生端点。开启生图权限的分组额外获得 Images 能力；即使上游 `/v1/models` 错误列出了 `gpt-image-*`、`imagen*` 等生图模型，没有生图权限的分组也会被自动排除。对于未在映射中的供应商平台（例如 `deepseek`、`zhipu`、`kimi`），适配器不根据平台名称猜测端点协议，但仍会用分组 Key 请求 `/v1/models`，把模型列表作为仅约束模型的自动能力；因此模型名、手工规则和“检测可用模型”均可正常使用，请求端点保持旧选择行为。平台字段为空且没有可靠元数据时仍不启用自动能力。
 
 通用调度配置：
 

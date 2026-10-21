@@ -114,13 +114,20 @@ class Sub2APIAdapter(PoolSyncAdapter):
             "gemini": {"gemini"},
             "antigravity": {"chat", "messages", "gemini"},
             "grok": {"chat", "responses"},
+            # Composite groups resolve the target platform per model, so all
+            # text protocols exposed by the shared gateway are available.
+            "composite": {"chat", "responses", "messages", "gemini"},
         }.get(platform, set())
         if platform == "openai" and group.get("allow_messages_dispatch"):
             endpoints.add("messages")
         image_generation = bool(group.get("allow_image_generation"))
-        if image_generation:
+        if image_generation and endpoints:
             endpoints.add("images")
-        if not endpoints:
+        # Non-standard vendor platforms (for example deepseek/zhipu/kimi) still
+        # expose a model list through the upstream gateway. Publish the model
+        # list as a model-only capability so names and availability checks work,
+        # but do not guess their endpoint families.
+        if not endpoints and not platform:
             return {}
         models_config = group.get("models_list_config") or {}
         model_patterns = (
@@ -129,14 +136,15 @@ class Sub2APIAdapter(PoolSyncAdapter):
         )
         capabilities = {
             "platform": platform,
-            "endpoint_families": sorted(endpoints),
             "model_patterns": [str(value) for value in model_patterns if str(value).strip()],
             "model_scopes": [
                 str(value) for value in (group.get("supported_model_scopes") or [])
                 if str(value).strip()
             ],
-            "image_generation": image_generation,
         }
+        if endpoints:
+            capabilities["endpoint_families"] = sorted(endpoints)
+            capabilities["image_generation"] = image_generation
         if isinstance(models_config, dict) and models_config.get("enabled"):
             capabilities["model_list_known"] = True
         return capabilities
