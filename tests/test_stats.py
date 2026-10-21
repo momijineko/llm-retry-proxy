@@ -91,6 +91,57 @@ class KeyAvailabilityStatsTests(unittest.TestCase):
         stats = compute_stats(records, "today", {})
         self.assertEqual(stats["availability"]["worst_failure_streak"], 2)
 
+    def test_upstream_model_is_aggregated_only_when_declared(self):
+        store = RetryLogStore()
+        summary = store._new_summary()
+        base = {
+            "ts": "2026-07-25T10:00:00", "provider": "test", "model": "m",
+            "upstream_status": 200, "final_status": 200, "retries": 0,
+            "succeeded": True, "first_ok": True, "duration_s": 0.4,
+        }
+        store._update(summary, dict(base, upstream_model="deepseek/deepseek-v4.1-flash"))
+        store._update(summary, dict(base, upstream_model="deepseek/deepseek-v4.1-flash"))
+        # Records written before the field existed carry no declaration and must
+        # not fabricate an ``(unknown)`` upstream-model bucket.
+        store._update(summary, dict(base))
+
+        cumulative = _cumulative(summary)
+
+        self.assertEqual(
+            [b["name"] for b in cumulative["by_upstream_model"]],
+            ["test/deepseek/deepseek-v4.1-flash"],
+        )
+        self.assertEqual(cumulative["by_upstream_model"][0]["requests"], 2)
+        self.assertEqual(cumulative["by_model"][0]["requests"], 3)
+
+    def test_stats_group_declared_models_under_requested_model(self):
+        records = [
+            {"provider": "test", "model": "deepseek-v4.1-flash",
+             "upstream_model": "deepseek/deepseek-v4.1-flash",
+             "final_status": 200, "upstream_status": 200, "succeeded": True,
+             "first_ok": True, "retries": 0},
+            {"provider": "test", "model": "deepseek-v4.1-flash",
+             "upstream_model": "opencode/deepseek-v4.1-flash",
+             "final_status": 200, "upstream_status": 200, "succeeded": True,
+             "first_ok": True, "retries": 0},
+            {"provider": "test", "model": "deepseek-v4.1-flash",
+             "final_status": 200, "upstream_status": 200, "succeeded": True,
+             "first_ok": True, "retries": 0},
+        ]
+
+        stats = compute_stats(records, "today", {})
+
+        self.assertEqual(stats["upstream_models"], [{
+            "model": "test/deepseek-v4.1-flash",
+            "upstream_models": [
+                {"name": "deepseek/deepseek-v4.1-flash", "requests": 1},
+                {"name": "opencode/deepseek-v4.1-flash", "requests": 1},
+            ],
+        }])
+        self.assertEqual(len(stats["by_upstream_model"]), 2)
+        # The requested-model aggregate keeps its existing bucket count.
+        self.assertEqual(len(stats["by_model"]), 1)
+
     def test_cumulative_summary_tracks_cancellation_as_neutral(self):
         store = RetryLogStore()
         summary = store._new_summary()
@@ -440,7 +491,7 @@ class LogStoreFlushTests(unittest.IsolatedAsyncioTestCase):
                 with open(config.summary_file, encoding="utf-8") as f:
                     persisted = json.load(f)
                 self.assertEqual(persisted["total_requests"], 2)
-                self.assertEqual(persisted["version"], 7)
+                self.assertEqual(persisted["version"], 8)
 
     async def test_version_six_summary_migration_replays_unflushed_tail(self):
         with tempfile.TemporaryDirectory() as tmp:

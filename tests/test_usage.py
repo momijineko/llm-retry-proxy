@@ -225,6 +225,85 @@ class UsageAccumulatorTests(unittest.TestCase):
         self.assertEqual(acc.finalize(), (5, 5, 10, 0))
 
 
+class UpstreamModelTests(unittest.TestCase):
+    """The model name the upstream declares it served, collected per family."""
+
+    def test_chat_non_stream_records_declared_model(self):
+        acc = UsageAccumulator("chat", is_sse=False)
+        acc.feed_chunk(json.dumps({
+            "model": "deepseek/deepseek-flash",
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+        }).encode("utf-8"))
+        acc.finalize()
+        self.assertEqual(acc.upstream_model, "deepseek/deepseek-flash")
+
+    def test_chat_stream_takes_first_declared_model(self):
+        acc = UsageAccumulator("chat", is_sse=True, content_type="text/event-stream")
+        acc.feed_chunk(_sse_frame({"model": "opencode/deepseek-v4.1-flash",
+                                   "choices": [{"delta": {"content": "hi"}}]}))
+        acc.feed_chunk(_sse_frame({"model": "opencode/deepseek-v4.1-flash",
+                                   "choices": [],
+                                   "usage": {"prompt_tokens": 1, "completion_tokens": 2,
+                                             "total_tokens": 3}}))
+        self.assertEqual(acc.finalize(), (1, 2, 3, 0))
+        self.assertEqual(acc.upstream_model, "opencode/deepseek-v4.1-flash")
+
+    def test_responses_stream_records_nested_response_model(self):
+        acc = UsageAccumulator("responses", is_sse=True, content_type="text/event-stream")
+        acc.feed_chunk(_sse_frame({
+            "type": "response.completed",
+            "response": {"model": "deepseek/deepseek-v4.1-flash",
+                         "usage": {"input_tokens": 5, "output_tokens": 6, "total_tokens": 11}},
+        }))
+        self.assertEqual(acc.finalize(), (5, 6, 11, 0))
+        self.assertEqual(acc.upstream_model, "deepseek/deepseek-v4.1-flash")
+
+    def test_messages_stream_records_model_from_message_start(self):
+        acc = UsageAccumulator("messages", is_sse=True, content_type="text/event-stream")
+        acc.feed_chunk(_sse_frame({
+            "type": "message_start",
+            "message": {"model": "anthropic/claude-sonnet-4-20250514",
+                        "usage": {"input_tokens": 10, "output_tokens": 1}},
+        }))
+        acc.feed_chunk(_sse_frame({"type": "message_delta", "usage": {"output_tokens": 4}}))
+        self.assertEqual(acc.finalize(), (10, 4, 14, 0))
+        self.assertEqual(acc.upstream_model, "anthropic/claude-sonnet-4-20250514")
+
+    def test_gemini_records_model_version(self):
+        acc = UsageAccumulator("gemini", is_sse=True, content_type="text/event-stream")
+        acc.feed_chunk(_sse_frame({
+            "modelVersion": "gemini-2.5-flash-001",
+            "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 2,
+                              "totalTokenCount": 5},
+        }))
+        self.assertEqual(acc.finalize(), (3, 2, 5, 0))
+        self.assertEqual(acc.upstream_model, "gemini-2.5-flash-001")
+
+    def test_declared_model_is_collected_without_usage(self):
+        # A stream that never reports usage must still expose the declaration.
+        acc = UsageAccumulator("chat", is_sse=True, content_type="text/event-stream")
+        acc.feed_chunk(_sse_frame({"model": "deepseek/flash",
+                                   "choices": [{"delta": {"content": "hi"}}]}))
+        acc.feed_chunk(b"data: [DONE]\n\n")
+        self.assertIsNone(acc.finalize())
+        self.assertEqual(acc.upstream_model, "deepseek/flash")
+
+    def test_unsupported_family_ignores_declared_model(self):
+        acc = UsageAccumulator("images", is_sse=False)
+        acc.feed_chunk(b'{"model":"flux/dev"}')
+        self.assertIsNone(acc.finalize())
+        self.assertEqual(acc.upstream_model, "")
+
+    def test_blank_or_non_string_declarations_are_ignored(self):
+        acc = UsageAccumulator("chat", is_sse=True, content_type="text/event-stream")
+        acc.feed_chunk(_sse_frame({"model": "   ", "choices": []}))
+        acc.feed_chunk(_sse_frame({"model": 7, "choices": []}))
+        acc.feed_chunk(_sse_frame({"model": "deepseek/flash", "choices": []}))
+        acc.finalize()
+        self.assertEqual(acc.upstream_model, "deepseek/flash")
+
+
 class TokenAggregationTests(unittest.TestCase):
     def test_agg_by_accumulates_tokens(self):
         from retry_proxy.stats import _agg_by
@@ -297,7 +376,7 @@ class LogStoreTokenSummaryTests(unittest.IsolatedAsyncioTestCase):
         restored.initialize()
         self.assertEqual(restored.summary["total_tokens"], 300)
         self.assertEqual(restored.summary["total_cached_tokens"], 80)
-        self.assertEqual(restored.summary["version"], 7)
+        self.assertEqual(restored.summary["version"], 8)
 
     async def test_legacy_summary_without_tokens_is_backfilled(self):
         import json
@@ -322,7 +401,7 @@ class LogStoreTokenSummaryTests(unittest.IsolatedAsyncioTestCase):
         store.initialize()
         # v6 is upgraded in place; non-token history is preserved and token
         # fields are backfilled with zero defaults.
-        self.assertEqual(store.summary["version"], 7)
+        self.assertEqual(store.summary["version"], 8)
         self.assertEqual(store.summary["total_requests"], 5)
         self.assertEqual(store.summary["total_cancelled"], 0)
         self.assertEqual(store.summary["total_tokens"], 0)
@@ -598,6 +677,50 @@ class BodyGenLogWriteTimingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["prompt_tokens"], 50)
         self.assertEqual(record["total_tokens"], 60)
         self.assertEqual(record["cached_tokens"], 40)
+
+    async def test_chat_stream_logs_upstream_declared_model(self):
+        # The upstream declares a provider-path model name. It is recorded for
+        # diagnostics while the response body is passed through untouched.
+        sse = (
+            b'data: {"model":"deepseek/deepseek-v4.1-flash","choices":[{"delta":{"content":"hi"}}]}\n\n'
+            b'data: {"model":"deepseek/deepseek-v4.1-flash","choices":[],"usage":'
+            b'{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        upstream_response = httpx.Response(
+            200, content=sse, headers={"content-type": "text/event-stream"},
+            request=httpx.Request("POST", "https://upstream.test/v1/chat/completions"),
+        )
+        store = SimpleNamespace(write=AsyncMock())
+        proxy, request, pool, entry, config, result = self._build_proxy(
+            upstream_response, store,
+            request_body=b'{"model":"deepseek-v4.1-flash","stream":true}',
+        )
+        _, body = await self._run(proxy, request, pool, config, result)
+
+        self.assertEqual(body, sse)
+        record = store.write.await_args.args[0]
+        self.assertEqual(record["model"], "deepseek-v4.1-flash")
+        self.assertEqual(record["upstream_model"], "deepseek/deepseek-v4.1-flash")
+        self.assertEqual(record["total_tokens"], 11)
+
+    async def test_chat_stream_omits_upstream_model_when_undeclared(self):
+        sse = (
+            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            b'data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        upstream_response = httpx.Response(
+            200, content=sse, headers={"content-type": "text/event-stream"},
+            request=httpx.Request("POST", "https://upstream.test/v1/chat/completions"),
+        )
+        store = SimpleNamespace(write=AsyncMock())
+        proxy, request, pool, entry, config, result = self._build_proxy(upstream_response, store)
+        await self._run(proxy, request, pool, config, result)
+
+        record = store.write.await_args.args[0]
+        self.assertNotIn("upstream_model", record)
+        self.assertEqual(record["total_tokens"], 3)
 
 
 if __name__ == "__main__":

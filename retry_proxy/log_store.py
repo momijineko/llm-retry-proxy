@@ -26,11 +26,11 @@ class RetryLogStore:
         self._last_stat_shard = None
 
     def _new_summary(self):
-        return {"version": 7, "total_requests": 0, "total_retries": 0, "total_succeeded": 0,
+        return {"version": 8, "total_requests": 0, "total_retries": 0, "total_succeeded": 0,
                 "total_failed": 0, "total_cancelled": 0, "total_first_ok": 0,
                 "total_prompt_tokens": 0, "total_completion_tokens": 0, "total_tokens": 0,
                 "total_cached_tokens": 0,
-                "by_provider": {}, "by_model": {},
+                "by_provider": {}, "by_model": {}, "by_upstream_model": {},
                 "by_key": {}, "by_status": {}, "first_ts": None, "last_ts": None,
                 "log_offsets": {}}
 
@@ -54,9 +54,19 @@ class RetryLogStore:
         if r.get("ts"):
             summary["first_ts"] = summary["first_ts"] or r["ts"]
             summary["last_ts"] = r["ts"]
-        for field, key in (("by_provider", _normalize_provider(r.get("provider", "") or "(unknown)")),
-                           ("by_model", _model_key(r)), ("by_key", r.get("key_id", ""))):
-            if not key: continue
+        # The upstream-declared model is only present on records written after
+        # the field was introduced, so its bucket starts at the upgrade.
+        buckets = [
+            (field, key) for field, key in (
+                ("by_provider", _normalize_provider(r.get("provider", "") or "(unknown)")),
+                ("by_model", _model_key(r)),
+                ("by_key", r.get("key_id", "")),
+            ) if key
+        ]
+        declared = r.get("upstream_model")
+        if declared:
+            buckets.append(("by_upstream_model", f"{_normalize_provider(r.get('provider', '') or '(unknown)')}/{declared}"))
+        for field, key in buckets:
             b = summary[field].setdefault(key, {
                 "requests": 0, "retries": 0, "succeeded": 0, "first_ok": 0,
                 "failed": 0, "cancelled": 0, "max_retries": 0,
@@ -250,14 +260,17 @@ class RetryLogStore:
             if self.summary_cache.get("total_requests", 0) > 0: self._save()
         if self.summary_cache.get("version", 1) < 7:
             self.summary_cache["log_offsets"] = self._legacy_log_offsets()
-        self.summary_cache["version"] = 7
+        if self.summary_cache.get("version", 1) < 8:
+            # No rebuild: historical records carry no upstream model declaration.
+            self.summary_cache["by_upstream_model"] = {}
+        self.summary_cache["version"] = 8
         for key in ("total_requests", "total_retries", "total_succeeded", "total_failed",
                     "total_cancelled", "total_first_ok",
                     "total_prompt_tokens", "total_completion_tokens", "total_tokens",
                     "total_cached_tokens"): self.summary_cache.setdefault(key, 0)
-        for key in ("by_provider", "by_model", "by_key", "by_status"): self.summary_cache.setdefault(key, {})
+        for key in ("by_provider", "by_model", "by_upstream_model", "by_key", "by_status"): self.summary_cache.setdefault(key, {})
         # Backfill token fields on legacy per-bucket entries that predate version 6.
-        for field in ("by_provider", "by_model", "by_key"):
+        for field in ("by_provider", "by_model", "by_upstream_model", "by_key"):
             for bucket in self.summary_cache.get(field, {}).values():
                 if isinstance(bucket, dict):
                     bucket.setdefault("prompt_tokens", 0)

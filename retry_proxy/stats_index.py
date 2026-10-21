@@ -7,13 +7,15 @@ from contextlib import closing
 from .log_reader import LogRecords, _record_bytes
 from .stats import _normalize_provider
 
-FIELDS = ('ts', 'method', 'path', 'provider', 'model', 'key_id', 'key_pool',
+FIELDS = ('ts', 'method', 'path', 'provider', 'model', 'upstream_model', 'key_id', 'key_pool',
           'key_attempts', 'upstream_status', 'final_status', 'stream_status',
           'stream_error_status', 'succeeded', 'first_ok', 'attempts', 'retries',
           'retry_codes', 'duration_s', 'prompt_tokens', 'completion_tokens',
           'total_tokens', 'cached_tokens', 'mode')
 MAX_RECOVERY_LINE = 16 * 1024 * 1024
 MAX_STATS_OBJECT_BYTES = 64 * 1024 * 1024
+# Bump whenever FIELDS changes so existing rows are recompacted from the shards.
+SCHEMA_VERSION = 2
 
 
 class StatsIndex:
@@ -30,8 +32,23 @@ class StatsIndex:
                 CREATE INDEX IF NOT EXISTS stats_timestamp ON records(ts);
                 CREATE TABLE IF NOT EXISTS progress (
                     file TEXT PRIMARY KEY, offset INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS meta (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            self._reset_on_schema_change(db)
             db.commit()
+
+    def _reset_on_schema_change(self, db):
+        """Drop the index when FIELDS widened so stale payloads get rebuilt."""
+        row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        current = int(row[0]) if row and str(row[0]).isdigit() else 0
+        if current == SCHEMA_VERSION:
+            return
+        with db:
+            db.execute('DELETE FROM records')
+            db.execute('DELETE FROM progress')
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)",
+                       (str(SCHEMA_VERSION),))
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)

@@ -73,6 +73,38 @@ class StatsIndexTests(unittest.TestCase):
             self.assertEqual(len(records), 2)
             self.assertTrue(records.truncated)
 
+    def test_compact_keeps_upstream_model_declaration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index = StatsIndex(tmp)
+            index.append('file', 1, {
+                'model': 'deepseek-v4.1-flash', 'ts': '1',
+                'upstream_model': 'deepseek/deepseek-flash',
+                'request_body': {'input': 'private'},
+            })
+            records = index.load('', 10)
+            self.assertEqual(len(records), 1)
+            # The declaration must survive compaction into the SQLite index,
+            # otherwise the stats page loses it while /requests still shows it.
+            self.assertEqual(records[0]['upstream_model'], 'deepseek/deepseek-flash')
+            self.assertNotIn('request_body', records[0])
+
+    def test_schema_version_change_rebuilds_stale_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shard = Path(tmp) / f'retry_{datetime.now():%Y-%m-%d}.jsonl'
+            shard.write_text(json.dumps({'model': 'test', 'ts': f'{datetime.now():%Y-%m-%d}T00:00:00',
+                                         'upstream_model': 'deepseek/flash'}) + '\n')
+            with patch('retry_proxy.stats_index.SCHEMA_VERSION', 1):
+                old = StatsIndex(tmp)
+                old.recover([shard.name], lambda r: bool(r.get('model')))
+                self.assertEqual(old.load('', 10)[0]['upstream_model'], 'deepseek/flash')
+            # A new FIELDS whitelist bumps the version; stale rows are dropped
+            # instead of being served without the newly tracked field.
+            with patch('retry_proxy.stats_index.SCHEMA_VERSION', 2):
+                fresh = StatsIndex(tmp)
+                self.assertEqual(fresh.load('', 10), [])
+                fresh.recover([shard.name], lambda r: bool(r.get('model')))
+                self.assertEqual(fresh.load('', 10)[0]['upstream_model'], 'deepseek/flash')
+
     def test_compact_stats_budget_is_separate_from_raw_body_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
             index = StatsIndex(tmp)

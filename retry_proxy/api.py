@@ -471,6 +471,7 @@ def _cumulative(summary):
             "total_tokens": summary.get("total_tokens", 0),
             "total_cached_tokens": summary.get("total_cached_tokens", 0),
             "by_provider": _summary_view(summary["by_provider"]), "by_model": _summary_view({k: v for k, v in summary["by_model"].items() if not k.endswith("/(unknown)")}),
+            "by_upstream_model": _summary_view(summary.get("by_upstream_model", {})),
             "by_key": _summary_view(summary.get("by_key", {})),
             "by_status": [{"status": k, "count": v} for k, v in sorted(summary["by_status"].items(), key=lambda x: -x[1])],
             "first_ts": summary.get("first_ts"), "last_ts": summary.get("last_ts")}
@@ -990,6 +991,10 @@ def create_handlers(service, store, pool_sync=None):
                                        "completion_tokens": usage[1],
                                        "total_tokens": usage[2],
                                        "cached_tokens": usage[3]}
+                    # The model the upstream declared it served. Diagnostic only:
+                    # the streamed body is never rewritten to match it.
+                    if usage_acc.upstream_model:
+                        usage_extra["upstream_model"] = usage_acc.upstream_model
                     if responses_stream:
                         stream_status, stream_error_status, succeeded = _finish_responses_stream_state(
                             stream_state, content_type, bad_gateway_body, stream_override,

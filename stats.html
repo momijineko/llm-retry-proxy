@@ -136,6 +136,9 @@
   .pill.muted::before{background:var(--muted-2)}
   .badge{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;background:var(--warn-l);color:var(--warn-d);border:1px solid rgba(245,158,11,.2)}
   .tag{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:600}
+  .model-cell{display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-width:0}
+  .model-declared{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:1px 6px;border-radius:6px;font-size:10px;font-weight:600;background:var(--primary-l);color:var(--primary);border:1px solid rgba(37,99,235,.18);cursor:default}
+  .model-declared span{overflow-wrap:anywhere}
   .empty{text-align:center;padding:56px 16px;color:var(--muted);font-size:14px}
   .empty .icon{font-size:36px;display:block;margin-bottom:10px;opacity:.3}
   .err-tip{display:none;background:var(--danger-l);border:1px solid rgba(239,68,68,.25);color:var(--danger-d);padding:11px 16px;border-radius:var(--radius-sm);font-size:13px;margin-bottom:16px;display:none;align-items:center;gap:8px}
@@ -406,6 +409,9 @@
       <div class="card"><h2>按模型</h2>
         <div class="scroll-table"><table><thead><tr><th>模型</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">最大</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">Token</th><th class="num">缓存</th><th class="num">P95(s)</th><th>主失败码</th></tr></thead><tbody id="modelTbody"></tbody></table></div>
       </div>
+      <div class="card" id="upstreamModelSection" style="margin-top:14px;display:none"><h2>按上游实际模型 <span class="subtle" style="font-weight:400;font-size:11px">上游响应自报，仅统计新增记录</span></h2>
+        <div class="scroll-table"><table><thead><tr><th>上游模型</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">最大</th><th class="num">上游可用率</th><th class="num">下游可用率</th><th class="num">Token</th><th class="num">缓存</th><th class="num">P95(s)</th><th>主失败码</th></tr></thead><tbody id="upstreamModelTbody"></tbody></table></div>
+      </div>
     </div>
     <div class="card" style="margin-top:14px"><h2>按路径 Top 10（按重试数）</h2>
       <div class="scroll-table"><table><thead><tr><th>路径</th><th class="num">请求</th><th class="num">重试</th><th class="num">平均</th><th class="num">最大</th><th class="num">上游可用率</th><th class="num">下游可用率</th></tr></thead><tbody id="pathTbody"></tbody></table></div>
@@ -660,6 +666,26 @@ function renderAggTable(id,data,key){
     <td>${d.dominant_fail_status!==null?`<span class="tag" style="background:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}1a;color:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}">${d.dominant_fail_status===0?'异常':d.dominant_fail_status}×${d.fail_status_count}</span>`:'-'}</td>
   </tr>`).join('');
 }
+// 请求模型到上游自报模型的映射，仅用于展示徽标。
+let upstreamModelsByModel={};
+function declaredBadges(model){
+  const names=upstreamModelsByModel[model]||[];
+  return names.map(n=>`<span class="model-declared" title="上游自报模型 · ${n.requests} 次请求"><span>⇢ ${esc(n.name)}</span></span>`).join('');
+}
+function renderModelTable(id,data,key){
+  document.getElementById(id).innerHTML=data.map(d=>`<tr>
+    <td><div class="model-cell"><span class="mono">${esc(d[key])||'(unknown)'}</span>${declaredBadges(d[key])}</div></td>
+    <td class="num">${d.requests}</td><td class="num">${d.retries}</td>
+    <td class="num">${d.avg_retries}</td>
+    <td class="num"><span class="badge">${d.max_retries}</span></td>
+    <td class="num">${pctPill(d.upstream_availability_pct)}</td>
+    <td class="num">${pctPill(d.availability_pct)}</td>
+    <td class="num" title="${fmtTokFull(d.total_tokens)}">${fmtTok(d.total_tokens)}</td>
+    <td class="num">${cachedCell(d.cached_tokens,d.prompt_tokens)}</td>
+    <td class="num">${d.p95_duration}</td>
+    <td>${d.dominant_fail_status!==null?`<span class="tag" style="background:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}1a;color:${CATCOL[d.dominant_fail_status>=500?'5xx':d.dominant_fail_status>=400?'4xx':'2xx']}">${d.dominant_fail_status===0?'异常':d.dominant_fail_status}×${d.fail_status_count}</span>`:'-'}</td>
+  </tr>`).join('');
+}
 function keyHealthMeta(key){
   const status=key.health_status||(key.cooled?'circuit_open':key.availability_pct===null?'unknown':'available');
   if(status==='circuit_open')return{status,label:`熔断 ${Math.ceil(key.cooldown_remaining||0)}s`,cls:'warn',color:COL.warn};
@@ -851,7 +877,9 @@ function statusColorStr(s){s=parseInt(s);return s===0?COL.gray:s<300?COL.ok:s<40
 function renderCumulative(c){
   const cc=C('cumStatusChart');
   if(cc){if(c.by_status&&c.by_status.length){cc.setOption({tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)',backgroundColor:'rgba(15,23,42,.92)',borderColor:'transparent',textStyle:{color:'#fff',fontSize:12}},legend:{bottom:0,type:'scroll',textStyle:{fontSize:11,color:'#6b7280'},itemWidth:10,itemHeight:10,itemGap:12},series:[{type:'pie',radius:['38%','62%'],center:['50%','44%'],data:c.by_status.map(d=>({name:d.status==='0'?'异常':d.status,value:d.count,itemStyle:{color:statusColorStr(d.status),borderColor:'#fff',borderWidth:2}})),label:{formatter:'{b}\n{d}%',fontSize:11,color:'#334155'},emphasis:{scaleSize:6}}]});}else{cc.setOption({title:{text:'无数据',left:'center',top:'center',textStyle:{color:'#9ca3af',fontSize:13}}})}}
-  document.getElementById('cumModelTbody').innerHTML=(c.by_model||[]).map(m=>`<tr><td class="mono">${esc(m.name)}</td><td class="num">${m.requests}</td><td class="num">${m.retries}</td><td class="num">${m.avg_retries}</td><td class="num">${pctPill(m.upstream_availability_pct||0)}</td><td class="num">${pctPill(m.availability_pct)}</td><td class="num" title="${fmtTokFull(m.total_tokens)}">${fmtTok(m.total_tokens)}</td><td class="num">${cachedCell(m.cached_tokens,m.prompt_tokens)}</td><td class="num"><span class="badge">${m.max_retries}</span></td></tr>`).join('');
+  upstreamModelsByModel={};
+  (c.upstream_models||[]).forEach(m=>{upstreamModelsByModel[m.model]=m.upstream_models||[]});
+  renderModelTable('cumModelTbody',c.by_model||[],'name');
 }
 
 async function load(){
@@ -922,7 +950,10 @@ async function load(){
       renderByHourChart(detail.by_hour);
       renderTimelineChart(detail.timeline);
       renderAggTable('providerTbody',detail.by_provider,'provider');
-      renderAggTable('modelTbody',detail.by_model,'model');
+      renderModelTable('modelTbody',detail.by_model,'model');
+      const upstreamRows=detail.by_upstream_model||[];
+      document.getElementById('upstreamModelSection').style.display=upstreamRows.length?'block':'none';
+      if(upstreamRows.length)renderAggTable('upstreamModelTbody',upstreamRows,'upstream_model');
       renderPathTable(detail.by_path);
       renderModeAvailChart(detail.mode_comparison||[]);
       renderModeDurationChart(detail.mode_comparison||[]);

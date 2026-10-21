@@ -98,6 +98,13 @@ def _model_key(r: dict) -> str:
     return f"{p}/{m}"
 
 
+def _upstream_model_key(r: dict) -> str:
+    """Aggregate key for the model the upstream declared it served."""
+    p = _normalize_provider(r.get("provider", "") or "(unknown)")
+    m = r.get("upstream_model", "") or "(unknown)"
+    return f"{p}/{m}"
+
+
 def _agg_by(records: list, key: str, label: str, key_fn=None):
     buckets = defaultdict(lambda: {
         "requests": 0, "retries": 0, "succeeded": 0, "first_ok": 0,
@@ -583,6 +590,23 @@ def compute_stats(records: list, range_str: str, config: dict) -> dict:
         status_by_model.append(entry)
     status_by_model.sort(key=lambda x: x["total"], reverse=True)
 
+    # The model declarations the upstream returned, grouped under the model the
+    # client actually requested. Only successful enough to have a body; older
+    # records simply carry no entry.
+    upstream_models_by_model = defaultdict(Counter)
+    for r in records:
+        declared = r.get("upstream_model")
+        if declared:
+            upstream_models_by_model[_model_key(r)][declared] += 1
+    upstream_models = [
+        {"model": key, "upstream_models": [{"name": name, "requests": count}
+                                            for name, count in counter.most_common()]}
+        for key, counter in sorted(
+            upstream_models_by_model.items(),
+            key=lambda item: -sum(item[1].values()),
+        )
+    ]
+
     # 失败原因（上游错误码）：统计所有上游返回的错误码。
     # 优先取 retry_codes（重试过程中遇到的 503/429 等），
     # 没有时取 upstream_status（仅当它是错误码 >=400 或 0）。
@@ -707,6 +731,11 @@ def compute_stats(records: list, range_str: str, config: dict) -> dict:
         },
         "by_provider": _agg_by(records, "provider", "provider"),
         "by_model": [m for m in _agg_by(records, "model", "model", key_fn=_model_key) if not m["model"].endswith("/(unknown)")],
+        "by_upstream_model": [m for m in _agg_by(
+            [r for r in records if r.get("upstream_model")],
+            "upstream_model", "upstream_model", key_fn=_upstream_model_key,
+        ) if not m["upstream_model"].endswith("/(unknown)")],
+        "upstream_models": upstream_models,
         "by_key": _agg_by_key(records),
         "retry_distribution": retry_distribution,
         "retry_burden": retry_burden,

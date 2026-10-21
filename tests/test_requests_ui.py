@@ -54,6 +54,19 @@ assert(row.includes('&lt;script&gt;'));
 assert(!row.includes('<script>'));
 assert(!row.includes('hidden diagnostic')); // JSON is populated on expansion only.
 assert(row.includes('data-index="3"'));
+const declared=render({model:'deepseek-v4.1-flash',upstream_model:'deepseek/deepseek-flash',
+  final_status:200,request_body:{input:'hi'}},4);
+assert(declared.includes('model-declared'));
+assert(declared.includes('deepseek/deepseek-flash'));
+assert(declared.includes('<strong>deepseek-v4.1-flash</strong>'));
+assert(declared.indexOf('deepseek/deepseek-flash')>declared.indexOf('<strong>')); // badge sits under the model name
+const undeclared=render({model:'m',final_status:200,request_body:{input:'hi'}},5);
+assert(!undeclared.includes('model-declared'));
+assert(matchesRecord({model:'m',upstream_model:'deepseek/deepseek-flash'},{keyword:'DEEPSEEK/DEEPSEEK'}));
+const escaped=render({model:'m',upstream_model:'<img src=x onerror=alert(1)>',
+  final_status:200,request_body:{input:'hi'}},6);
+assert(!escaped.includes('<img'));
+assert(escaped.includes('&lt;img'));
 const long=render({request_body:{input:'x'.repeat(50000)}},0);
 assert(long.length<15000);
 assert(long.includes('预览已截断'));

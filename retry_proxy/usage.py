@@ -23,6 +23,12 @@ and whether the response is SSE:
 When no usage can be parsed (failure, interruption, upstream that omits it) the
 accumulator simply reports ``None`` so the record stays token-free and remains
 backwards compatible with historical logs.
+
+The same frames also carry the model name the upstream declares it served
+(``model`` / ``response.model`` / ``message.model`` / ``modelVersion``). That is
+collected independently of usage in ``upstream_model`` and never rewrites the
+response, so a provider-path rewrite such as ``deepseek/deepseek-flash`` can be
+surfaced without changing what the client receives.
 """
 
 import json
@@ -69,6 +75,9 @@ class UsageAccumulator:
         self._truncated = False
         self._supported = self.family in self.SUPPORTED
         self._pending_sse_cr = False
+        # First model name the upstream declared for this response. Filled for
+        # the supported families only, independently of whether usage arrived.
+        self.upstream_model = ""
 
     def feed_chunk(self, chunk):
         """Consume one ``aiter_bytes`` chunk from the upstream response."""
@@ -110,6 +119,14 @@ class UsageAccumulator:
             # Keep the tail so a final partial frame can still complete later.
             self.buffer = self.buffer[-65_536:]
 
+    def _observe_model(self, model):
+        """Retain the first non-empty upstream-declared model name."""
+        if self.upstream_model or not isinstance(model, str):
+            return
+        value = model.strip()
+        if value:
+            self.upstream_model = value
+
     def _handle_sse_frame(self, frame):
         data_lines = []
         event_name = ""
@@ -130,7 +147,27 @@ class UsageAccumulator:
         if not isinstance(payload, dict):
             return
         event_type = payload.get("type") or event_name
+        self._observe_declared_model(payload, event_type)
         self._extract(payload, event_type)
+
+    def _observe_declared_model(self, payload, event_type=""):
+        """Record the model name the upstream claims it served, per family shape."""
+        family = self.family
+        if family in ("chat", "embeddings"):
+            self._observe_model(payload.get("model"))
+        elif family == "responses":
+            response = payload.get("response")
+            if isinstance(response, dict):
+                self._observe_model(response.get("model"))
+        elif family == "gemini":
+            self._observe_model(payload.get("modelVersion"))
+        elif family == "messages":
+            # Anthropic declares the served model on message_start only.
+            message = payload.get("message")
+            if isinstance(message, dict):
+                self._observe_model(message.get("model"))
+            elif event_type == "message":
+                self._observe_model(payload.get("model"))
 
     def _extract(self, payload, event_type=""):
         family = self.family
@@ -241,10 +278,13 @@ class UsageAccumulator:
             except (TypeError, ValueError, UnicodeDecodeError):
                 payload = None
             if isinstance(payload, dict):
-                self._extract(payload, payload.get("type") or "")
+                event_type = payload.get("type") or ""
+                self._observe_declared_model(payload, event_type)
+                self._extract(payload, event_type)
             elif isinstance(payload, list) and self.family == "gemini":
                 for item in payload:
                     if isinstance(item, dict):
+                        self._observe_declared_model(item)
                         self._extract(item)
         if not self.seen:
             return None

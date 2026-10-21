@@ -67,6 +67,7 @@ python -m retry_proxy.dlp validate
 | `path` | 请求路径 |
 | `provider` | 供应商，取自 `PROVIDER` 环境变量 |
 | `model` | 模型名，从请求 body 的 `model` 字段解析；无则为空字符串 |
+| `upstream_model` | 可选。上游响应体自报的模型名，来自 Chat/Embeddings 的 `model`、Responses 的 `response.model`、Anthropic `message_start.message.model` 或 Gemini 的 `modelVersion`，取首个非空值。仅用于诊断，代理不会改写转发给客户端的响应；上游未声明时不写入该字段 |
 | `upstream_status` | 最后一次上游响应的状态码（请求异常时为 0） |
 | `final_status` | 返回给客户端的状态码（放弃重试时为 503） |
 | `attempts` | 总尝试次数（含首次） |
@@ -95,6 +96,9 @@ python -m retry_proxy.dlp validate
 ```bash
 # 各模型重试次数统计（当天）
 jq -s 'group_by(.model) | map({model:.[0].model, n:length, avg_retries:(map(.retries)|add/length)})' logs/retry_$(date +%Y-%m-%d).jsonl
+
+# 找出上游实际落到哪个模型（仅含新记录）
+jq -r 'select(.upstream_model) | "\(.model) -> \(.upstream_model)"' logs/retry_$(date +%Y-%m-%d).jsonl | sort | uniq -c
 
 # 用 pandas
 python -c "import pandas as pd; df=pd.read_json('logs/retry_$(date +%Y-%m-%d).jsonl',lines=True); print(df.groupby('model')['retries'].agg(['count','mean','max']))"
