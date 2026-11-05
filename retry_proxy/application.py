@@ -696,6 +696,7 @@ async def key_pools_source_settings(request: Request):
             body.get("external_retest_weight"),
             body.get("external_ttft_prior_strength"),
             body.get("target_cache_hit_rate"),
+            body.get("auto_create_keys"),
         )
     except PoolSyncError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

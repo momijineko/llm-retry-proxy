@@ -133,21 +133,22 @@ Key 与在线同步得到的 Key 使用同一状态文件及加密策略：配�
 
 `aihub` 适配器是 `sub2api` 的专用分支，用于 [AIHub](https://aihub.top) 及其二次开发版本。AIHub 的 `/api/v1/groups/available` 只返回站点内全部 active 分组，无法反映供应商大厅的实际状态，因此适配器额外读取公开的大厅接口 `/api/v2/public/providers`（旧路径 `/api/v1/public/providers` 仅作兜底），按分组 ID 与同步到的 Key 对齐后据此筛选、屏蔽和排序。它不读取也不要求配置外部数据源。
 
-#### 什么会导致删除 Key
+#### 参与判定：只认“检测通过”
 
-只有**稳定**字段会触发删除，并且必须连续两轮同步都判定不可用：
+只有同时满足下面几条的分组才参与号池——出现在“选择分组”目录、成为自动或者手动建 Key 的目标、以及进入路由：
 
-| 字段 | 判定 |
+| 字段 | 参与条件 |
 |---|---|
-| `visible_in_hall` | `false`（大厅已下架）→ 删除 |
-| `model_detection.status` | `detection_failed`/`failed`/`fail`/`error`/`insufficient_evidence`/`not_configured` → 删除；但 `stages.detection` 已完成时视为软性失败，保留分组 |
-| `available` | **不参与删除判定**。它是 AIHub 探针的瞬时结果（实测 20–40 秒内 272 个分组中有 12 个翻转），若用于删除会把号池反复删空 |
+| `visible_in_hall` | 不是 `false`（大厅已下架的分组不参与） |
+| `model_detection.status` | 必须是 `passed`（即大厅页面“检测通过”筛选）；`suspected`、`not_tested`、`detection_failed`、`failed`、`fail`、`error`、`insufficient_evidence`、`not_configured` 以及状态缺失都不参与 |
+| 大厅快照 | 必须**收录**该分组 ID。只在 `/api/v1/groups/available` 里出现、大厅已不再返回的分组不参与（例如已下线、转为私有或 ID 变更） |
+| `available` | **不参与判定**。它是 AIHub 探针的瞬时结果（实测 20–40 秒内 272 个分组中有 12 个翻转），若用于判定会把号池反复删空 |
 
-不可用分组不会出现在“选择分组”目录中，因此“一键补齐”和按分组建 Key 都不会为它们建 Key。`passed`、`suspected`、`not_tested` 以及状态缺失的分组保留。大厅接口不可读取时，有上次成功快照则继续用快照筛选，没有快照则本次同步直接失败，不删除任何 Key。
+判定为不参与的分组会**立即退出路由**，但它们的遗留 Key 需要**连续两轮同步**都判定为不参与才会自动删除，避免大厅抖动造成反复建删。删除同样走 `KEY_POOL_DELETE_DELAY` 限流，命中限流时本轮停止、剩余留到下次。大厅接口不可读取时，有上次成功快照则继续用快照筛选，没有快照则本次同步直接失败，不删除任何 Key。
 
 #### 按能力屏蔽与按模型降智屏蔽
 
-- `model_detection.stages` 区分 `text`（文本/推理）、`image`（生图）、`detection`（基础可用性）。`text` 阶段失败只从 `endpoint_families` 移除 `chat`/`responses`/`messages`/`gemini`，生图继续可用；`image` 阶段失败只移除 `images` 并把 `image_generation` 置为 `false`；`detection` 阶段失败才整组不可用。
+- `model_detection.stages` 区分 `text`（文本/推理）、`image`（生图）、`detection`（基础可用性）。在已“检测通过”的分组内，`text` 阶段失败只从 `endpoint_families` 移除 `chat`/`responses`/`messages`/`gemini`，生图继续可用；`image` 阶段失败只移除 `images` 并把 `image_generation` 置为 `false`。整个分组是否参与仍只由上面的 `model_detection.status` 决定。
 - `model_cards[].health` 给出分组内单个模型的真实健康度。`failed` 的模型写入 `rejected_models`，只避开该模型而不影响同组其它模型；`insufficient` 只表示样本不足，不作为降智证据。
 
 #### 有效倍率（真实成本排序）
@@ -163,6 +164,15 @@ Key 与在线同步得到的 Key 使用同一状态文件及加密策略：配�
 #### 建 Key 的速率限制
 
 AIHub 对建 Key 接口限流较严。适配器在遇到 `429`/`rate limit` 时立即停止本轮创建，把剩余分组留到下次，而不是继续重试放大限流窗口；错误信息会给出剩余数量。分组目录中的“有效倍率”“缓存命中”“降智模型”列以及状态接口的 `hall` 段（快照时间、分组数、被排除数量）用于观察这些指标。
+
+#### 同步时自动补齐 Key
+
+`aihub` 适配器支持在每次同步时自动为“检测通过但还没有 Key”的分组建 Key。该开关默认**关闭**，在号池页面的调度策略区勾选“同步时自动补齐 Key”后保存即可；仅 `aihub` 暴露 `auto_create_keys` 能力，其它适配器传入该字段会被拒绝。
+
+- **候选判定**：分组本身是 active（`/api/v1/groups/available`），且满足上面的“检测通过”参与判定（大厅收录、未下架、`model_detection.status=passed`），当前没有启用中的 Key（只有停用 Key 算缺失）。`available` 仍不参与判定，避免探针抖动导致反复建删。
+- **顺序与上限**：按有效倍率从低到高补齐，每轮同步最多建 20 个分组，剩余数量写入状态的 `auto_create_pending`，由下一轮继续。一次同步全程持有号池锁，不设上限会让 272 个分组把单轮同步拖到十几分钟。
+- **限流与冷却**：命中 `429`/限流时立即停止本轮，剩余分组留到下一轮。AIHub 的建 Key 频率限制是按账号计的（典型错误 `too many api keys created recently, please try again later`），因此命中限流后**整轮自动补齐冷却 30 分钟**，冷却期间同步不会再去请求建 Key 接口；单个分组建 Key 失败同样冷却 30 分钟，避免每轮都撞同一个不可建 Key 的分组。页面在冷却期显示“限流冷却 N 分钟”。重新保存开关会清空全部冷却记录。
+- **生效方式**：建 Key 后适配器会重新拉取一次 Key 列表，新 Key 在本轮同步就进入号池；页面显示“待补齐 N 个分组”和“最近补齐失败”提示，日志记录 `AIHub 自动补齐 Key`。
 
 状态文件中只保存归一化后的精简大厅快照（272 个分组约 50KB），不保存原始条目（约 6MB）。
 

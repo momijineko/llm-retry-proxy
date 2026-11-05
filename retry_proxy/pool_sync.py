@@ -461,6 +461,24 @@ class PoolSyncManager:
                     # AIHub 适配器的供应商大厅快照（其余适配器不使用）
                     source.setdefault("hall_groups", {})
                     source.setdefault("hall_synced_at", 0)
+                    # AIHub 同步时自动建 Key 的开关与失败冷却记录
+                    source["auto_create_keys"] = bool(
+                        source.get("auto_create_keys", False)
+                    )
+                    if not isinstance(source.get("auto_create_attempts"), dict):
+                        source["auto_create_attempts"] = {}
+                    try:
+                        source["auto_create_cooldown_until"] = float(
+                            source.get("auto_create_cooldown_until") or 0
+                        )
+                    except (TypeError, ValueError):
+                        source["auto_create_cooldown_until"] = 0.0
+                    try:
+                        source["auto_create_pending"] = max(
+                            0, int(source.get("auto_create_pending") or 0),
+                        )
+                    except (TypeError, ValueError):
+                        source["auto_create_pending"] = 0
                     source["disabled_key_ids"] = [
                         str(value) for value in source.get("disabled_key_ids", [])
                         if value not in (None, "")
@@ -622,6 +640,8 @@ class PoolSyncManager:
                 "experience_mappings": {}, "experience_last_sync_at": "",
                 "experience_last_error": "",
                 "hall_groups": {}, "hall_synced_at": 0,
+                "auto_create_keys": False, "auto_create_attempts": {},
+                "auto_create_pending": 0, "auto_create_cooldown_until": 0,
                 "last_sync_at": "", "last_attempt_at": "", "last_error": "",
             })
             source["provider"] = requested_provider
@@ -1130,7 +1150,8 @@ class PoolSyncManager:
                                   check_model="", session_affinity=None,
                                   external_retest_weight=None,
                                   external_ttft_prior_strength=None,
-                                  target_cache_hit_rate=None):
+                                  target_cache_hit_rate=None,
+                                  auto_create_keys=None):
         if strategy not in KEY_POOL_STRATEGIES:
             raise PoolSyncError("号池策略必须是 cost、ttft、balanced 或 cache")
         try:
@@ -1178,6 +1199,21 @@ class PoolSyncManager:
             source["check_model"] = str(check_model or "").strip()
             if session_affinity is not None:
                 source["session_affinity"] = bool(session_affinity)
+            if auto_create_keys is not None:
+                if not isinstance(auto_create_keys, bool):
+                    raise PoolSyncError("自动补齐 Key 必须是布尔值")
+                adapter = self._adapter(source["adapter"])
+                if auto_create_keys and "auto_create_keys" not in adapter.capabilities:
+                    raise PoolSyncError(
+                        f"{adapter.label or adapter.name} 适配器不支持自动补齐 Key"
+                    )
+                if auto_create_keys != bool(source.get("auto_create_keys", False)):
+                    # 切换开关时丢弃冷却记录，否则先前失败的短暂阻塞会让刚
+                    # 开启的自动补齐继续被跳过。
+                    source["auto_create_attempts"] = {}
+                    source["auto_create_pending"] = 0
+                    source["auto_create_cooldown_until"] = 0
+                source["auto_create_keys"] = auto_create_keys
             pool = self.pools.get(self._pool_url(source))
             if pool is not None:
                 affinity = bool(source.get("session_affinity", False))
@@ -1743,6 +1779,12 @@ class PoolSyncManager:
                 "external_ttft_prior_strength", 2.0,
             ),
             "session_affinity": bool(source.get("session_affinity", False)),
+            "auto_create_keys": bool(source.get("auto_create_keys", False)),
+            "auto_create_pending": source.get("auto_create_pending", 0),
+            "auto_create_cooldown_until": source.get("auto_create_cooldown_until", 0),
+            "auto_create_last_at": source.get("auto_create_last_at", 0),
+            "auto_create_last_created": source.get("auto_create_last_created", 0),
+            "auto_create_last_error": source.get("auto_create_last_error", ""),
             "ttft_policy": {
                 "stale_after": getattr(self.config, "key_ttft_stale_after", 300),
                 "retest_interval": getattr(self.config, "key_ttft_retest_interval", 60),

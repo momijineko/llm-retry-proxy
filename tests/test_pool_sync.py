@@ -16,6 +16,7 @@ from retry_proxy.pool_sync import (PoolSyncManager, _get_pinned_public_url,
                                    _validate_base_url_destination)
 from retry_proxy.routes import RouteRegistry
 from retry_proxy.sync_adapters import PoolSyncError
+from retry_proxy.sync_adapters.aihub import AIHubAdapter
 from retry_proxy.sync_adapters.sub2api import Sub2APIAdapter, _model_ids, _unwrap
 
 
@@ -1264,6 +1265,62 @@ class PoolSyncManagerTests(unittest.IsolatedAsyncioTestCase):
         for values, message in cases:
             with self.subTest(values=values), self.assertRaisesRegex(PoolSyncError, message):
                 await manager.set_source_settings("missing", "balanced", **values)
+
+    async def test_auto_create_keys_can_only_be_enabled_for_supported_adapters(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(),
+                                  {"sub2api": Sub2APIAdapter()})
+        status = await manager.connect("sub2api", "https://upstream.test", "test", {
+            "email": "user@example.com", "password": "secret",
+        })
+        source_id = status["sources"][0]["id"]
+        self.assertFalse(status["sources"][0]["auto_create_keys"])
+
+        with self.assertRaisesRegex(PoolSyncError, "不支持自动补齐 Key"):
+            await manager.set_source_settings(source_id, "cost", auto_create_keys=True)
+        self.assertFalse(manager.sources[source_id]["auto_create_keys"])
+
+        with self.assertRaisesRegex(PoolSyncError, "布尔值"):
+            await manager.set_source_settings(source_id, "cost", auto_create_keys="yes")
+
+    async def test_auto_create_keys_setting_is_persisted_and_resets_cooldown(self):
+        manager = PoolSyncManager({}, self.config, FakeClient(), {"aihub": AIHubAdapter()})
+        source_id = "aihub-https://upstream.test"
+        source = {
+            "id": source_id, "adapter": "aihub", "base_url": "https://upstream.test",
+            "provider": "aihub", "route_prefix": "",
+            "session": {"email": "user@example.com", "access_token": "token",
+                        "refresh_token": "refresh"},
+            "entries": [], "auto_create_keys": False, "auto_create_attempts": {},
+            "auto_create_pending": 0,
+        }
+        manager.sources[source_id] = source
+        source["auto_create_attempts"] = {"2": {"at": time.time(), "error": "boom"}}
+        source["auto_create_pending"] = 3
+        source["auto_create_cooldown_until"] = time.time() + 900
+
+        # 只改其它策略、开关值不变时保留冷却记录，避免反复重试同一批分组
+        await manager.set_source_settings(source_id, "cost", auto_create_keys=False)
+        self.assertIn("2", source["auto_create_attempts"])
+        self.assertEqual(source["auto_create_pending"], 3)
+        self.assertGreater(source["auto_create_cooldown_until"], 0)
+
+        status = await manager.set_source_settings(source_id, "cost", auto_create_keys=True)
+
+        source_status = status["sources"][0]
+        self.assertTrue(source_status["auto_create_keys"])
+        self.assertEqual(source_status["auto_create_pending"], 0)
+        self.assertEqual(source["auto_create_attempts"], {})
+        self.assertEqual(source["auto_create_cooldown_until"], 0)
+        with open(self.state_file, encoding="utf-8") as f:
+            self.assertTrue(json.load(f)["sources"][0]["auto_create_keys"])
+
+        restored = PoolSyncManager({}, self.config, FakeClient(), {"aihub": AIHubAdapter()})
+        restored.load_state()
+        self.assertTrue(restored.sources[source_id]["auto_create_keys"])
+        self.assertTrue(restored.status()["sources"][0]["auto_create_keys"])
+
+        status = await manager.set_source_settings(source_id, "cost", auto_create_keys=False)
+        self.assertFalse(status["sources"][0]["auto_create_keys"])
 
     def test_availability_requests_cover_supported_model_protocols(self):
         adapter = Sub2APIAdapter()

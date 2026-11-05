@@ -1,14 +1,21 @@
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
 from retry_proxy.sync_adapters import ADAPTERS, PoolSyncError
-from retry_proxy.sync_adapters.aihub import (AIHubAdapter,
+from retry_proxy.sync_adapters.aihub import (AUTO_CREATE_MAX_PER_ROUND,
+                                             AIHubAdapter,
                                              DEFAULT_REFERENCE_CACHE_HIT_RATE,
-                                             DETECTION_FAILED_STATUSES,
                                              effective_multiplier, hall_entry,
-                                             stage_disabled_families, unavailable_reason)
+                                             participation_reason,
+                                             stage_disabled_families)
+
+PARTICIPATION_EXCLUDED_STATUSES = (
+    "detection_failed", "failed", "fail", "error", "insufficient_evidence",
+    "not_configured", "suspected", "not_tested", "unknown",
+)
 
 
 def api_response(data=None, status=200):
@@ -112,7 +119,10 @@ class FakeAIHubClient:
         if group_id in self.post_errors:
             raise RuntimeError(self.post_errors[group_id])
         self.created.append(group_id)
-        return api_response({"id": 9000 + group_id, "group_id": group_id})
+        created_key = key(9000 + group_id, group_id, f"sk-created-{group_id}")
+        created_key["name"] = json.get("name") or created_key["name"]
+        self.keys.append(created_key)
+        return api_response({"id": created_key["id"], "group_id": group_id})
 
 
 def source():
@@ -169,36 +179,42 @@ class AIHubAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     # ------------------------------------------------------------ 筛选语义
 
-    def test_available_is_not_a_delete_signal(self):
-        # available 是探针瞬时状态，不能作为删 Key 依据
+    def test_available_is_not_a_participation_signal(self):
+        # available 是探针瞬时状态，不能作为参与判定依据
         entry = hall_entry(hall_item(1, available=False))
         self.assertFalse(entry["available"])
-        self.assertEqual(unavailable_reason(entry), "")
-
-    def test_unavailable_reason_uses_only_stable_fields(self):
-        self.assertEqual(unavailable_reason(hall_entry(hall_item(1))), "")
+        self.assertEqual(participation_reason(entry), "")
         self.assertEqual(
-            unavailable_reason(hall_entry(hall_item(1, visible=False))),
+            participation_reason(hall_entry(hall_item(1, available=True))), "",
+        )
+
+    def test_participation_requires_passed_detection(self):
+        self.assertEqual(participation_reason(hall_entry(hall_item(1))), "")
+        self.assertEqual(
+            participation_reason(hall_entry(hall_item(1, visible=False))),
             "大厅已下架",
         )
-        for status in DETECTION_FAILED_STATUSES:
+        self.assertEqual(participation_reason({}), "供应商大厅未收录")
+        self.assertEqual(participation_reason(None), "供应商大厅未收录")
+        for status in PARTICIPATION_EXCLUDED_STATUSES:
             self.assertIn(
                 "模型检测未通过",
-                unavailable_reason(hall_entry(hall_item(1, status=status))),
+                participation_reason(hall_entry(hall_item(1, status=status))),
             )
-        for status in ("", "suspected", "passed", "not_tested"):
-            self.assertEqual(
-                unavailable_reason(hall_entry(hall_item(1, status=status))), "",
-            )
+        # 状态缺失同样不参与，避免未检测分组混入号池
+        self.assertIn(
+            "未检测",
+            participation_reason(hall_entry(hall_item(1, status=""))),
+        )
 
-    def test_detection_failure_with_completed_detection_stage_stays_usable(self):
-        # 只有软性阶段失败、基础探测已完成的组仍可用（改由阶段屏蔽处理）
+    def test_participation_ignores_detection_stage_details(self):
+        # 即使基础探测阶段已完成，只要大厅判定不是 passed 就不参与
         entry = hall_entry(hall_item(
             1, status="detection_failed",
             stages={"detection": {"published_state": "completed"},
                     "text": {"published_state": "failed"}},
         ))
-        self.assertEqual(unavailable_reason(entry), "")
+        self.assertIn("模型检测未通过", participation_reason(entry))
 
     def test_stage_disabled_families_maps_text_and_image(self):
         entry = hall_entry(hall_item(
@@ -227,15 +243,52 @@ class AIHubAdapterTests(unittest.IsolatedAsyncioTestCase):
             hall=[hall_item(1), hall_item(2, visible=False), hall_item(3)],
         )
         src = source()
-        # 首次同步只登记不可用分组，不删除（需要连续两轮确认）
+        # 首次同步只登记不可用分组，不删除（需要连续两轮确认），但已下架分组
+        # 立即退出路由
         _, entries = await adapter.fetch(client, src, session())
         self.assertEqual(client.deleted, [])
-        self.assertEqual([entry["group_id"] for entry in entries], [1, 2, 3])
+        self.assertEqual([entry["group_id"] for entry in entries], [1, 3])
 
         # 第二轮确认后才删除已下架分组的 Key
         _, entries = await adapter.fetch(client, src, session())
         self.assertEqual(client.deleted, ["21"])
         self.assertEqual([entry["group_id"] for entry in entries], [1, 3])
+
+    async def test_fetch_removes_keys_of_groups_missing_from_hall(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1), group(143)], keys=[key(11, 1), key(1431, 143)],
+            # 143 只出现在 /groups/available，不在大厅快照里
+            hall=[hall_item(1)],
+        )
+        src = source()
+
+        _, entries = await adapter.fetch(client, src, session())
+        self.assertEqual([entry["group_id"] for entry in entries], [1])
+        self.assertEqual(client.deleted, [])
+
+        _, entries = await adapter.fetch(client, src, session())
+        self.assertEqual(client.deleted, ["1431"])
+        self.assertEqual([entry["group_id"] for entry in entries], [1])
+
+    async def test_fetch_keeps_only_passed_detection_groups(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1), group(2), group(3)],
+            keys=[key(11, 1), key(21, 2), key(31, 3)],
+            hall=[hall_item(1), hall_item(2, status="suspected"),
+                  hall_item(3, status="not_tested")],
+        )
+        src = source()
+
+        _, entries = await adapter.fetch(client, src, session())
+        self.assertEqual([entry["group_id"] for entry in entries], [1])
+        self.assertEqual(sorted(src["group_model_cache"]), ["1"])
+
+        _, entries = await adapter.fetch(client, src, session())
+        self.assertEqual(sorted(client.deleted), ["21", "31"])
+        self.assertEqual([entry["group_id"] for entry in entries], [1])
+        self.assertEqual(sorted(src["group_model_cache"]), ["1"])
 
     async def test_fetch_does_not_delete_when_availability_flaps(self):
         adapter = AIHubAdapter()
@@ -328,15 +381,18 @@ class AIHubAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     # ------------------------------------------------------------ 分组目录
 
-    async def test_catalog_hides_only_stably_blocked_groups(self):
+    async def test_catalog_lists_only_passed_detection_groups(self):
         adapter = AIHubAdapter()
         client = FakeAIHubClient(
-            groups=[group(1), group(2), group(3)],
+            groups=[group(1), group(2), group(3), group(4), group(5), group(6)],
             keys=[key(11, 1), key(31, 3)],
             hall=[
                 hall_item(1, rate=0.05, cache_hit=0.9),
                 hall_item(2, visible=False),
                 hall_item(3, status="detection_failed"),
+                hall_item(4, status="suspected"),
+                hall_item(5, status="not_tested"),
+                # 组 6 不在大厅快照中
             ],
             rates={"1": 0.05},
         )
@@ -457,3 +513,144 @@ class AIHubAdapterTests(unittest.IsolatedAsyncioTestCase):
         messages = " ".join(str(item.get("error") or "") for item in result["errors"])
         self.assertIn("限流", messages)
         self.assertIn("剩余 1 个分组", messages)
+
+    # ------------------------------------------------------- 同步时自动补 Key
+
+    async def test_auto_create_is_off_by_default(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1), group(2)], keys=[key(11, 1)],
+            hall=[hall_item(1), hall_item(2)],
+        )
+
+        await adapter.fetch(client, source(), session())
+
+        self.assertEqual(client.created, [])
+
+    async def test_auto_create_fills_missing_groups_by_effective_cost(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1), group(2), group(3), group(4)],
+            keys=[key(11, 1), key(41, 4, status="disabled")],
+            hall=[
+                hall_item(1, rate=0.05),
+                hall_item(2, rate=0.3, effective=0.3),
+                hall_item(3, rate=0.2, effective=0.02),
+                hall_item(4, rate=0.4, effective=0.4),
+            ],
+        )
+        state = source()
+        state["auto_create_keys"] = True
+
+        await adapter.fetch(client, state, session())
+
+        # 组 1 已有启用 Key，组 4 只有停用 Key；其余按有效倍率从低到高
+        self.assertEqual(client.created, [3, 2, 4])
+        self.assertEqual(state["auto_create_pending"], 0)
+        self.assertEqual(state["auto_create_last_created"], 3)
+
+    async def test_auto_create_skips_blocked_and_inactive_groups(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1), group(2), group(3), group(4), group(5),
+                    group(6, status="inactive")],
+            keys=[],
+            hall=[hall_item(1), hall_item(2, visible=False),
+                  hall_item(3, status="detection_failed"),
+                  hall_item(4, status="suspected"),
+                  hall_item(5, status="not_tested"), hall_item(6)],
+        )
+        state = source()
+        state["auto_create_keys"] = True
+
+        await adapter.fetch(client, state, session())
+
+        # 大厅下架、检测失败、疑似、未检测、非 active 的分组都不应建 Key
+        self.assertEqual(client.created, [1])
+
+    async def test_auto_create_skips_groups_missing_from_hall(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1), group(2)], keys=[], hall=[hall_item(1)],
+        )
+        state = source()
+        state["auto_create_keys"] = True
+
+        await adapter.fetch(client, state, session())
+
+        self.assertEqual(client.created, [1])
+
+    async def test_auto_create_limits_round_size(self):
+        groups = [group(index) for index in range(1, 26)]
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=groups, keys=[], hall=[hall_item(item["id"]) for item in groups],
+        )
+        state = source()
+        state["auto_create_keys"] = True
+
+        with patch("retry_proxy.sync_adapters.base.asyncio.sleep", AsyncMock()):
+            await adapter.fetch(client, state, session())
+
+        self.assertEqual(len(client.created), AUTO_CREATE_MAX_PER_ROUND)
+        self.assertEqual(
+            state["auto_create_pending"], 25 - AUTO_CREATE_MAX_PER_ROUND,
+        )
+
+    async def test_auto_create_rate_limit_stops_and_cools_down(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1), group(2), group(3)], keys=[],
+            hall=[hall_item(1, effective=0.01), hall_item(2, effective=0.02),
+                  hall_item(3, effective=0.03)],
+        )
+        client.post_errors = {2: "上游请求失败 (HTTP 429 Too Many Requests)"}
+        state = source()
+        state["auto_create_keys"] = True
+
+        await adapter.fetch(client, state, session())
+
+        self.assertEqual(client.created, [1])
+        # 限流后剩余分组留到下一轮，失败分组进入冷却
+        self.assertEqual(state["auto_create_pending"], 2)
+        self.assertIn("2", state["auto_create_attempts"])
+        self.assertIn("限流", state["auto_create_last_error"])
+        # 上游按账号限流，整轮自动补齐进入冷却
+        self.assertGreater(
+            state["auto_create_cooldown_until"], time.time(),
+        )
+
+        client.created.clear()
+        await adapter.fetch(client, state, session())
+
+        # 冷却期内不再请求上游
+        self.assertEqual(client.created, [])
+        self.assertEqual(state["auto_create_pending"], 2)
+
+        # 冷却到期后：冷却中的组 2 仍跳过，只补组 3
+        state["auto_create_cooldown_until"] = 0
+        await adapter.fetch(client, state, session())
+        self.assertEqual(client.created, [3])
+        self.assertEqual(state["auto_create_pending"], 0)
+
+    async def test_auto_create_cooldown_expires_and_clears(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1)], keys=[], hall=[hall_item(1)],
+        )
+        state = source()
+        state["auto_create_keys"] = True
+        state["auto_create_attempts"] = {
+            "1": {"at": time.time(), "error": "too many api keys created recently"},
+        }
+
+        await adapter.fetch(client, state, session())
+
+        # 分组级冷却仍然生效，不会重复建 Key
+        self.assertEqual(client.created, [])
+
+        state["auto_create_attempts"] = {}
+        await adapter.fetch(client, state, session())
+
+        self.assertEqual(client.created, [1])
+        self.assertEqual(state["auto_create_cooldown_until"], 0)
