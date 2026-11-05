@@ -1,3 +1,4 @@
+import asyncio
 from abc import ABC, abstractmethod
 from urllib.parse import quote
 
@@ -45,6 +46,77 @@ async def request_with_retry(client, method, url, **kwargs):
 
 class PoolSyncError(RuntimeError):
     pass
+
+
+# 建/删 Key 的默认限流参数。中转站对写接口通常有较严的频率限制，
+# 批量操作必须留出间隔，否则会被上游直接阻塞或熔断。
+DEFAULT_WRITE_DELAY = 1.5
+MAX_WRITE_DELAY = 60.0
+
+
+def is_rate_limited(exc):
+    """写接口错误是否由上游限流引起。
+
+    Sub2API、AIHub 与 New API 的错误文本各不相同（HTTP 429、``rate limit``、
+    ``too many requests``、中文“限流”），统一在这里判定，避免各适配器各写一份。
+    """
+    text = str(exc).lower()
+    return ("429" in text or "rate limit" in text or "too many" in text
+            or "too frequent" in text or "frequency" in text or "限流" in text)
+
+
+def write_delay(options=None, default=None):
+    """从 options 读取写操作间隔，并夹在安全区间内。"""
+    raw = (options or {}).get("delay_seconds")
+    if raw is None:
+        raw = DEFAULT_WRITE_DELAY if default is None else default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = DEFAULT_WRITE_DELAY if default is None else float(default)
+    return max(0.0, min(value, MAX_WRITE_DELAY))
+
+
+class WriteThrottle:
+    """跨建/删共享的写接口限流器。
+
+    除了固定间隔，还维护失败退避：一旦命中 429/限流，就按指数把后续间隔
+    抬高并继续本轮，而不是“成功了就立刻接着打”。这样即使上游只在第 N 次
+    请求才限流，也不会把剩下的请求打成一波。
+    """
+
+    def __init__(self, delay_seconds=DEFAULT_WRITE_DELAY, backoff_base=None,
+                 max_delay=MAX_WRITE_DELAY):
+        self.base_delay = max(0.0, min(float(delay_seconds), MAX_WRITE_DELAY))
+        if backoff_base is None:
+            # 间隔设为 0 时仍要能退避，否则命中限流后仍会持续狂发
+            backoff_base = self.base_delay or DEFAULT_WRITE_DELAY
+        self.backoff_base = max(0.0, min(float(backoff_base), MAX_WRITE_DELAY))
+        self.max_delay = max(0.0, min(float(max_delay), MAX_WRITE_DELAY))
+        self._current_delay = self.base_delay
+        self._sent = 0
+        self.rate_limited = 0
+
+    @property
+    def delay(self):
+        return self._current_delay
+
+    async def before(self):
+        """在每次写请求前等待。第一个请求不等待。"""
+        if self._sent and self._current_delay > 0:
+            await asyncio.sleep(self._current_delay)
+        self._sent += 1
+
+    def on_rate_limited(self):
+        """命中限流后抬高后续间隔（指数退避，带上限）。"""
+        self.rate_limited += 1
+        grown = max(self._current_delay, self.backoff_base) * 2
+        self._current_delay = min(grown, self.max_delay)
+
+    def on_success(self):
+        """成功后缓慢回落，避免一个短暂限流把整轮都拖慢。"""
+        if self._current_delay > self.base_delay:
+            self._current_delay = max(self._current_delay / 2, self.base_delay)
 
 
 class PoolSyncAdapter(ABC):

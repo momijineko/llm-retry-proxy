@@ -289,6 +289,7 @@ class PoolSyncManager:
                 item.get("group_id", ""), item.get("group_name", ""),
                 self._routing_capabilities(source, item),
                 item.get("auth"),
+                item.get("effective_sort", ""),
             ))
         external_items = {
             str(item.get("id")): item
@@ -457,6 +458,9 @@ class PoolSyncManager:
                     source.setdefault("experience_mappings", {})
                     source.setdefault("experience_last_sync_at", "")
                     source.setdefault("experience_last_error", "")
+                    # AIHub 适配器的供应商大厅快照（其余适配器不使用）
+                    source.setdefault("hall_groups", {})
+                    source.setdefault("hall_synced_at", 0)
                     source["disabled_key_ids"] = [
                         str(value) for value in source.get("disabled_key_ids", [])
                         if value not in (None, "")
@@ -617,6 +621,7 @@ class PoolSyncManager:
                 "experience_source": {}, "experience_items": [],
                 "experience_mappings": {}, "experience_last_sync_at": "",
                 "experience_last_error": "",
+                "hall_groups": {}, "hall_synced_at": 0,
                 "last_sync_at": "", "last_attempt_at": "", "last_error": "",
             })
             source["provider"] = requested_provider
@@ -1083,8 +1088,13 @@ class PoolSyncManager:
             if not adapter.connected(source.get("session") or {}):
                 raise PoolSyncError("该连接尚未登录")
             try:
+                delete_options = dict(options or {})
+                delete_options.setdefault(
+                    "delay_seconds", getattr(self.config, "key_pool_delete_delay", 1.0),
+                )
                 session, result = await adapter.delete_keys(
-                    self.client, source, source.get("session") or {}, group_ids or [], options or {},
+                    self.client, source, source.get("session") or {}, group_ids or [],
+                    delete_options,
                 )
                 source["session"] = session
                 self._save_state()
@@ -1663,6 +1673,7 @@ class PoolSyncManager:
                                 "manual" if manually_disabled else ""),
             "key_masked": _mask_key(raw_key),
             "label": item.get("label", ""), "sort": item.get("sort", ""),
+            "effective_sort": item.get("effective_sort", ""),
             "group_id": str(item.get("group_id") or ""),
             "key_name": item.get("key_name", ""), "group_name": item.get("group_name", ""),
             "platform": item.get("platform", ""),
@@ -1745,6 +1756,14 @@ class PoolSyncManager:
                 "mappings": dict(source.get("experience_mappings") or {}),
                 "last_sync_at": source.get("experience_last_sync_at", ""),
                 "last_error": source.get("experience_last_error", ""),
+            },
+            "hall": {
+                "synced_at": source.get("hall_synced_at", 0),
+                "groups": len(source.get("hall_groups") or {}),
+                "blocked": sum(
+                    1 for entry in (source.get("hall_groups") or {}).values()
+                    if isinstance(entry, dict) and entry.get("blocked_reason")
+                ),
             },
             "check_model": source.get("check_model", ""),
             "key_count": len(visible_entries), "keys": visible_entries,
@@ -1890,6 +1909,7 @@ class PoolSyncManager:
                     "session_affinity": False,
                     "check_model": "",
                     "disabled_key_ids": [],
+                    "hall_groups": {}, "hall_synced_at": 0,
                     "group_model_cache": {},
                     "group_model_rejections": {}, "group_model_rejection_routes": {},
                     "experience_source": {},

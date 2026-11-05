@@ -110,7 +110,7 @@ class KeyPoolPageTests(unittest.TestCase):
         )
         self.assertIn("platformCell=isManual?'':", self.html)
         self.assertIn("cacheCell=isManual?'':", self.html)
-        self.assertIn("colspan=\"${isManual?7:11}\"", self.html)
+        self.assertIn("colspan=\"${isManual?7:isHub?12:11}\"", self.html)
 
     def test_cache_hit_strategy_and_runtime_cells_are_wired(self):
         self.assertIn("['cache','缓存命中优先']", self.html)
@@ -198,7 +198,7 @@ class KeyPoolPageTests(unittest.TestCase):
         self.assertNotIn('一键删除失效 Key', self.html)
         self.assertNotIn('失效分组不能创建 Key', self.html)
         self.assertIn(
-            "function renderGroups(){const missing=groupCatalog.filter(g=>g.key_count===0).length",
+            "const missing=groupCatalog.filter(g=>g.key_count===0).length",
             self.html,
         )
         self.assertIn("clearKeys(ids)", self.html)
@@ -233,6 +233,25 @@ class KeyPoolPageTests(unittest.TestCase):
         self.assertIn("policyDrafts.delete(String(button.dataset.id))", self.html)
         self.assertIn("if(control)control.value=value", self.html)
         self.assertNotIn("control&&value!==''", self.html)
+
+    def test_aihub_columns_are_wired_and_helpers_defined(self):
+        # AIHub 专属列：有效倍率 / 降智模型，且旧“模型检测”列在 AIHub 下隐藏
+        self.assertIn("function isAIHub(source)", self.html)
+        self.assertIn("${isAIHub(s)?'<th>降智模型</th>':''}", self.html)
+        self.assertIn(
+            "sortHead(isAIHub(s)?'有效倍率':'倍率','rate',true)", self.html,
+        )
+        self.assertIn("isManual||isHub?'':", self.html)
+        self.assertIn("keyRows(s.keys||[],s.id,s.adapter==='manual',isAIHub(s))", self.html)
+        self.assertIn("function keyRows(keys,sourceId,isManual=false,isHub=false)", self.html)
+        # 引用的辅助函数必须真的有定义（曾因定义缺失导致页面报错）
+        for name in ("isAIHub", "effectiveMarkup", "hallHealthMarkup",
+                     "effMarkup", "cacheCell", "healthCell"):
+            self.assertIn(f"function {name}(", self.html)
+        # 分组目录中的 AIHub 指标列
+        self.assertIn("hubCols?'<th class=\"num\">有效倍率</th>", self.html)
+        self.assertIn("hall_unhealthy_models", self.html)
+        self.assertIn("effective_sort", self.html)
 
 
 if __name__ == "__main__":

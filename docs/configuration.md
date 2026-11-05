@@ -166,7 +166,7 @@ ROUTE_HEADERS=/ocg:x-opencode-session=<uuid>,originator=opencode;/tr:x-api-versi
 | `KEY_COOLDOWN_AUTH` | `1800` | key 遇到 401/403 后的基础熔断时间（秒） |
 | `KEY_COOLDOWN_MAX` | `3600` | 连续同类错误指数熔断的上限（秒），不截短 `Retry-After` |
 | `KEY_COOLDOWN_BACKOFF` | `true` | 同类错误连续发生时按 `1→2→4...` 倍延长熔断；成功后清零 |
-| `KEY_STICKY` | `120` | 成功 key 的分组粘性时间（秒）；“兼顾三者”使用不续期的固定窗口且窗口内仍允许单分组定时复测，其它策略沿用空闲续期；失败候选不建立窗口，当前 key 熔断时仍立即切换；`0` = 禁用 |
+| `KEY_STICKY` | `120` | 成功 key 的粘性时间（秒）。先满足策略、再满足粘性：策略选出候选集后，粘性只决定在其中复用哪个 key，不会把请求固定在策略已放弃的分组上；“兼顾三者”使用不续期的固定窗口且窗口内仍允许单分组定时复测，其余策略按成功请求续期。失败候选不建立窗口，当前 key 熔断时仍立即切换；`0` = 禁用 |
 | `KEY_POOL_WAIT_TIMEOUT` | `120` | 所有候选 key 均熔断时的最长等待时间（秒）；超时返回 503，`0` = 不限制 |
 | `KEY_TTFT_STALE_AFTER` | `300` | 真实首 Token 样本的有效期，以及复测失败后再次尝试的等待时间（秒） |
 | `KEY_TTFT_RETEST_INTERVAL` | `60` | “兼顾三者”轮转复测单个低倍率分组的最小间隔（秒） |
@@ -185,7 +185,8 @@ ROUTE_HEADERS=/ocg:x-opencode-session=<uuid>,originator=opencode;/tr:x-api-versi
 | `KEY_POOL_SYNC_URL` | `UPSTREAM_URL` | 管理页新增连接时预填的上游地址 |
 | `KEY_POOL_SYNC_INTERVAL` | `300` | 自动同步周期（秒）；`0` = 仅手动同步 |
 | `KEY_POOL_EXPERIENCE_TIMEOUT` | `60` | 外部经验数据接口的单次请求超时（秒）；超时后保留上次成功调度 |
-| `KEY_POOL_CREATE_DELAY` | `1.5` | 批量创建 key 时相邻请求的间隔（秒） |
+| `KEY_POOL_CREATE_DELAY` | `1.5` | 批量创建 key 的限流间隔（秒）；命中限流后指数退避并停止本轮 |
+| `KEY_POOL_DELETE_DELAY` | `1.0` | 批量删除 key（含同步自动删除）的限流间隔（秒）；命中限流后停止本轮 |
 | `KEY_POOL_SYNC_STATE_FILE` | `LOG_DIR/.key_pool_sync.json` | 同步连接、刷新令牌与最近成功号池的持久化文件 |
 | `KEY_POOL_SYNC_SECRET` | `ADMIN_PASSWORD` | 状态文件登录凭据和同步得到的完整上游 Key 的加密主密钥；留空时回退到 `ADMIN_PASSWORD`，两者均未设置则不加密（明文落盘，向后兼容） |
 

@@ -1,8 +1,8 @@
-import asyncio
 import fnmatch
 
 from ..config import logger
-from .base import PoolSyncAdapter, PoolSyncError, request_with_retry
+from .base import (PoolSyncAdapter, PoolSyncError, WriteThrottle, is_rate_limited,
+                   request_with_retry, write_delay)
 
 
 def _response_error_message(response):
@@ -526,15 +526,14 @@ class NewAPIAdapter(PoolSyncAdapter):
         if not targets:
             raise PoolSyncError("没有需要创建 Token 的分组")
         prefix = str((options or {}).get("name_prefix") or "").strip()[:30]
-        delay_seconds = max(0.0, min(float((options or {}).get("delay_seconds", 1.5)), 60.0))
+        throttle = WriteThrottle(write_delay(options))
         progress = (options or {}).get("_progress")
         if progress:
             await progress(0, len(targets), 0, 0)
         created = []
         errors = []
         for index, group in enumerate(targets):
-            if index:
-                await asyncio.sleep(delay_seconds)
+            await throttle.before()
             # Catalog names may be long descriptions. New API's Go len check
             # limits token names to 50 UTF-8 bytes, not Python characters.
             name = f"{prefix}-{group['id']}" if prefix else str(group["id"])
@@ -552,14 +551,26 @@ class NewAPIAdapter(PoolSyncAdapter):
                     "group_id": group["id"], "group_name": group["name"],
                     "key_id": None, "name": name,
                 })
+                throttle.on_success()
             except Exception as exc:
                 errors.append({
                     "group_id": group["id"], "group_name": group["name"],
                     "error": str(exc),
                 })
+                if is_rate_limited(exc):
+                    throttle.on_rate_limited()
+                    errors.append({
+                        "group_id": None, "group_name": None,
+                        "error": (f"上游限流，已停止创建；剩余 "
+                                  f"{len(targets) - index - 1} 个分组请稍后重试"),
+                    })
+                    if progress:
+                        await progress(index + 1, len(targets), len(created), len(errors))
+                    break
             if progress:
                 await progress(index + 1, len(targets), len(created), len(errors))
-        return session, {"created": created, "errors": errors, "requested": len(targets)}
+        return session, {"created": created, "errors": errors, "requested": len(targets),
+                         "throttled": throttle.rate_limited > 0}
 
     async def delete_keys(self, client, source, session, group_ids, options=None):
         selected = {str(group_id) for group_id in (group_ids or [])}
@@ -572,7 +583,9 @@ class NewAPIAdapter(PoolSyncAdapter):
                    and item.get("id") is not None]
         deleted = []
         errors = []
-        for item in targets:
+        throttle = WriteThrottle(write_delay(options))
+        for index, item in enumerate(targets):
+            await throttle.before()
             try:
                 session, _ = await self._request(
                     client, source, session, "DELETE", f"/api/token/{item['id']}",
@@ -581,12 +594,22 @@ class NewAPIAdapter(PoolSyncAdapter):
                     "key_id": item["id"], "group_id": _token_group(item, default_group),
                     "name": item.get("name", ""),
                 })
+                throttle.on_success()
             except Exception as exc:
                 errors.append({
                     "key_id": item["id"], "group_id": _token_group(item, default_group),
                     "name": item.get("name", ""), "error": str(exc),
                 })
-        return session, {"deleted": deleted, "errors": errors, "requested": len(targets)}
+                if is_rate_limited(exc):
+                    throttle.on_rate_limited()
+                    errors.append({
+                        "key_id": None, "group_id": None,
+                        "error": (f"上游限流，已停止清空；剩余 "
+                                  f"{len(targets) - index - 1} 个 Token 请稍后重试"),
+                    })
+                    break
+        return session, {"deleted": deleted, "errors": errors, "requested": len(targets),
+                         "throttled": throttle.rate_limited > 0}
 
     async def disconnect(self, client, source, session):
         if not session:
