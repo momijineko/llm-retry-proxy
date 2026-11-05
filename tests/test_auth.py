@@ -82,6 +82,40 @@ class AdminAuthTests(unittest.TestCase):
         self.assertEqual(raised.exception.headers["Location"], "/admin/login?next=/key-pools")
 
 
+class LoginPagePasswordManagerTests(unittest.TestCase):
+    """登录页需要同时提供 username/password 两个 autocomplete 字段。
+
+    只有密码框时，Edge 等浏览器的自动填充脚本拿不到用户名元素，会在扩展内部
+    抛 ``undefined.toLowerCase()``。这里锁定字段结构，避免回归。
+    """
+
+    def _page(self):
+        from retry_proxy.application import _login_page
+
+        with patch("retry_proxy.application.settings",
+                   SimpleNamespace(admin_password="secret", request_body_logging=False,
+                                   admin_cookie_secure=False)):
+            response = _login_page("/stats")
+        return response.body.decode("utf-8")
+
+    def test_login_form_exposes_username_and_password_autocomplete(self):
+        page = self._page()
+        self.assertIn('name="username"', page)
+        self.assertIn('autocomplete="username"', page)
+        self.assertIn('name="password"', page)
+        self.assertIn('autocomplete="current-password"', page)
+        self.assertIn('type="password"', page)
+
+    def test_username_field_is_hidden_from_view_and_tab_order(self):
+        page = self._page()
+        tag = next(part for part in page.split("<") if part.startswith('input id="username"'))
+        # 只用于满足密码管理器，不应占用可见布局或 Tab 焦点
+        self.assertIn('class="sr-only"', page)
+        self.assertIn("readonly", tag)
+        self.assertIn('tabindex="-1"', tag)
+        self.assertIn('aria-hidden="true"', tag)
+
+
 class ProxyPoolAuthTests(unittest.TestCase):
     def test_unconfigured_key_preserves_legacy_pool_access(self):
         with patch("retry_proxy.config.settings", SimpleNamespace(proxy_api_key="")):
