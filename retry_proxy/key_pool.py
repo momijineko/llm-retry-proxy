@@ -35,13 +35,18 @@ def _is_image_model(model):
 class KeyEntry:
     __slots__ = ("key", "key_id", "legacy_key_id", "label", "sort", "group_id", "group_name",
                  "models", "paths", "routing_capabilities", "auth_header", "auth_scheme",
+                 "effective_sort",
                  "cooldown_until", "total_fail",
                  "last_fail_ts", "consecutive_failures", "last_failure_kind", "last_failure_status",
                  "last_cooldown_s", "ttft_ewma", "ttft_samples", "ttft_last_ts",
                  "probe_latency_s", "probe_last_ts", "_retired")
     def __init__(self, key: str, label: str = "", models=(), paths=(), sort: str = "",
-                 group_id: str = "", group_name: str = "", routing_capabilities=None, auth=None):
+                 group_id: str = "", group_name: str = "", routing_capabilities=None, auth=None,
+                 effective_sort: str = ""):
         self.key, self.label, self.sort = key, label, sort.strip()
+        # 有效倍率：把缓存命中折算后的真实成本排序键。上游未提供时留空，
+        # 排序回退到名义 sort，保持与旧行为一致。
+        self.effective_sort = str(effective_sort or "").strip()
         self.group_id = str(group_id) if group_id not in (None, "") else ""
         self.group_name = group_name
         self.legacy_key_id = label if label else key[:8]
@@ -116,7 +121,11 @@ class KeyPool:
       _next_probe_at      -- 下次允许发起探针的时间戳
       _probe_reserved_until -- 探针预留窗口到期时间（探针期间阻止其它探针）
 
-    cost 策略仅使用 _current/_sticky_until/_failover_floor；其余字段在
+    选择顺序固定为“策略优先、粘性次之”：先由策略（cost 的 sort 排序、ttft
+    的最快 EWMA、balanced 的锚点 + 复测、cache 的 CH 下限）决定候选集，
+    再由 _prefer_sticky 在候选集内决定沿用哪个 key。粘性永远不会让策略
+    选中更差的分组；_failover_floor 是策略内部的本轮降级约束，成功后清除。
+    cost 策略额外使用 _current/_sticky_until/_failover_floor；其余字段在
     ttft/balanced 策略下由 record_ttft/mark_cooldown 驱动状态转移；cache
     策略按请求视图累计输入与缓存 Token，并在每次明确的 usage 后重新排序。
     """
@@ -158,17 +167,19 @@ class KeyPool:
         self.entries = unique
         invalid_sorts = set()
         def sort_key(entry):
-            if not entry.sort:
+            raw = getattr(entry, "effective_sort", "") or entry.sort
+            if not raw:
                 return 1, Decimal(0)
             try:
-                value = Decimal(entry.sort)
+                value = Decimal(raw)
                 if value.is_finite():
                     return 0, value
             except InvalidOperation:
                 pass
-            invalid_sorts.add(entry.sort)
+            invalid_sorts.add(raw)
             return 1, Decimal(0)
-        if any(entry.sort for entry in self.entries):
+        if any((getattr(entry, "effective_sort", "") or entry.sort)
+               for entry in self.entries):
             self.entries.sort(key=sort_key)
         for value in sorted(invalid_sorts):
             logger.warning(f"号池 sort={value!r} 不是有效数字，已保持在有效 sort 之后")
@@ -326,58 +337,54 @@ class KeyPool:
         route["last_used"] = now
         return route
 
-    def _pick_for_session(self, session_id, exclude_keys=None):
-        route = self._session_route(session_id)
-        now = time.time()
-        exclude_keys = exclude_keys or set()
-        if route["current"] is None and route["failover_floor"] is None:
-            return self.pick(exclude_keys=exclude_keys)
-        eligible = [
-            entry for entry in self.entries
-            if entry.key not in exclude_keys
-        ]
-        if route["failover_floor"] is not None:
-            eligible = [
-                entry for entry in self.entries
-                if entry.key not in exclude_keys
-                and self._sort_value(entry) >= route["failover_floor"]
-            ]
-        available = [entry for entry in eligible if entry.cooldown_until <= now]
-        current = route["current"]
-        if current is not None and current in available:
-            route["sticky_until"] = max(route["sticky_until"], now + settings.key_sticky)
-            return current
-        if not available:
-            return min(eligible, key=lambda entry: entry.cooldown_until) if eligible else None
-        return min(available, key=lambda entry: (self._sort_value(entry), self.entries.index(entry)))
+    def _prefer_sticky(self, candidates, route, now, renew=True):
+        """在策略已选定的候选集内沿用当前 key。
+
+        粘性只是策略内部的二级偏好：候选集为空、当前 key 不在候选集、
+        或粘性窗口已过期时，直接使用策略给出的首个候选。``renew=False``
+        只沿用窗口、不续期，“兼顾三者”的固定窗口依赖这个语义。
+        """
+        if not candidates:
+            return None
+        if route is not None:
+            sticky, until = route["current"], route["sticky_until"]
+        else:
+            sticky, until = self._current, self._sticky_until
+        if sticky is not None and sticky in candidates and now < until:
+            if renew:
+                if route is not None:
+                    route["sticky_until"] = now + settings.key_sticky
+                else:
+                    self._sticky_until = now + settings.key_sticky
+            return sticky
+        return candidates[0]
 
     def pick(self, session_id=None, exclude_keys=None):
         exclude_keys = exclude_keys or set()
-        if self.session_affinity and session_id:
-            return self._pick_for_session(session_id, exclude_keys)
+        route = (self._session_route(session_id)
+                 if self.session_affinity and session_id else None)
         now = time.time()
         eligible = [
             entry for entry in self._eligible_entries()
             if entry.key not in exclude_keys
         ]
+        floor = route["failover_floor"] if route is not None else self._failover_floor
+        if floor is not None:
+            eligible = [entry for entry in eligible
+                        if self._sort_value(entry) >= floor]
         available = [entry for entry in eligible if entry.cooldown_until <= now]
         if not available:
-            best = min(eligible, key=lambda e: e.cooldown_until) if eligible else None
-            return best
-        if self.strategy == "balanced":
-            selected_group = self._pick_group(available)
-            available = [entry for entry in available if self._group_key(entry) == selected_group]
-            return available[0]
-        if (self._current is not None and now < self._sticky_until
-                and self._current in available):
-            self._sticky_until = now + settings.key_sticky
-            return self._current
+            return min(eligible, key=lambda e: e.cooldown_until) if eligible else None
         if self.strategy == "cost":
-            # cost 策略直接按 sort 值选最便宜可用 key，无需按分组筛选
-            return available[0]
+            # 最低倍率优先：候选集就是全部可用 key（已按 sort 排序），
+            # 粘性只在其中保留当前 key，不会让更贵的 key 挡住更便宜的候选。
+            return self._prefer_sticky(available, route, now)
         selected_group = self._pick_group(available)
-        available = [entry for entry in available if self._group_key(entry) == selected_group]
-        return available[0]
+        candidates = [entry for entry in available
+                      if self._group_key(entry) == selected_group]
+        # “兼顾三者”的粘性窗口固定不续期，其它策略按空闲续期。
+        return self._prefer_sticky(candidates or available, route, now,
+                                   renew=self.strategy != "balanced")
 
     @staticmethod
     def _group_key(entry):
@@ -385,8 +392,11 @@ class KeyPool:
 
     @staticmethod
     def _sort_value(entry):
+        # 只有上游明确给出有效倍率时才用它排序（AIHub 会把缓存命中折算进成本）；
+        # 其它适配器保持名义倍率，避免改变既有行为。
+        raw = getattr(entry, "effective_sort", "") or entry.sort
         try:
-            value = Decimal(entry.sort)
+            value = Decimal(raw)
             return value if value.is_finite() else Decimal("Infinity")
         except InvalidOperation:
             return Decimal("Infinity")
@@ -1047,7 +1057,10 @@ class KeyPool:
         if group_key == self._active_probe_group:
             self._active_probe_group = None
             self._probe_reserved_until = 0.0
-        session_route = self._session_route(session_id) if self.session_affinity and session_id else None
+        session_route = (self._session_route(session_id)
+                         if self.session_affinity and session_id else None)
+        # 故障转移下限：当前候选失败后，本轮（到下一次成功为止）不再回头扫描
+        # 更便宜的候选；成功后清除。会话开启时按会话记录，否则全局共享。
         current = session_route["current"] if session_route is not None else self._current
         if current is not None:
             current_sort = self._sort_value(current)
@@ -1063,7 +1076,7 @@ class KeyPool:
                     session_route["failover_floor"] = current_sort
                 else:
                     self._failover_floor = current_sort
-        if session_route is None and self.strategy == "balanced" and group_key != self._balanced_group:
+        if self.strategy == "balanced" and group_key != self._balanced_group:
             metric = self._metric(group_key)
             metric["recovery_streak"] = 0
             metric["probe_reserved_until"] = 0.0
@@ -1106,16 +1119,8 @@ class KeyPool:
         entry.last_cooldown_s = 0.0
         now = time.time()
         group_key = self._group_key(entry)
-        if self.session_affinity and session_id:
-            route = self._session_route(session_id)
-            current = route["current"]
-            if (current is not None and self._sort_value(entry) < self._sort_value(current)
-                    and route["failover_floor"] is None):
-                return
-            route["current"] = entry
-            route["sticky_until"] = now + settings.key_sticky
-            route["failover_floor"] = None
-            return
+        route = (self._session_route(session_id)
+                 if self.session_affinity and session_id else None)
         if self.strategy == "balanced" and group_key == self._active_probe_group:
             return
         previous_group = self._group_key(self._current) if self._current is not None else None
@@ -1132,10 +1137,17 @@ class KeyPool:
             if previous_group is None:
                 self._probe_cursor_group = None
         self._failover_floor = None
+        # 会话路由只记下本次成功使用的 key/分组；分组选择始终由策略决定，
+        # 粘性只在策略选定的候选集内生效。
+        if route is not None:
+            route["current"] = entry
+            route["sticky_until"] = self._sticky_until
+            route["failover_floor"] = None
 
     def status(self):
         now = time.time()
         return [{"key_id": e.key_id, "legacy_key_id": e.legacy_key_id, "label": e.label, "sort": e.sort,
+                 "effective_sort": getattr(e, "effective_sort", ""),
                  "cooled": e.cooldown_until > now,
                  "cooldown_remaining": round(max(e.cooldown_until - now, 0), 1), "total_fail": e.total_fail,
                  "consecutive_failures": e.consecutive_failures, "last_failure_kind": e.last_failure_kind,
@@ -1257,6 +1269,7 @@ def clone_key_pool(pool: KeyPool) -> KeyPool:
             entry.key, entry.label, entry.models, entry.paths, entry.sort,
             entry.group_id, entry.group_name, entry.routing_capabilities,
             {"header": entry.auth_header, "scheme": entry.auth_scheme},
+            getattr(entry, "effective_sort", ""),
         )
         for field in _RUNTIME_FIELDS:
             setattr(copied, field, getattr(entry, field))
@@ -1299,6 +1312,8 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
         entry.key_id = fresh.key_id
         entry.label = fresh.label
         entry.sort = fresh.sort
+        # 有效倍率随大厅快照变化，遗漏热更新会让排序一直沿用旧值。
+        entry.effective_sort = fresh.effective_sort
         entry.models = fresh.models
         entry.paths = fresh.paths
         entry.group_id = fresh.group_id

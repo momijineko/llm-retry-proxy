@@ -238,6 +238,7 @@ class KeyPoolStickyTests(unittest.TestCase):
             KeyEntry("premium", "premium", sort="0.20", group_id="premium"),
         ]
         pool.finalize_entries()
+        pool.strategy = "cost"
         pool.session_affinity = True
 
         session_a = pool.pick("session-a")
@@ -250,9 +251,58 @@ class KeyPoolStickyTests(unittest.TestCase):
         pool.mark_cooldown(session_a, 30, status=503, session_id="session-a")
         self.assertEqual(pool.pick("session-a").group_id, "premium")
         self.assertEqual(pool.pick("session-b").group_id, "premium")
+        # 策略优先：更便宜的 key 恢复可用后，最低倍率优先会重新选中它，
+        # 会话粘性只在选出的候选内决定用哪个 key，不会把会话钉在贵分组。
         pool.mark_success(pool.entries[1], session_id="session-a")
         pool.mark_success(pool.entries[0], session_id="session-a")
-        self.assertEqual(pool.pick("session-a").group_id, "premium")
+        self.assertEqual(pool.pick("session-a").group_id, "cheap")
+
+    def test_balanced_strategy_ignores_session_affinity_and_keeps_group_ttft_priority(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("slow-cheap", "slow-cheap", sort="0.01", group_id="slow"),
+            KeyEntry("good", "good", sort="0.03", group_id="good"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 5
+        pool.session_affinity = True
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60,
+                                        key_ttft_hysteresis=0.1,
+                                        key_ttft_confirmations=2)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings):
+            selected = pool.pick("session-a")
+            self.assertEqual(selected.group_id, "slow")
+            pool.mark_success(selected, session_id="session-a")
+            pool.record_ttft(selected, 5.6)
+            self.assertEqual(pool.pick("session-a").group_id, "slow")
+            pool.record_ttft(selected, 5.7)
+            upgraded = pool.pick("session-a")
+            self.assertEqual(upgraded.group_id, "good")
+            pool.mark_success(upgraded, session_id="session-a")
+            self.assertEqual(pool.pick("session-a").group_id, "good")
+
+    def test_ttft_strategy_ignores_session_affinity_and_picks_fastest_group(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("slow-cheap", "slow-cheap", sort="0.01", group_id="slow"),
+            KeyEntry("fast", "fast", sort="0.10", group_id="fast"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "ttft"
+        pool.session_affinity = True
+        fake_settings = SimpleNamespace(key_sticky=120, key_ttft_stale_after=300,
+                                        key_ttft_retest_interval=60)
+
+        with patch("retry_proxy.key_pool.settings", fake_settings):
+            selected = pool.pick("session-a")
+            self.assertEqual(selected.group_id, "slow")
+            pool.mark_success(selected, session_id="session-a")
+            pool.record_ttft(pool.entries[0], 12.0)
+            pool.record_ttft(pool.entries[1], 2.0)
+            self.assertEqual(pool.pick("session-a").group_id, "fast")
 
     def test_ttft_strategy_selects_fastest_group(self):
         pool = KeyPool([])
@@ -914,6 +964,24 @@ class KeyPoolStickyTests(unittest.TestCase):
         self.assertEqual(current.entries[0].last_failure_status, 429)
         self.assertIs(current._current, current.entries[0])
         self.assertEqual(current._sticky_until, 300)
+
+    def test_live_replacement_refreshes_effective_sort(self):
+        previous = KeyPool([])
+        previous.entries = [
+            KeyEntry("same", "same", sort="0.10", group_id="g", effective_sort="0.09"),
+        ]
+        previous.finalize_entries()
+        pools = {"https://upstream.test": previous}
+
+        replacement = KeyPool([])
+        replacement.entries = [
+            KeyEntry("same", "same", sort="0.10", group_id="g", effective_sort="0.02"),
+        ]
+        replacement.finalize_entries()
+        replace_key_pool("https://upstream.test", replacement, pools)
+
+        # 有效倍率来自大厅快照，热更新必须跟着刷新，否则排序会一直用旧值。
+        self.assertEqual(pools["https://upstream.test"].entries[0].effective_sort, "0.02")
 
     def test_inflight_failure_after_replacement_updates_the_live_pool(self):
         previous = KeyPool([("same", "old")])
@@ -1651,7 +1719,7 @@ class KeyPoolCooldownWaitTests(unittest.IsolatedAsyncioTestCase):
 
         async def worker(session_id: str):
             for _ in range(50):
-                entry = pool._pick_for_session(session_id)
+                entry = pool.pick(session_id=session_id)
                 self.assertIsNotNone(entry)
                 await asyncio.sleep(0.001)
 
