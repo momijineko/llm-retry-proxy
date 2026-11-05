@@ -4,7 +4,7 @@ from unittest.mock import patch
 import httpx
 
 from retry_proxy.sync_adapters import ADAPTERS, PoolSyncError
-from retry_proxy.sync_adapters.aihub import (AIHubAdapter, DEFAULT_CACHE_DISCOUNT,
+from retry_proxy.sync_adapters.aihub import (AIHubAdapter,
                                              DEFAULT_REFERENCE_CACHE_HIT_RATE,
                                              DETECTION_FAILED_STATUSES,
                                              effective_multiplier, hall_entry,
