@@ -31,7 +31,7 @@
 | `TRUSTED_PROXY_IPS` | `127.0.0.0/8,::1,172.16.0.0/12` | 可信反向代理的直连 IP 或 CIDR；默认覆盖本机及 Docker 172.x 网络 |
 | `IP_AUTO_BAN_THRESHOLD` | `20` | 滑动窗口内访问不同路径达到该数量时动态封禁；`0` = 关闭 |
 | `IP_AUTO_BAN_WINDOW` | `10` | 动态封禁检测窗口（秒） |
-| `IP_AUTO_BAN_DURATION` | `0` | 动态封禁持续时间（秒）；`0` = 永久封禁 |
+| `IP_AUTO_BAN_DURATION` | `3600` | 动态封禁持续时间（秒）；默认 1 小时后自动解除；`0` = 永久封禁 |
 | `IP_AUTO_BAN_EXEMPT` | `127.0.0.0/8,::1` | 不参与动态封禁的 IP/CIDR；不覆盖静态黑名单 |
 | `IP_BAN_STATE_FILE` | `LOG_DIR/.ip_bans.json` | 动态封禁状态文件，保证重启后封禁继续有效 |
 | `PROVIDER_ALIASES` | 空 | 统计 provider 显示别名，格式为 `from:to,from:to`；不会改变实际路由 |
@@ -44,10 +44,14 @@ IP_BLACKLIST=152.32.129.213,198.51.100.0/24
 
 黑名单在路由匹配和读取请求体之前执行，命中后 HTTP 返回 `403`，WebSocket
 以策略违规代码 `1008` 关闭，不会访问上游，也不会为每次被拒请求写日志。
-动态封禁默认检测同一 IP 在 10 秒内访问 20 个不同路径的 URL 扫描并永久封禁；重复请求
-同一路径不累计。触发时只写一条不含请求路径的动态封禁审计日志，之后的请求
-保持静默。将 `IP_AUTO_BAN_DURATION` 设置为正数可改为到期自动解除。状态文件仅保存
-IP 和到期时间（永久封禁使用 `0`），不保存扫描路径。
+动态封禁默认检测同一 IP 在 10 秒内访问 20 个不同路径的 URL 扫描并临时封禁
+1 小时；重复请求同一路径不累计，且同名 API 端点在任意上游前缀下只计一次
+（例如 `/<前缀>/v1/models` 与 `/<前缀>/v1/sub2api/billing`），因此正常的号池探测
+不会被误封。触发时只写一条不含请求路径的动态封禁审计日志，之后的请求
+保持静默。将 `IP_AUTO_BAN_DURATION` 设为 `0` 改为永久封禁。状态文件仅保存
+IP 和到期时间，不保存扫描路径。需要提前解除封禁时，用管理端鉴权调用
+`GET /admin/ip-bans` 查看、`POST /admin/ip-bans/unban`（`{"ips": [...]}`，
+空数组表示全部）解除，无需重启。
 
 默认可信范围适用于本机 Nginx/Caddy 以及 Docker 172.x 代理网络。若服务不经过
 反向代理直接暴露公网，可将 `TRUSTED_PROXY_IPS` 设为空；使用其它容器网段或 CDN
@@ -170,8 +174,9 @@ ROUTE_HEADERS=/ocg:x-opencode-session=<uuid>,originator=opencode;/tr:x-api-versi
 | `KEY_POOL_WAIT_TIMEOUT` | `120` | 所有候选 key 均熔断时的最长等待时间（秒）；超时返回 503，`0` = 不限制 |
 | `KEY_TTFT_STALE_AFTER` | `300` | 真实首 Token 样本的有效期，以及复测失败后再次尝试的等待时间（秒） |
 | `KEY_TTFT_RETEST_INTERVAL` | `60` | “兼顾三者”轮转复测单个低倍率分组的最小间隔（秒） |
-| `KEY_TTFT_CONFIRMATIONS` | `2` | 当前分组升级前要求的连续慢样本数；低倍率恢复探测达到恢复线后立即切换 |
+| `KEY_TTFT_CONFIRMATIONS` | `2` | 当前分组升级前要求的连续慢样本数；升级目标必须已有实测更快的首 Token，低倍率恢复探测达到恢复线后立即切换 |
 | `KEY_TTFT_HYSTERESIS` | `0.1` | 切换滞回比例；目标 5 秒、值为 0.1 时，超过 5.5 秒升级，低于 4.5 秒降回 |
+| `KEY_CACHE_TIER_TOLERANCE` | `0.2` | “兼顾三者”按缓存命中率筛选时允许放宽的成本带比例；当前档 `0.12`、容差 `0.2` 时可在 `0.12~0.144` 内挑命中率达标的分组；`0` = 只比较倍率完全相同的分组 |
 | `KEY_CACHE_MISS_THRESHOLD` | `3` | 同一 Responses 会话在同一“端点类型 + 模型 + 分组”连续多少次符合条件的响应无缓存后熔断整个分组；`0` = 禁用 |
 | `KEY_CACHE_HIT_CONFIRMATIONS` | `3` | 缓存命中下限策略连续多少次低于下限后才切换分组；中间命中达标会清零；最小为 `1` |
 | `KEY_CACHE_MISS_MIN_INPUT_TOKENS` | `1024` | 计入连续无缓存判定的最小输入 token 数，短请求不会误触发 |

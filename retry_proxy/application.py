@@ -212,8 +212,20 @@ app = FastAPI(
 )
 if not settings.api_docs_enabled:
     _register_disabled_api_docs(app)
+
+
+class TrackedIPBlocklist(IPBlocklistMiddleware):
+    """保留活动实例，供管理端点列出/解除动态封禁。"""
+
+    instance = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        TrackedIPBlocklist.instance = self
+
+
 app.add_middleware(
-    IPBlocklistMiddleware,
+    TrackedIPBlocklist,
     blacklist=settings.ip_blacklist,
     trusted_proxies=settings.trusted_proxy_ips,
     auto_ban_threshold=settings.ip_auto_ban_threshold,
@@ -389,6 +401,46 @@ def _effective_value(item) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+async def ip_bans_get():
+    """列出当前动态封禁（静态黑名单不在此列）。"""
+    middleware = TrackedIPBlocklist.instance
+    bans = middleware.active_bans() if middleware is not None else {}
+    now = time.time()
+    return {
+        "bans": [
+            {
+                "ip": ip,
+                "expires_at": expires_at,
+                "permanent": expires_at == 0,
+                "remaining_s": 0 if expires_at == 0 else round(max(expires_at - now, 0), 1),
+            }
+            for ip, expires_at in bans.items()
+        ],
+        "threshold": settings.ip_auto_ban_threshold,
+        "window_s": settings.ip_auto_ban_window,
+        "duration_s": settings.ip_auto_ban_duration,
+        "state_file": settings.ip_ban_state_file,
+    }
+
+
+async def ip_bans_unban(request: Request):
+    """解除动态封禁；``ips`` 为空时清空全部。"""
+    body = await _json_object(request, allow_empty=True)
+    ips = body.get("ips")
+    if ips is not None and not isinstance(ips, list):
+        raise HTTPException(status_code=400, detail="ips 必须是数组")
+    middleware = TrackedIPBlocklist.instance
+    if middleware is None:
+        raise HTTPException(status_code=503, detail="动态封禁中间件未就绪")
+    try:
+        removed = middleware.unban(ips or [])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if removed:
+        logger.warning(f"动态封禁已手动解除: {', '.join(removed)}")
+    return {"removed": removed, **await ip_bans_get()}
 
 
 async def settings_get():
@@ -840,6 +892,8 @@ app.add_api_route("/admin/key-pools/api/key-state", key_pools_key_state, methods
 app.add_api_route("/admin/key-pools/api/manual-add", key_pools_manual_add, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/manual-remove", key_pools_manual_remove, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/admin/key-pools/api/manual-update", key_pools_manual_update, methods=["POST"], dependencies=admin_dependencies)
+app.add_api_route("/admin/ip-bans", ip_bans_get, methods=["GET"], dependencies=admin_dependencies)
+app.add_api_route("/admin/ip-bans/unban", ip_bans_unban, methods=["POST"], dependencies=admin_dependencies)
 app.add_api_route("/stats", stats_page, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/stats/api", stats_api, methods=["GET"], dependencies=admin_dependencies)
 app.add_api_route("/requests", requests_page, methods=["GET"], dependencies=admin_dependencies)

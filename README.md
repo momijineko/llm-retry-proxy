@@ -106,7 +106,7 @@ docker compose -f compose.yaml -f compose.legacy.yaml up -d --build
 | `TRUSTED_PROXY_IPS` | 本机与 Docker 172.x | 允许提供真实客户端 IP 转发头的反向代理 IP/CIDR |
 | `IP_AUTO_BAN_THRESHOLD` | `20` | 检测窗口内访问不同路径达到该数量时自动封禁；`0` 关闭 |
 | `IP_AUTO_BAN_WINDOW` | `10` | 动态封禁检测窗口（秒） |
-| `IP_AUTO_BAN_DURATION` | `0` | 动态封禁持续时间；`0` 表示永久封禁 |
+| `IP_AUTO_BAN_DURATION` | `3600` | 动态封禁持续时间（秒），到期自动解除；`0` 表示永久封禁 |
 | `IP_AUTO_BAN_EXEMPT` | `127.0.0.0/8,::1` | 不参与动态封禁的 IP/CIDR；静态黑名单仍优先 |
 | `IP_BAN_STATE_FILE` | `LOG_DIR/.ip_bans.json` | 动态封禁状态文件，保证重启后封禁继续有效 |
 | `UVICORN_LOOP` | `auto` | Uvicorn 事件循环；旧环境模板设为 `asyncio` |

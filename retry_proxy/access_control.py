@@ -78,6 +78,14 @@ def resolve_client_ip(scope, trusted_proxies=()):
 
 
 class IPBlocklistMiddleware:
+    """静态黑名单 + 基于“不同路径数”的动态封禁中间件。
+
+    动态封禁原本把任何不同路径都计入扫描计数，而正常的号池探测会把
+    ``/<前缀>/v1/models``、``/<前缀>/v1/sub2api/billing`` 等一批路径在
+    几秒内打完，于是被误判为 URL 扫描并永久封禁。因此这里改用
+    :meth:`_counted_path` 归一化：代理 API 路径与已知页面共用一个计数键，
+    真正像扫描的路径（``/.env``、``/wp-admin`` 等）才逐个累计。
+    """
     _MAX_TRACKED_CLIENTS = 10000
     _MAX_PERSISTED_BANS = 100000
 
@@ -105,6 +113,48 @@ class IPBlocklistMiddleware:
         if self.auto_ban_duration < 0:
             raise ValueError("IP_AUTO_BAN_DURATION 不能小于 0")
         self._load_bans()
+
+    # 代理 API 端点尾段：不同上游前缀共用同一个计数键。号池探测会在一两秒内
+    # 依次访问多个前缀下的 /v1/models、/v1/sub2api/billing，逐个路径计数会把
+    # 合法探测误判为 URL 扫描（曾导致永久封禁正常客户端）。
+    # 按长度降序匹配，否则 ``chat/completions`` 会先命中 ``completions``，
+    # 集合迭代顺序不稳定时同一路径会得到不同计数键。
+    _SHARED_ENDPOINTS = (
+        "audio/transcriptions", "audio/translations", "images/generations",
+        "images/variations", "chat/completions", "images/edits",
+        "sub2api/billing", "audio/speech", "moderations", "embeddings",
+        "completions", "responses", "messages", "realtime", "uploads",
+        "batches", "models", "files",
+    )
+    # 正常页面/资源不计入扫描路径数。
+    _IGNORED_PATHS = frozenset({
+        "", "health", "stats", "stats/api", "logs", "logs/api",
+        "logs/stream", "key-pools", "settings", "requests", "requests/api",
+        "admin/login", "admin/logout", "admin/settings", "favicon.ico",
+    })
+    _VERSION_PREFIX = re.compile(r"^v\d+(?:beta\d*|alpha\d*)?/")
+
+    @classmethod
+    def _counted_path(cls, path):
+        """把一次访问归一化成扫描计数的键；``None`` 表示不计入。
+
+        只看路径尾段的 API 端点名，因此 ``/aihub/v1/models`` 与
+        ``/ocg/v1/models`` 归一为同一个键；未知路径（如 ``/.env``、
+        ``/wp-admin/x.php``）保持完整路径，仍然逐个累计。
+        """
+        normalized = (path or "").strip("/").lower()
+        if normalized in cls._IGNORED_PATHS:
+            return None
+        if normalized.startswith("admin/assets/"):
+            return None
+        stripped = cls._VERSION_PREFIX.sub("", normalized)
+        for endpoint in cls._SHARED_ENDPOINTS:
+            if stripped == endpoint or stripped.endswith("/" + endpoint):
+                return endpoint
+        head = stripped.split("/", 1)[0]
+        if head in cls._SHARED_ENDPOINTS:
+            return head
+        return normalized
 
     def _load_bans(self):
         if not self.state_file:
@@ -176,6 +226,10 @@ class IPBlocklistMiddleware:
         return False
 
     def _observe_path_locked(self, client_ip, path, now):
+        counted = self._counted_path(path)
+        if counted is None:
+            # 正常页面/静态资源不计入扫描计数；API 路径已归一为同一计数键。
+            return False
         paths = self._activity.get(client_ip)
         if paths is None:
             paths = {}
@@ -187,7 +241,7 @@ class IPBlocklistMiddleware:
         for old_path, last_seen in list(paths.items()):
             if last_seen <= cutoff:
                 del paths[old_path]
-        paths[path] = now
+        paths[counted] = now
 
         while len(self._activity) > self._MAX_TRACKED_CLIENTS:
             self._activity.popitem(last=False)
@@ -206,6 +260,35 @@ class IPBlocklistMiddleware:
             del self._bans[oldest]
         self._save_bans_locked()
         return True
+
+    def active_bans(self, now=None):
+        """Return current dynamic bans as ``{ip: expires_at}`` (0 = permanent)."""
+        now = self._clock() if now is None else now
+        with self._lock:
+            return {
+                ip: expiry for ip, expiry in sorted(self._bans.items())
+                if expiry == 0 or expiry > now
+            }
+
+    def unban(self, addresses=()):
+        """Remove dynamic bans; empty input clears every ban.
+
+        Returns the IPs that were actually removed so callers can report them.
+        """
+        targets = {str(value).strip() for value in addresses if str(value).strip()}
+        removed = []
+        with self._lock:
+            for ip in list(self._bans):
+                if targets and ip not in targets:
+                    continue
+                del self._bans[ip]
+                removed.append(ip)
+            for ip in list(self._activity):
+                if not targets or ip in targets:
+                    del self._activity[ip]
+            if removed:
+                self._save_bans_locked()
+        return sorted(removed)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):

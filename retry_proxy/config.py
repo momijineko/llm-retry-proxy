@@ -182,7 +182,7 @@ class Settings:
     )
     ip_auto_ban_threshold: int = int(os.getenv("IP_AUTO_BAN_THRESHOLD", "20"))
     ip_auto_ban_window: float = float(os.getenv("IP_AUTO_BAN_WINDOW", "10"))
-    ip_auto_ban_duration: float = float(os.getenv("IP_AUTO_BAN_DURATION", "0"))
+    ip_auto_ban_duration: float = float(os.getenv("IP_AUTO_BAN_DURATION", "3600"))
     ip_auto_ban_exempt: tuple = parse_ip_networks(
         os.getenv("IP_AUTO_BAN_EXEMPT", "127.0.0.0/8,::1"), "IP_AUTO_BAN_EXEMPT",
     )
@@ -203,6 +203,9 @@ class Settings:
     key_ttft_retest_interval: float = float(os.getenv("KEY_TTFT_RETEST_INTERVAL", "60"))
     key_ttft_confirmations: int = int(os.getenv("KEY_TTFT_CONFIRMATIONS", "2"))
     key_ttft_hysteresis: float = float(os.getenv("KEY_TTFT_HYSTERESIS", "0.1"))
+    key_cache_tier_tolerance: float = float(
+        os.getenv("KEY_CACHE_TIER_TOLERANCE", "0.2")
+    )
     key_cache_miss_threshold: int = int(os.getenv("KEY_CACHE_MISS_THRESHOLD", "3"))
     key_cache_hit_confirmations: int = int(os.getenv("KEY_CACHE_HIT_CONFIRMATIONS", "3"))
     key_cache_miss_min_input_tokens: int = int(os.getenv("KEY_CACHE_MISS_MIN_INPUT_TOKENS", "1024"))
@@ -338,6 +341,7 @@ HOT_PARSERS = {
     "KEY_TTFT_RETEST_INTERVAL": ("key_ttft_retest_interval", float),
     "KEY_TTFT_CONFIRMATIONS": ("key_ttft_confirmations", int),
     "KEY_TTFT_HYSTERESIS": ("key_ttft_hysteresis", float),
+    "KEY_CACHE_TIER_TOLERANCE": ("key_cache_tier_tolerance", float),
     "KEY_CACHE_MISS_THRESHOLD": ("key_cache_miss_threshold", int),
     "KEY_CACHE_HIT_CONFIRMATIONS": ("key_cache_hit_confirmations", int),
     "KEY_CACHE_MISS_MIN_INPUT_TOKENS": ("key_cache_miss_min_input_tokens", int),
