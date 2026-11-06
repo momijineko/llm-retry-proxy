@@ -111,7 +111,10 @@ class Sub2APIAdapter(PoolSyncAdapter):
         endpoints = {
             "openai": {"chat", "responses", "embeddings", "audio", "realtime"},
             "anthropic": {"messages"},
-            "gemini": {"gemini"},
+            # Gemini 分组同时提供原生 Gemini 与 OpenAI 兼容 Chat Completions；
+            # 上游对 Responses 明确返回 404（Responses API is not supported
+            # for Gemini groups），因此不登记 responses。
+            "gemini": {"gemini", "chat"},
             "antigravity": {"chat", "messages", "gemini"},
             "grok": {"chat", "responses"},
             # Composite groups resolve the target platform per model, so all

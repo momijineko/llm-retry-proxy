@@ -439,6 +439,14 @@ class Sub2APIAdapterTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(Sub2APIAdapter.routing_capabilities({"platform": ""}), {})
 
+    def test_gemini_platform_accepts_openai_chat_but_not_responses(self):
+        # 上游 Gemini 分组提供 OpenAI 兼容 Chat Completions，但明确拒绝
+        # Responses，因此只登记 chat 与原生 gemini。
+        capabilities = Sub2APIAdapter.routing_capabilities({"platform": "gemini"})
+
+        self.assertEqual(capabilities["endpoint_families"], ["chat", "gemini"])
+        self.assertNotIn("responses", capabilities["endpoint_families"])
+
     def test_composite_platform_supports_shared_text_protocols(self):
         capabilities = Sub2APIAdapter.routing_capabilities({"platform": "composite"})
 
