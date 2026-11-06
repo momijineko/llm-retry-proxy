@@ -26,6 +26,10 @@ _RUNTIME_FIELDS = (
 KEY_POOL_STRATEGIES = {"cost", "ttft", "balanced", "cache"}
 _SESSION_ROUTE_LIMIT = 10000
 _SESSION_ROUTE_IDLE = 3600.0
+# 请求视图按“候选 Key 集合 + 端点/模型”缓存。号池每次同步都可能增删 Key，
+# 集合一变就是新签名；旧视图没有调用方之后必须淘汰，否则长期运行会持续增长。
+# 模型名完全由调用方决定，因此还需要上限与空闲过期兜底。
+_VIEW_LIMIT = 256
 
 
 def _is_image_model(model):
@@ -152,6 +156,7 @@ class KeyPool:
         self._probe_reserved_until = 0.0
         self._active_probe_group = None
         self._view_entry_ids = ()
+        self._view_signature = None
         self._workload = ("other", "*")
         self.finalize_entries()
 
@@ -285,33 +290,68 @@ class KeyPool:
             selected = matched or [entry for entry in candidates if not entry.models and not entry.paths]
         if not selected:
             return None
-        entry_ids = tuple(id(entry) for entry in selected)
         workload = (endpoint_family or "other", model or "*")
+        entry_ids = tuple(id(entry) for entry in selected)
         signature = (entry_ids, workload)
-        if signature not in self._views:
-            view = KeyPool([], self.provider)
-            view.entries = selected
-            view.strategy = self.strategy
-            view.target_ttft_s = self.target_ttft_s
-            view.target_cache_hit_rate = self.target_cache_hit_rate
-            view.external_retest_weight = self.external_retest_weight
-            view.external_ttft_prior_strength = self.external_ttft_prior_strength
-            view.session_affinity = self.session_affinity
-            view.prior_metrics = self.prior_metrics
-            view._view_entry_ids = entry_ids
-            view._workload = workload
+        view = self._views.get(signature)
+        if view is None:
+            # 同一个端点/模型只有一个活动视图：候选集合变化（同步增删 Key、
+            # 模型拒绝）时沿用旧视图的调度状态，否则每一次同步都会把首 Token
+            # 学习、粘性与“兼顾三者”的档位全部清零，退化成纯倍率轮询。
+            view = self._adopt_view(workload, selected)
             self._views[signature] = view
-        else:
-            self._views[signature].strategy = self.strategy
-            self._views[signature].target_ttft_s = self.target_ttft_s
-            self._views[signature].target_cache_hit_rate = self.target_cache_hit_rate
-            self._views[signature].external_retest_weight = self.external_retest_weight
-            self._views[signature].external_ttft_prior_strength = self.external_ttft_prior_strength
-            self._views[signature].session_affinity = self.session_affinity
-            self._views[signature].prior_metrics = self.prior_metrics
+        view.entries = selected
+        view._view_entry_ids = entry_ids
+        view._view_signature = signature
+        view.strategy = self.strategy
+        view.target_ttft_s = self.target_ttft_s
+        view.target_cache_hit_rate = self.target_cache_hit_rate
+        view.external_retest_weight = self.external_retest_weight
+        view.external_ttft_prior_strength = self.external_ttft_prior_strength
+        view.session_affinity = self.session_affinity
+        view.prior_metrics = self.prior_metrics
+        self._prune_views()
         self._view_access_sequence += 1
-        self._views[signature]._last_view_access = self._view_access_sequence
-        return self._views[signature]
+        view._last_view_access = self._view_access_sequence
+        return view
+
+    def _adopt_view(self, workload, selected):
+        """为新的候选集合挑一个可继承的视图。
+
+        与旧视图共享同一个对象，只把 entries 换成新候选集，因此同一 workload
+        的首 Token 样本、粘性当前分组、“兼顾三者”的档位与探测游标都会延续。
+        同一 workload 只保留一个活动视图，旧签名会被 :meth:`_prune_views` 清掉。
+        """
+        candidate = None
+        for view in self._views.values():
+            if view._workload != workload:
+                continue
+            if (candidate is None
+                    or view._last_view_access > candidate._last_view_access):
+                candidate = view
+        if candidate is not None:
+            return candidate
+        view = KeyPool([], self.provider)
+        view.entries = selected
+        view._workload = workload
+        return view
+
+    def _prune_views(self):
+        """淘汰已经被替换的旧签名，并限制模型名带来的无界增长。"""
+        live = {
+            signature for signature, view in self._views.items()
+            if view._view_signature == signature
+        }
+        for signature in [key for key in self._views if key not in live]:
+            self._views.pop(signature, None)
+        if len(self._views) <= _VIEW_LIMIT:
+            return
+        # 模型名由调用方自由填写，长时间运行会持续累积；按最近访问时间淘汰。
+        overflow = len(self._views) - _VIEW_LIMIT
+        for signature, _view in sorted(
+                self._views.items(), key=lambda item: item[1]._last_view_access,
+        )[:overflow]:
+            self._views.pop(signature, None)
 
     def _session_route(self, session_id):
         now = time.time()
@@ -633,6 +673,13 @@ class KeyPool:
         )[0]
 
     def _cache_choice_in_tier(self, groups, group_key):
+        """在“当前分组所在成本带”内按缓存命中率再选一次。
+
+        以前只比较倍率完全相等的分组，而按 sort 精确分档通常只包含 1~3 个
+        分组，缓存命中率更高的分组常常落在相邻档位，导致「可接受缓存命中下限」
+        几乎失效。现改为：同档优先，同档没有已知命中率时放宽到
+        ``sort <= 当前档 * (1 + key_cache_tier_tolerance)`` 的成本带内选择。
+        """
         target = groups.get(group_key)
         if target is None:
             return group_key
@@ -640,7 +687,41 @@ class KeyPool:
             key: item for key, item in groups.items()
             if item["sort"] == target["sort"]
         }
-        return self._cache_group_choice(tier)
+        if any(item["cache_hit_rate"] is not None for item in tier.values()):
+            return self._cache_group_choice(tier)
+        try:
+            tolerance = max(float(self._setting("key_cache_tier_tolerance", 0.2)), 0.0)
+        except (TypeError, ValueError):
+            tolerance = 0.2
+        if tolerance <= 0:
+            return self._cache_group_choice(tier)
+        ceiling = target["sort"] * Decimal(str(1 + tolerance))
+        band = {
+            key: item for key, item in groups.items()
+            if target["sort"] <= item["sort"] <= ceiling
+        }
+        known = [
+            item for item in band.values() if item["cache_hit_rate"] is not None
+        ]
+        if not known:
+            return self._cache_group_choice(tier)
+        if not any(item["cache_hit_rate"] >= self.target_cache_hit_rate
+                   for item in known):
+            return self._cache_group_choice(tier)
+        return self._cache_group_choice(band)
+
+    def _upgrade_candidate_is_faster(self, candidate, current):
+        """倍率更高但首 Token 没有实测更快的分组不是升级目标。
+
+        没有样本时保留旧行为（允许尝试），有样本且不比当前分组快则跳过；
+        当前分组自己也没有样本时也只能允许尝试，否则永远无法建立基线。
+        """
+        if candidate.get("ttft") is None:
+            return True
+        current_ttft = current.get("ttft") if current is not None else None
+        if current_ttft is None:
+            return True
+        return candidate["ttft"] < current_ttft
 
     def record_ttft(self, entry, seconds, alpha=0.3):
         if entry is None or seconds < 0 or getattr(entry, "_retired", False):
@@ -694,9 +775,13 @@ class KeyPool:
                         if candidate.cooldown_until <= now
                     ])
                     current = groups.get(group_key)
+                    # 升级目标必须是已知更快的分组。上游整体首 Token 都在目标值
+                    # 之上时（例如目标 10s、实测 30s+），按“更贵就升级”会让每次
+                    # 请求都往倍率更高、但并不更快的分组漂移。
                     more_expensive = sorted(
                         ((key, item) for key, item in groups.items()
-                         if current is not None and item["sort"] > current["sort"]),
+                         if current is not None and item["sort"] > current["sort"]
+                         and self._upgrade_candidate_is_faster(item, current)),
                         key=lambda pair: (pair[1]["sort"], pair[1]["index"]),
                     )
                     if more_expensive:
@@ -704,6 +789,10 @@ class KeyPool:
                         metric["recovery_streak"] = 0
                         metric["next_probe_at"] = now + stale_wait
                         self._balanced_group = more_expensive[0][0]
+                    else:
+                        # 没有更快的更贵分组时不再升级，并重新开始计时，
+                        # 避免 slow_streak 一直累积到上限。
+                        metric["slow_streak"] = 0
             else:
                 current_groups = self._group_metrics(self.entries)
                 current = current_groups.get(self._balanced_group)
@@ -1343,11 +1432,21 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
         previous._sticky_until = 0.0
 
     live_entry_ids = {id(entry) for entry in merged}
-    previous._views = {
-        signature: view for signature, view in previous._views.items()
-        if all(entry_id in live_entry_ids for entry_id in view._view_entry_ids)
-    }
-    for view in previous._views.values():
+    retained_views = {}
+    for signature, view in previous._views.items():
+        # 视图里可能有已下线的 Key：从 entries 里剔掉，而不是丢掉整个视图，
+        # 否则每删一个 Key 都会让该端点/模型的首 Token 学习归零。
+        view.entries = [
+            entry for entry in view.entries if id(entry) in live_entry_ids
+        ]
+        view._view_entry_ids = tuple(
+            entry_id for entry_id in signature[0] if entry_id in live_entry_ids
+        )
+        if not view._view_entry_ids:
+            continue
+        retained_views[(view._view_entry_ids, signature[1])] = view
+    previous._views = retained_views
+    for signature, view in previous._views.items():
         view.provider = replacement.provider
         view.strategy = replacement.strategy
         view.target_ttft_s = replacement.target_ttft_s
@@ -1355,6 +1454,8 @@ def replace_key_pool(url: str, replacement: KeyPool, pools=None):
         view.external_retest_weight = replacement.external_retest_weight
         view.external_ttft_prior_strength = replacement.external_ttft_prior_strength
         view.prior_metrics = previous.prior_metrics
+        # 候选列表可能已经变化，同步刷新签名以便下一次 for_request 直接命中。
+        view._view_signature = signature
 
     pools[url] = previous
     return previous

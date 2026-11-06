@@ -9,7 +9,8 @@ import httpx
 from retry_proxy.api import (classify_endpoint, classify_model_scope,
                              is_model_rejection_response, parse_request_model,
                              parse_request_session_id)
-from retry_proxy.key_pool import KeyEntry, KeyPool, headers_with_key, replace_key_pool
+from retry_proxy.key_pool import (KeyEntry, KeyPool, _VIEW_LIMIT, headers_with_key,
+                                  replace_key_pool)
 from retry_proxy.retry import (KeyPoolWaitTimeout, RetryProxy, _key_available_for_status,
                                _key_failure_policy, _mark_key_failure, _pick_key,
                                _select_key_failure_status)
@@ -457,6 +458,109 @@ class KeyPoolStickyTests(unittest.TestCase):
 
         self.assertEqual(pool.pick().group_id, "warm")
 
+    def test_balanced_does_not_upgrade_to_a_slower_pricier_group(self):
+        # 上游整体首 Token 都在目标值之上时（目标 10s、实测 30s+），“更贵就升级”
+        # 只会把请求刷到倍率更高、但并不更快的分组。
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.08", group_id="cheap"),
+            KeyEntry("slow", "slow", sort="0.30", group_id="slow"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 10
+
+        self.assertEqual(pool.pick().group_id, "cheap")
+        # 先给更贵的分组一个更慢的实测值，再让当前分组连续变慢
+        pool.record_ttft(pool.entries[1], 45.0)
+        pool.record_ttft(pool.entries[0], 30.0)
+        pool.record_ttft(pool.entries[0], 30.0)
+        pool._sticky_until = 0
+
+        self.assertEqual(pool.pick().group_id, "cheap")
+        self.assertEqual(pool._balanced_group, "cheap")
+
+    def test_balanced_upgrade_still_happens_when_pricier_group_is_faster(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.08", group_id="cheap"),
+            KeyEntry("fast", "fast", sort="0.30", group_id="fast"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 10
+
+        pool.pick()
+        pool.record_ttft(pool.entries[1], 4.0)
+        pool.record_ttft(pool.entries[0], 30.0)
+        pool.record_ttft(pool.entries[0], 30.0)
+        pool._sticky_until = 0
+
+        self.assertEqual(pool.pick().group_id, "fast")
+
+    def test_balanced_upgrades_to_unknown_pricier_group_for_sampling(self):
+        # 更贵的分组还没有样本时保留旧行为，否则永远无法建立基线
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.08", group_id="cheap"),
+            KeyEntry("unknown", "unknown", sort="0.30", group_id="unknown"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 10
+
+        pool.pick()
+        pool.record_ttft(pool.entries[0], 30.0)
+        pool.record_ttft(pool.entries[0], 30.0)
+        pool._sticky_until = 0
+
+        self.assertEqual(pool.pick().group_id, "unknown")
+
+    def test_cache_tier_tolerance_considers_adjacent_cost_tier(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("current", "current", sort="0.12", group_id="current"),
+            KeyEntry("warmer", "warmer", sort="0.13", group_id="warmer"),
+            KeyEntry("premium", "premium", sort="0.50", group_id="premium"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_cache_hit_rate = 0.8
+
+        view = pool.for_request("model-a", "v1/responses", "responses")
+        view._balanced_group = "current"
+        view._metrics["warmer"] = {
+            **view._metric("warmer"),
+            "cache_samples": 1, "cache_input_tokens": 1000,
+            "cache_cached_tokens": 950, "cache_last_ts": 1.0,
+        }
+        view._current = view.entries[0]
+        view.mark_success(view.entries[0])
+
+        self.assertEqual(view.pick().group_id, "warmer")
+
+    def test_cache_tier_tolerance_is_bounded_by_configured_window(self):
+        pool = KeyPool([])
+        pool.entries = [
+            KeyEntry("current", "current", sort="0.12", group_id="current"),
+            KeyEntry("toodear", "toodear", sort="0.50", group_id="toodear"),
+        ]
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_cache_hit_rate = 0.8
+
+        view = pool.for_request("model-a", "v1/responses", "responses")
+        view._balanced_group = "current"
+        view._metrics["toodear"] = {
+            **view._metric("toodear"),
+            "cache_samples": 1, "cache_input_tokens": 1000,
+            "cache_cached_tokens": 1000, "cache_last_ts": 1.0,
+        }
+        view._current = view.entries[0]
+        view.mark_success(view.entries[0])
+
+        self.assertEqual(view.pick().group_id, "current")
+
     def test_ttft_strategy_blends_fresh_external_prior_with_local_samples(self):
         pool = KeyPool([])
         pool.entries = [
@@ -900,7 +1004,7 @@ class KeyPoolStickyTests(unittest.TestCase):
         self.assertEqual(status[0]["current_group_name"], "Good")
         self.assertEqual(status[0]["cheaper_groups"][0]["group_name"], "Cheap")
 
-    def test_scheduler_status_keeps_latest_view_when_route_candidates_change(self):
+    def test_scheduler_status_follows_new_candidates_without_dropping_view(self):
         pool = KeyPool([])
         pool.entries = [
             KeyEntry("first", "first", group_id="first", group_name="First",
@@ -925,10 +1029,72 @@ class KeyPoolStickyTests(unittest.TestCase):
 
         status = pool.scheduler_status()
 
-        self.assertIsNot(first_view, latest_view)
+        # 候选集合变化时只换 entries，不再新建视图，避免调度状态被清零
+        self.assertIs(first_view, latest_view)
+        self.assertEqual([entry.group_name for entry in latest_view.entries], ["Second"])
         self.assertEqual(len(status), 1)
         self.assertEqual(status[0]["model"], "model-a")
         self.assertEqual(status[0]["current_group_name"], "Second")
+
+    def test_candidate_change_in_sync_keeps_ttft_learning(self):
+        # 号池每轮同步可能增删 Key，签名随之变化；首 Token 样本必须保留，
+        # 否则“兼顾三者”每次同步都退回纯倍率轮询。
+        pool = KeyPool([], "aihub")
+        pool.entries = [
+            KeyEntry("cheap", "cheap", sort="0.08", group_id="cheap", group_name="Cheap"),
+            KeyEntry("slow", "slow", sort="0.30", group_id="slow", group_name="Slow"),
+        ]
+        for entry in pool.entries:
+            entry.routing_capabilities = {"endpoint_families": ["responses"]}
+        pool.finalize_entries()
+        pool.strategy = "balanced"
+        pool.target_ttft_s = 10
+
+        view = pool.for_request("model-a", "v1/responses", "responses")
+        cheap = view.pick()
+        view.record_ttft(cheap, 33.0)
+        view.record_ttft(cheap, 33.0)
+        self.assertEqual(view._metric("cheap")["samples"], 2)
+
+        # 模拟下一轮同步新增一个 Key
+        pool.entries.append(
+            KeyEntry("extra", "extra", sort="0.5", group_id="extra", group_name="Extra")
+        )
+        pool.entries[-1].routing_capabilities = {"endpoint_families": ["responses"]}
+        pool.finalize_entries()
+        resumed = pool.for_request("model-a", "v1/responses", "responses")
+
+        self.assertIs(resumed, view)
+        self.assertEqual(len(resumed.entries), 3)
+        self.assertEqual(resumed._metric("cheap")["samples"], 2)
+        self.assertEqual(
+            resumed._group_metrics(resumed.entries)["cheap"]["ttft"], 33.0,
+        )
+        self.assertEqual(len(pool._views), 1)
+
+    def test_live_replacement_drops_removed_entries_but_keeps_view_metrics(self):
+        # 同步删 Key 时不能丢掉整个视图，否则该端点/模型的首 Token 学习归零
+        pools = {"https://upstream.test": KeyPool([("same", "same"), ("gone", "gone")])}
+        pool = pools["https://upstream.test"]
+        view = pool.for_request("model-a", "v1/responses", "responses")
+        view.record_ttft(pool.entries[0], 12.0)
+
+        replace_key_pool(
+            "https://upstream.test", KeyPool([("same", "same")]), pools,
+        )
+
+        live = pools["https://upstream.test"]
+        resumed = live.for_request("model-a", "v1/responses", "responses")
+        self.assertIs(resumed, view)
+        self.assertEqual([entry.key for entry in resumed.entries], ["same"])
+        self.assertEqual(resumed._metric("same")["samples"], 1)
+
+    def test_request_views_are_capped(self):
+        pool = KeyPool(["one"])
+        for index in range(_VIEW_LIMIT + 20):
+            pool.for_request(f"model-{index}", "v1/responses", "responses")
+
+        self.assertEqual(len(pool._views), _VIEW_LIMIT)
 
     def test_group_members_share_ttft_samples(self):
         pool = KeyPool([])
