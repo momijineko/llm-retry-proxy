@@ -1,6 +1,8 @@
 """管理页共享样式/脚本与运行时导航裁剪的回归测试。"""
 
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -122,6 +124,39 @@ class AdminNavMarkupTests(unittest.TestCase):
         self.assertIn('<a href="/requests">请求排查</a>', text)
 
 
+class AdminPaletteTests(unittest.TestCase):
+    """统计页图表色板在首次 readPalette() 之前必须已初始化。"""
+
+    def test_palette_literal_is_not_self_referential(self):
+        # 在 const 初始化表达式里读自身属性会触发 TDZ，整页脚本从此不再执行。
+        text = (ROOT / "stats.html").read_text(encoding="utf-8")
+        declaration = re.search(r"^const PAL=(\{.*\});$", text, re.M)
+        self.assertIsNotNone(declaration, "stats.html 缺少 PAL 声明")
+        self.assertNotIn("PAL.", declaration.group(1))
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js required for UI tests")
+    def test_palette_initializes_before_first_draw(self):
+        text = (ROOT / "stats.html").read_text(encoding="utf-8")
+        script = next(
+            block for block in re.findall(r"<script>(.*?)</script>", text, re.S)
+            if "const PAL=" in block
+        )
+        harness = """
+const getComputedStyle=()=>({getPropertyValue:()=>''});
+const document={documentElement:{getAttribute:()=>'light'},addEventListener:()=>{},getElementById:()=>({}),querySelectorAll:()=>[]};
+const window={addEventListener:()=>{}};
+const echarts={init:()=>({resize:()=>{}})};
+""" + script[:script.index("const sectionLinks=")] + """
+for (const key of ['muted','muted2','border','split','text2','card','tip'])
+  if (!PAL[key]) throw new Error('PAL.' + key + ' 未初始化');
+if (!Array.isArray(PALETTE) || !PALETTE.length) throw new Error('PALETTE 未初始化');
+console.log('palette ok');
+"""
+        result = subprocess.run(["node", "-"], input=harness, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("palette ok", result.stdout)
+
+
 class DockerPackagingTests(unittest.TestCase):
     def test_shared_assets_are_copied_into_image(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -130,12 +165,6 @@ class DockerPackagingTests(unittest.TestCase):
             self.assertIn(asset, copied, f"Dockerfile 缺少 COPY {asset}")
 
 
-import shutil
-import subprocess
-import unittest
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "tests" / "fixtures" / "admin_prefs_harness.js"
 
 
@@ -149,7 +178,6 @@ class AdminPrefsBehaviourTests(unittest.TestCase):
         result = subprocess.run(["node", "-"], input=script, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("prefs harness OK", result.stdout)
-
 
 
 if __name__ == "__main__":

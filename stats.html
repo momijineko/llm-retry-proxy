@@ -438,8 +438,9 @@ const charts={};
 const chartObservers={};
 function C(id){if(window.__echartsFailed)return null;if(!charts[id]){const el=document.getElementById(id);charts[id]=echarts.init(el);if(window.ResizeObserver){const observer=new ResizeObserver(()=>{if(charts[id])charts[id].resize()});observer.observe(el);chartObservers[id]=observer}}return charts[id]}
 window.addEventListener('resize',()=>Object.values(charts).forEach(c=>c&&c.resize()));
-// 图表取色跟随 CSS token，深色主题无需单独维护一套色板
-const PAL={muted:PAL.muted,muted2:PAL.muted2,border:PAL.border,split:PAL.split,text2:PAL.text2,card:'#fff',tip:PAL.tip};
+// 图表取色跟随 CSS token，深色主题无需单独维护一套色板。
+// 初值必须是字面量：在 const 初始化表达式里读 PAL.* 会命中暂时性死区（TDZ）。
+const PAL={muted:'#64748b',muted2:'#94a3b8',border:'#e4e9f0',split:'#e4e9f0',text2:'#334155',card:'#fff',tip:'rgba(15,23,42,.92)'};
 const COL={primary:'#2563eb',ok:'#059669',warn:'#d97706',danger:'#dc2626',blue:'#3b82f6',gray:PAL.muted2,purple:'#7c3aed',cyan:'#0891b2',pink:'#db2777'};
 const CATCOL={'2xx':'#059669','3xx':'#3b82f6','4xx':'#d97706','5xx':'#dc2626','exception':PAL.muted2};
 function readPalette(){
