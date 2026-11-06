@@ -163,7 +163,43 @@ def _new_responses_stream_state():
         "error_status": None,
         "cache_usage": None,
         "buffer": b"",
+        "output_items": {},
     }
+
+
+def _response_output_item_key(payload):
+    """返回 ``response.output_item.*`` 的 item 身份，其他事件返回 ``None``。"""
+    if not isinstance(payload, dict):
+        return None
+    kind = payload.get("type")
+    if kind not in ("response.output_item.added", "response.output_item.done"):
+        return None
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        return None
+    identity = item.get("id") or item.get("call_id")
+    if not isinstance(identity, str) or not identity:
+        return None
+    return kind, identity
+
+
+def _drop_duplicate_output_items(state, payload):
+    """判断该帧是否为同一个 item 的重复 ``output_item.added``/``done``。
+
+    部分上游会把同一次工具调用发两遍（网关重试，或 ``output_item.done`` 与
+    ``response.completed.output`` 重复回显）；客户端据此会创建两个工具输入
+    起点，报 ``Duplicate tool input start``。合规上游不会重复发送，因此这里
+    只拦截异常帧，正常响应字节不变。
+    """
+    key = _response_output_item_key(payload)
+    if key is None:
+        return False
+    kind, identity = key
+    seen = state["output_items"].setdefault(kind, set())
+    if identity in seen:
+        return True
+    seen.add(identity)
+    return False
 
 
 def _response_event_status(payload):
@@ -214,7 +250,12 @@ def _response_cache_usage(payload):
     return input_tokens, cached_tokens
 
 
-def _consume_responses_sse(state, chunk):
+def _consume_responses_sse(state, chunk, forward=None):
+    """解析 Responses SSE 帧；传入 ``forward`` 时同步输出过滤后的字节。
+
+    只有出现重复 ``output_item.added``/``done`` 时才会改变输出（丢帧），
+    其余情况原样拼接上游字节，保证正常响应的字节与长度不变。
+    """
     state["buffer"] = (state["buffer"] + chunk).replace(b"\r\n", b"\n")
     while b"\n\n" in state["buffer"]:
         frame, state["buffer"] = state["buffer"].split(b"\n\n", 1)
@@ -226,22 +267,31 @@ def _consume_responses_sse(state, chunk):
             elif line.startswith(b"data:"):
                 data_lines.append(line[5:].strip())
         if not data_lines:
+            if forward is not None:
+                forward(frame + b"\n\n")
             continue
         data = b"\n".join(data_lines)
         if data == b"[DONE]":
+            if forward is not None:
+                forward(frame + b"\n\n")
             continue
         try:
             payload = json.loads(data)
         except (TypeError, ValueError, UnicodeDecodeError):
+            payload = None
+        if forward is not None:
+            if isinstance(payload, dict) and _drop_duplicate_output_items(state, payload):
+                continue
+            forward(frame + b"\n\n")
+        if not isinstance(payload, dict):
             continue
-        event_type = payload.get("type") if isinstance(payload, dict) else ""
-        event_type = event_type or event_name
+        event_type = payload.get("type") or event_name
         if event_type in ("response.completed", "response.incomplete"):
             state["terminal"] = event_type
             if event_type == "response.completed":
                 state["cache_usage"] = _response_cache_usage(payload)
         elif event_type in ("error", "response.failed", "response.error") or (
-            isinstance(payload, dict) and isinstance(payload.get("error"), dict)
+            isinstance(payload.get("error"), dict)
         ):
             state["error"] = True
             state["error_status"] = state["error_status"] or _response_event_status(payload)
@@ -972,7 +1022,12 @@ def create_handlers(service, store, pool_sync=None):
             try:
                 async for chunk in response.aiter_bytes():
                     if responses_stream and chunk:
-                        _consume_responses_sse(stream_state, chunk)
+                        # 解析的同时把帧转发出去：重复的 output_item.added/done
+                        # 会被丢掉，避免客户端把同一次调用当成两个工具输入起点。
+                        forwarded = []
+                        _consume_responses_sse(
+                            stream_state, chunk, forwarded.append,
+                        )
                         if not is_sse:
                             lower = chunk[:8192].lower()
                             bad_gateway_body = bad_gateway_body or (
@@ -980,7 +1035,27 @@ def create_handlers(service, store, pool_sync=None):
                                     b"bad gateway" in lower or b"<html" in lower
                                 )
                             )
-                    elif cache_body is not None and chunk:
+                        if not ttft_recorded and response.status_code < 400:
+                            if is_sse:
+                                probe_buffer += chunk.replace(b"\r\n", b"\n")
+                                if len(probe_buffer) > 65536:
+                                    probe_buffer = probe_buffer[-65536:]
+                                found, probe_buffer = _sse_has_token(probe_buffer)
+                            else:
+                                found = True
+                            if found:
+                                ttft_recorded = True
+                                sent_at = getattr(result, "response_started_mono", 0.0)
+                                if (request_pool is not None and entry is not None
+                                        and sent_at > 0):
+                                    request_pool.record_ttft(
+                                        entry, time.monotonic() - sent_at,
+                                    )
+                        for piece in forwarded:
+                            usage_acc.feed_chunk(piece)
+                            yield piece
+                        continue
+                    if cache_body is not None and chunk:
                         if len(cache_body) + len(chunk) <= 1_048_576:
                             cache_body.extend(chunk)
                         else:

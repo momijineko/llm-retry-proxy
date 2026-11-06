@@ -199,6 +199,33 @@ class ReplayContextTests(unittest.TestCase):
                          [message, call, message, other])
         self.assertEqual(_merge_replay_items([message, call], []), [message, call])
 
+    def test_merge_dedupes_repeated_tool_call_inside_replays(self):
+        # 重放上下文里同一次调用只能出现一次：重复的 call 会让客户端把它当成
+        # 两个工具输入起点（Duplicate tool input start）。
+        call = {"type": "function_call", "call_id": "call_1",
+                "name": "ls", "arguments": "{}"}
+        newer = dict(call, arguments='{"path":"."}')
+
+        self.assertEqual(_merge_replay_items([call], [newer, dict(newer)]), [newer])
+        self.assertEqual(
+            _merge_replay_items([call, dict(call)], [dict(call)]), [call],
+        )
+        self.assertEqual(_merge_replay_items([], [call, dict(call)]), [call])
+
+    def test_dedup_context_keeps_each_tool_type_once(self):
+        for kind, output_kind in (
+            ("function_call", "function_call_output"),
+            ("custom_tool_call", "custom_tool_call_output"),
+            ("mcp_tool_call", "mcp_tool_call_output"),
+        ):
+            with self.subTest(kind=kind):
+                call = {"type": kind, "call_id": "call_1"}
+                output = {"type": output_kind, "call_id": "call_1", "output": "ok"}
+                self.assertEqual(
+                    _dedup_context([call, dict(call), output, dict(output)]),
+                    [call, output],
+                )
+
     def test_merge_does_not_hide_conflicts_inside_client_input(self):
         call = {"type": "function_call", "call_id": "call_1"}
         conflict = dict(call, name="other")
@@ -275,12 +302,28 @@ class HelperTests(unittest.TestCase):
         self.assertIsNone(_embedded_failure_status({"type": "response.completed"}))
 
     def test_dedup_context(self):
+        # 只重复 ``id``（无 call_id）的条目按内容去重；带 call_id 的工具调用
+        # 走 ``(type, call_id)`` 合并，不再靠 id。
         items = [
-            {"type": "function_call", "id": "c1"},
-            {"type": "function_call", "id": "c1"},
-            {"type": "function_call", "id": "c2"},
+            {"type": "reasoning", "id": "r1", "summary": []},
+            {"type": "reasoning", "id": "r1", "summary": []},
+            {"type": "reasoning", "id": "r2", "summary": []},
         ]
         self.assertEqual(len(_dedup_context(items)), 2)
+
+    def test_dedup_context_collapses_repeated_tool_call(self):
+        call = {"type": "function_call", "call_id": "c1", "name": "ls",
+                "arguments": "{}"}
+        # 同一次调用出现两次时应只保留一项，否则客户端会报
+        # Duplicate tool input start。
+        self.assertEqual(_dedup_context([call, dict(call)]), [call])
+
+    def test_dedup_context_keeps_call_and_output(self):
+        # 调用与结果共享 call_id，必须各保留一项
+        call = {"type": "function_call", "call_id": "c1", "name": "ls",
+                "arguments": "{}"}
+        output = {"type": "function_call_output", "call_id": "c1", "output": "ok"}
+        self.assertEqual(_dedup_context([call, output]), [call, output])
 
 
 if __name__ == "__main__":

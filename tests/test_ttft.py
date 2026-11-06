@@ -2,6 +2,7 @@ import unittest
 
 from retry_proxy.api import (
     _consume_responses_sse,
+    _drop_duplicate_output_items,
     _finish_responses_stream_state,
     _new_responses_stream_state,
     _response_cache_usage,
@@ -35,6 +36,50 @@ class TtftSseTests(unittest.TestCase):
         found, _ = _sse_has_token(b'data: {"token":"hello"}\n\n')
 
         self.assertTrue(found)
+
+
+class DuplicateOutputItemTests(unittest.TestCase):
+    """重复的 output_item.added 会让客户端报 Duplicate tool input start。"""
+
+    ADDED = (b'data: {"type":"response.output_item.added","item":'
+             b'{"type":"function_call","call_id":"call_1"}}\n\n')
+
+    def test_first_added_is_forwarded_and_duplicate_is_dropped(self):
+        state = _new_responses_stream_state()
+        forwarded = []
+
+        _consume_responses_sse(state, self.ADDED, forwarded.append)
+        _consume_responses_sse(state, self.ADDED, forwarded.append)
+
+        self.assertEqual(forwarded, [self.ADDED])
+
+    def test_done_is_not_confused_with_added(self):
+        state = _new_responses_stream_state()
+        forwarded = []
+        done = (b'data: {"type":"response.output_item.done","item":'
+                b'{"type":"function_call","call_id":"call_1"}}\n\n')
+
+        _consume_responses_sse(state, self.ADDED, forwarded.append)
+        _consume_responses_sse(state, done, forwarded.append)
+
+        self.assertEqual(forwarded, [self.ADDED, done])
+
+    def test_unrelated_frames_pass_through_unchanged(self):
+        state = _new_responses_stream_state()
+        chunk = (b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+                 b'data: [DONE]\n\n')
+        forwarded = []
+
+        _consume_responses_sse(state, chunk, forwarded.append)
+
+        self.assertEqual(b"".join(forwarded), chunk)
+
+    def test_duplicate_helper_ignores_non_output_item_events(self):
+        state = _new_responses_stream_state()
+        payload = {"type": "response.created", "response": {"id": "r1"}}
+
+        self.assertFalse(_drop_duplicate_output_items(state, payload))
+        self.assertFalse(_drop_duplicate_output_items(state, payload))
 
 
 class ResponsesStreamStateTests(unittest.TestCase):

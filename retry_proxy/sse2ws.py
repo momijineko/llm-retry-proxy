@@ -128,18 +128,65 @@ def _normalize_replay_item(item):
     return out
 
 
+def _tool_item_key(item):
+    """工具调用 item 的身份；非工具调用或缺少标识时返回 ``None``。
+
+    调用与结果共享 ``call_id``，所以必须连同 ``type`` 一起作为键，否则
+    ``function_call`` 会把同名的 ``function_call_output`` 吞掉。
+    """
+    if not isinstance(item, dict):
+        return None
+    kind = item.get("type")
+    if kind not in TOOL_CALL_CONTEXT_TYPES | TOOL_CALL_OUTPUT_TYPES:
+        return None
+    call_id = item.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        return None
+    return kind, call_id
+
+
+def _dedupe_identical_tool_items(items) -> list:
+    """去掉完全相同的重复工具调用，保留同 call_id 但内容不同的条目。
+
+    上游常把同一次调用发两遍（``output_item.done`` 与
+    ``response.completed.output``），重复 call 到了客户端会被当成两个工具输入
+    起点，报 ``Duplicate tool input start``。但客户端自己传入的冲突内容
+    （同 ``call_id`` 不同参数）不属于重复，必须原样透传、交给上游报错。
+    """
+    seen = set()
+    out = []
+    for item in items:
+        key = _tool_item_key(item)
+        if key is not None:
+            key = (key, _canonical(item))
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(item)
+    return out
+
+
 def _dedup_context(items) -> list:
+    """去重上游收集到的上下文 item。
+
+    工具调用按 ``(type, call_id)`` 去重：同一次调用的 ``output_item.done`` 与
+    ``response.completed.output`` 各带一份，重放给上游就会变成两次工具输入
+    起点，客户端报 ``Duplicate tool input start``。其它 item（reasoning 等）
+    按 ``id`` 或完整内容去重，保证同一份推理段不重复转发。
+    """
     seen = set()
     out = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        # 去重 key 取自已归一化前的 item，保留 id/call_id 用于区分。
-        key = item.get("call_id") or item.get("id") or _canonical(item)
+        item = _normalize_replay_item(item)
+        key = _tool_item_key(item)
+        if key is None:
+            key = ("item", item.get("id") or _canonical(item))
         if key in seen:
             continue
         seen.add(key)
-        out.append(_normalize_replay_item(item))
+        out.append(item)
     return out
 
 
@@ -147,31 +194,24 @@ def _merge_replay_items(previous, current) -> list:
     previous = [_normalize_replay_item(item) for item in previous]
     current = [_normalize_replay_item(item) for item in current]
     if _items_have_prefix(current, previous):
-        return current
+        # 客户端已给出完整历史：不再拼接，但完全相同的重复调用仍需去掉，
+        # 否则一轮内出现两个同 id 的工具输入起点。
+        return _dedupe_identical_tool_items(current)
 
-    def tool_key(item):
-        if not isinstance(item, dict):
-            return None
-        kind = item.get("type")
-        if kind not in TOOL_CALL_CONTEXT_TYPES | TOOL_CALL_OUTPUT_TYPES:
-            return None
-        call_id = item.get("call_id")
-        if not isinstance(call_id, str) or not call_id:
-            return None
-        # 调用与结果共享 call_id，但必须各保留一项。
-        return kind, call_id
-
-    positions = {tool_key(item): index for index, item in enumerate(previous)
-                 if tool_key(item) is not None}
+    positions = {}
+    for index, item in enumerate(previous):
+        key = _tool_item_key(item)
+        if key is not None:
+            positions[key] = index
     merged = list(previous)
     for item in current:
-        key = tool_key(item)
-        if key in positions:
+        key = _tool_item_key(item)
+        if key is not None and key in positions:
             # 仅消除缓存与本轮的重叠；本轮版本优先，位置保持不变。
             merged[positions.pop(key)] = item
         else:
             merged.append(item)
-    return merged
+    return _dedupe_identical_tool_items(merged)
 
 
 def _build_error_event(status, message, error_type="server_error") -> str:
