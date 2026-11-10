@@ -91,10 +91,26 @@ class FakeAIHubClient:
         self.deleted = []
         self.created = []
         self.post_errors = {}
+        self.hall_status = 200
+        self.hall_headers = []
 
     async def get(self, url, params=None, headers=None, timeout=None):
         if url.endswith("/api/v2/public/providers"):
+            self.hall_headers.append(dict(headers or {}))
+            if self.hall_status != 200:
+                return httpx.Response(
+                    self.hall_status, json={"code": "HALL_AUTH_REQUIRED",
+                                            "message": "Log in or provide a "
+                                                       "read-only Hall API key"},
+                    request=httpx.Request("GET", url),
+                )
             return hall_response(self.hall)
+        if url.endswith("/api/v1/public/providers"):
+            return httpx.Response(
+                410, json={"code": 410,
+                          "message": "Provider Hall V1 has been retired"},
+                request=httpx.Request("GET", url),
+            )
         if url.endswith("/api/v1/groups/available"):
             return api_response(self.groups)
         if url.endswith("/api/v1/groups/rates"):
@@ -113,6 +129,10 @@ class FakeAIHubClient:
         return api_response({})
 
     async def post(self, url, json=None, headers=None, timeout=None):
+        if url.endswith("/api/v1/auth/refresh"):
+            self.refreshes = getattr(self, "refreshes", 0) + 1
+            return api_response({"access_token": "access-2",
+                                 "refresh_token": "refresh-2"})
         if not url.endswith("/api/v1/keys"):
             raise AssertionError(url)
         group_id = json["group_id"]
@@ -342,6 +362,62 @@ class AIHubAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.deleted, ["11"])
         self.assertEqual([entry["group_id"] for entry in entries], [2])
+
+    async def test_fetch_sends_hall_request_with_access_token(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1)], keys=[key(11, 1)], hall=[hall_item(1)],
+        )
+
+        await adapter.fetch(client, source(), session())
+
+        # 大厅接口要求登录态，不能再用匿名请求
+        self.assertEqual(client.hall_headers[0].get("Authorization"),
+                         "Bearer access-1")
+
+    async def test_fetch_reports_hall_auth_failure_with_hint(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1)], keys=[key(11, 1)], hall=[hall_item(1)],
+        )
+        client.hall_status = 401
+
+        with self.assertRaises(PoolSyncError) as raised:
+            await adapter.fetch(client, source(), session())
+
+        message = str(raised.exception)
+        self.assertIn("重新连接", message)
+        # 401 是明确答复，不应因旧路径的 410 而掩盖
+        self.assertIn("401", message)
+        self.assertEqual(client.deleted, [])
+
+    async def test_fetch_refreshes_token_once_when_hall_rejects_it(self):
+        adapter = AIHubAdapter()
+        client = FakeAIHubClient(
+            groups=[group(1)], keys=[key(11, 1)], hall=[hall_item(1)],
+        )
+        calls = []
+        original_get = client.get
+
+        async def get(url, params=None, headers=None, timeout=None):
+            if url.endswith("/api/v2/public/providers"):
+                calls.append(dict(headers or {}))
+                if len(calls) == 1:
+                    return httpx.Response(
+                        401, json={"code": "INVALID_TOKEN", "message": "Invalid token"},
+                        request=httpx.Request("GET", url),
+                    )
+            return await original_get(url, params, headers, timeout)
+
+        client.get = get
+        src = source()
+
+        session_after, entries = await adapter.fetch(client, src, session())
+
+        self.assertEqual([entry["group_id"] for entry in entries], [1])
+        self.assertEqual(client.refreshes, 1)
+        self.assertEqual(calls[-1].get("Authorization"), "Bearer access-2")
+        self.assertEqual(session_after["access_token"], "access-2")
 
     # ------------------------------------------------------------ 能力合并
 

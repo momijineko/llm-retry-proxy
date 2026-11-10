@@ -1,9 +1,12 @@
 """AIHub（aihub.top）二次开发版 Sub2API 适配器。
 
-AIHub 的供应商大厅由公开接口 ``/api/v2/public/providers`` 提供分组可售状态、
+AIHub 的供应商大厅由 ``/api/v2/public/providers`` 提供分组可售状态、
 模型检测结果、按模型的降智健康度以及真实的缓存/成本指标；而
-``/api/v1/groups/available`` 只返回站点内全部 active 分组。因此本适配器在
-Sub2API 的标准流程之外多做一层判断：
+``/api/v1/groups/available`` 只返回站点内全部 active 分组。大厅接口现已要求
+登录态（匿名请求返回 ``401 HALL_AUTH_REQUIRED``，旧路径
+``/api/v1/public/providers`` 固定返回 410），因此适配器复用号池自身的
+access token 调用它，401 时刷新一次令牌后重试。本适配器在 Sub2API 的标准
+流程之外多做一层判断：
 
 1. **分组筛选**：只有大厅快照中可见、且模型检测状态为 ``passed`` 的分组才参与
    号池；``suspected``、``not_tested``、检测失败以及大厅未收录（已下线、改为
@@ -54,8 +57,11 @@ DEFAULT_CACHE_DISCOUNT = 0.9
 DEFAULT_REFERENCE_CACHE_HIT_RATE = 0.7542126
 
 PROVIDERS_PATH = "/api/v2/public/providers"
-# 旧版大厅接口会返回 410，仅作为路径兼容的兜底。
+# 旧版大厅接口已被上游下线（固定返回 410 “Provider Hall V1 has been
+# retired”），只在新路径确认不存在时探测一次，避免把 410 当成真实错误。
 PROVIDERS_LEGACY_PATH = "/api/v1/public/providers"
+# 仅这些状态码说明“路径不存在”，值得回退到旧路径；401/410 等是明确答复。
+PROVIDERS_PATH_MISSING_STATUSES = frozenset({404, 405})
 
 # 同步时自动建 Key 的每轮上限。一次同步会持有号池锁，无上限地补齐 272 个
 # 分组会让一次同步持续十几分钟；按有效倍率从低到高每轮补这么多，剩余留待
@@ -231,6 +237,40 @@ def stage_disabled_families(entry):
     return disabled
 
 
+def _hall_error_message(response):
+    """把大厅接口的错误响应翻译成可执行的提示。
+
+    上游对匿名请求返回 ``401 HALL_AUTH_REQUIRED``、对失效令牌返回
+    ``401 INVALID_TOKEN``，两者处理方式不同（重新连接 / 重新登录），不能都
+    折叠成一句 “HTTP 401”。
+    """
+    status = response.status_code
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        payload = None
+    code = message = ""
+    if isinstance(payload, dict):
+        code = str(payload.get("code") or "").strip()
+        message = str(payload.get("message") or "").strip()
+    # 部分错误把状态码本身放在 ``code`` 里（如 ``{"code": 410}``），不要重复。
+    suffix = f" {code}" if code and code != str(status) else ""
+    if status == 401:
+        if code == "HALL_AUTH_REQUIRED":
+            hint = "大厅接口要求登录态或只读 Hall API Key，请断开后重新连接"
+        elif code == "INVALID_TOKEN":
+            hint = "登录令牌已失效，请断开后重新连接"
+        else:
+            hint = "大厅接口拒绝了当前凭据，请断开后重新连接"
+        return f"{hint} (HTTP 401{suffix})"
+    if status == 410:
+        return f"大厅接口已下线 (HTTP 410{suffix})"
+    detail = f"HTTP {status}{suffix}"
+    if message:
+        detail += f": {message}"
+    return f"供应商大厅接口请求失败 ({detail})"
+
+
 def _hall_items(payload):
     if isinstance(payload, list):
         items = payload
@@ -256,35 +296,49 @@ class AIHubAdapter(Sub2APIAdapter):
     capabilities = ["group_catalog", "create_keys", "delete_keys", "hall_availability",
                     "auto_create_keys"]
 
-    async def _fetch_hall(self, client, source):
+    async def _fetch_hall(self, client, source, session, retry=True):
+        """读取大厅条目，返回 (session, items)。
+
+        大厅接口现在要求登录态（匿名请求返回 ``401 HALL_AUTH_REQUIRED``），
+        因此必须带上本适配器已登录的 access token；401 时刷新一次令牌后重试。
+        只有新路径明确不存在（404/405）才探测已下线的旧路径，否则旧路径的
+        410 会覆盖掉真正的鉴权错误。
+        """
         base_url = source["base_url"].rstrip("/")
+        headers = self._headers(session.get("access_token"))
         last_error = None
         for path in (PROVIDERS_PATH, PROVIDERS_LEGACY_PATH):
             try:
                 response = await request_with_retry(
-                    client, "GET", base_url + path,
-                    headers={"Accept": "application/json"}, timeout=30,
+                    client, "GET", base_url + path, headers=headers, timeout=30,
                 )
             except Exception as exc:
+                # 新路径的传输错误不能再回退旧路径：旧路径固定 410，会掩盖真实原因。
                 last_error = exc
-                continue
+                break
+            if response.status_code == 401 and retry and session.get("refresh_token"):
+                session["access_token"] = ""
+                session = await self._refresh(client, source, session)
+                return await self._fetch_hall(client, source, session, retry=False)
             if response.status_code >= 400:
-                last_error = PoolSyncError(
-                    f"供应商大厅接口请求失败 (HTTP {response.status_code})"
-                )
+                last_error = PoolSyncError(_hall_error_message(response))
+                if response.status_code not in PROVIDERS_PATH_MISSING_STATUSES:
+                    break
                 continue
             try:
-                return _hall_items(_unwrap(response))
+                return session, _hall_items(_unwrap(response))
             except PoolSyncError as exc:
+                # 已拿到 200 但格式不认识，回退已下线的旧路径只会把错误盖成 410。
                 last_error = exc
+                break
         raise PoolSyncError(f"读取供应商大厅失败: {last_error}")
 
-    async def hall_state(self, client, source):
+    async def hall_state(self, client, source, session):
         """读取大厅并按分组 ID 归一化；读取失败时回退到上次成功快照。"""
         # 旧版本曾把原始条目写入状态文件（单轮约 6MB），这里顺带清除遗留字段。
         source.pop("hall_items", None)
         try:
-            items = await self._fetch_hall(client, source)
+            session, items = await self._fetch_hall(client, source, session)
         except Exception as exc:
             cached = source.get("hall_groups")
             if not isinstance(cached, dict) or not cached:
@@ -293,7 +347,7 @@ class AIHubAdapter(Sub2APIAdapter):
                 f"AIHub 供应商大厅读取失败，继续使用上次快照: "
                 f"upstream={source['base_url']} error={exc}"
             )
-            return cached
+            return session, cached
         groups = {}
         for item in items:
             entry = hall_entry(item)
@@ -304,7 +358,7 @@ class AIHubAdapter(Sub2APIAdapter):
             groups[str(group_id)] = entry
         source["hall_groups"] = groups
         source["hall_synced_at"] = time.time()
-        return groups
+        return session, groups
 
     # ---------------------------------------------------------------- 同步
 
@@ -335,7 +389,7 @@ class AIHubAdapter(Sub2APIAdapter):
         session, keys = await self._fetch_all_keys(client, source, session)
         session, groups = await self._get(client, source, session, "/api/v1/groups/available")
         session, rates = await self._get(client, source, session, "/api/v1/groups/rates")
-        hall = await self.hall_state(client, source)
+        session, hall = await self.hall_state(client, source, session)
         groups_by_id = {
             str(group.get("id")): group for group in (groups or []) if isinstance(group, dict)
         }
@@ -642,7 +696,7 @@ class AIHubAdapter(Sub2APIAdapter):
         session, keys = await self._fetch_all_keys(client, source, session)
         session, groups = await self._get(client, source, session, "/api/v1/groups/available")
         session, rates = await self._get(client, source, session, "/api/v1/groups/rates")
-        hall = await self.hall_state(client, source)
+        session, hall = await self.hall_state(client, source, session)
         rates = {str(key): value for key, value in (rates or {}).items()}
         counts = {}
         active_counts = {}

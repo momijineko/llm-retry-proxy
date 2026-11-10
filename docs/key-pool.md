@@ -131,7 +131,9 @@ Key 与在线同步得到的 Key 使用同一状态文件及加密策略：配�
 
 `sub2api` 适配器使用邮箱密码完成首次登录，随后仅保存刷新令牌，密码不会落盘。它同步完整 Key、Key 名称、分组名称、启用状态、默认倍率及用户专属倍率。已有 Key 的 `models`、`paths` 规则和运行时熔断状态会在热更新时保留。
 
-`aihub` 适配器是 `sub2api` 的专用分支，用于 [AIHub](https://aihub.top) 及其二次开发版本。AIHub 的 `/api/v1/groups/available` 只返回站点内全部 active 分组，无法反映供应商大厅的实际状态，因此适配器额外读取公开的大厅接口 `/api/v2/public/providers`（旧路径 `/api/v1/public/providers` 仅作兜底），按分组 ID 与同步到的 Key 对齐后据此筛选、屏蔽和排序。它不读取也不要求配置外部数据源。
+`aihub` 适配器是 `sub2api` 的专用分支，用于 [AIHub](https://aihub.top) 及其二次开发版本。AIHub 的 `/api/v1/groups/available` 只返回站点内全部 active 分组，无法反映供应商大厅的实际状态，因此适配器额外读取大厅接口 `/api/v2/public/providers`，按分组 ID 与同步到的 Key 对齐后据此筛选、屏蔽和排序。它不读取也不要求配置外部数据源。
+
+大厅接口要求登录态：匿名请求返回 `401 HALL_AUTH_REQUIRED`，令牌失效返回 `401 INVALID_TOKEN`。适配器复用号池登录得到的 access token 调用它，遇到 401 时刷新一次令牌后重试；只有新路径明确返回 404/405 时才探测已下线的旧路径 `/api/v1/public/providers`（该路径固定返回 410），因此鉴权失败不会再被旧路径的 410 掩盖。大厅读取报错会带上可执行的提示（要求重新连接 / 令牌失效），失败时按下一节规则回退快照。
 
 #### 参与判定：只认“检测通过”
 
@@ -224,7 +226,7 @@ AIHub 对建 Key 接口限流较严。适配器在遇到 `429`/`rate limit` 时�
 
 例如 `aihub.top` 的公开接口可以添加查询参数 `samples=100`，并将记录列表映射为 `data.items`、唯一标识映射为 `group_id`、延迟值映射为 `avg_ttft_ms`，延迟单位选择毫秒；其它返回字段按需配置。该示例只是一个映射实例，不是页面内置的数据格式。
 
-AIHub 供应商大厅可使用以下配置：URL 填 `https://aihub.top/api/v2/public/providers`，查询参数填 `timezone=Asia/Shanghai`；记录列表 `data.items`，唯一 ID `group_id`，名称 `code`，分类 `platform`，倍率 `rate_multiplier`，TTFT `avg_ttft_ms`（毫秒），采集时间 `model_detection.detected_at`，检测状态 `model_detection.status`。保存并完成分组映射后，只有状态未知或检测通过的分组保持启用；`suspected`、`insufficient_evidence`、`detection_failed` 和 `not_configured` 会自动禁用。API 返回的检测状态是当前快照，数据源刷新失败时代理继续使用上一次成功快照。
+AIHub 供应商大厅可使用以下配置：URL 填 `https://aihub.top/api/v2/public/providers`，查询参数填 `timezone=Asia/Shanghai`；记录列表 `data.items`，唯一 ID `group_id`，名称 `code`，分类 `platform`，倍率 `rate_multiplier`，TTFT `avg_ttft_ms`（毫秒），采集时间 `model_detection.detected_at`，检测状态 `model_detection.status`。保存并完成分组映射后，只有状态未知或检测通过的分组保持启用；`suspected`、`insufficient_evidence`、`detection_failed` 和 `not_configured` 会自动禁用。API 返回的检测状态是当前快照，数据源刷新失败时代理继续使用上一次成功快照。注意该接口现已要求登录态，匿名请求返回 `401 HALL_AUTH_REQUIRED`；外部数据源默认不发送号池令牌，因此会持续保留上次快照。`aihub` 适配器已内置带登录态的读取与筛选逻辑，AIHub 号池无需再配置这个外部数据源。
 
 通用的“检测判断方式 → 按通过次数 / 总次数判断”使用通过率 `通过 / (通过 + 失败)`，可配置 `pass_path`、`fail_path`、`healthy_threshold`（默认 90%）、`warning_threshold`（默认 70%），`detection_mode` 为 `pass_ratio`。达到通过阈值输出 `pass`，达到警告阈值但未达到通过阈值输出 `degraded`，更低输出 `critical`，通过和失败均为零输出 `unknown`。仅通过和未知保持启用。可用“状态显示映射”自定义这四种状态的文案；不读取状态字段。次数必须为非负整数，缺失或格式损坏会使刷新失败并保留上次快照，不会当作未知放行。旧配置默认仍读取状态字段。
 
