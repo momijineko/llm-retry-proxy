@@ -85,6 +85,10 @@ class IPBlocklistMiddleware:
     几秒内打完，于是被误判为 URL 扫描并永久封禁。因此这里改用
     :meth:`_counted_path` 归一化：代理 API 路径与已知页面共用一个计数键，
     真正像扫描的路径（``/.env``、``/wp-admin`` 等）才逐个累计。
+
+    号池客户端还会对每个上游前缀各探测一遍监控端点（``/agent/api/status``、
+    ``/aihub/api/status`` …），这类路径按版本段/``api`` 段归一，避免前缀数
+    放大计数。
     """
     _MAX_TRACKED_CLIENTS = 10000
     _MAX_PERSISTED_BANS = 100000
@@ -133,6 +137,8 @@ class IPBlocklistMiddleware:
         "admin/login", "admin/logout", "admin/settings", "favicon.ico",
     })
     _VERSION_PREFIX = re.compile(r"^v\d+(?:beta\d*|alpha\d*)?/")
+    # 路径中标记“逻辑 API 起点”的段：其前的段都是路由前缀。
+    _API_SEGMENT = re.compile(r"^(?:v\d+(?:beta\d*|alpha\d*)?|api)$")
 
     @classmethod
     def _counted_path(cls, path):
@@ -148,13 +154,25 @@ class IPBlocklistMiddleware:
         if normalized.startswith("admin/assets/"):
             return None
         stripped = cls._VERSION_PREFIX.sub("", normalized)
+        segments = [segment for segment in stripped.split("/") if segment]
+        # 无路由前缀的 ``/v1/usage``、``/api/status`` 也要归一，否则与
+        # ``/<前缀>/v1/usage`` 落到不同计数键。
+        head_index = 0
+        if len(segments) > 1 and cls._API_SEGMENT.match(segments[0]):
+            head_index = 1
+        stripped = "/".join(segments[head_index:])
         for endpoint in cls._SHARED_ENDPOINTS:
             if stripped == endpoint or stripped.endswith("/" + endpoint):
                 return endpoint
         head = stripped.split("/", 1)[0]
         if head in cls._SHARED_ENDPOINTS:
             return head
-        return normalized
+        # 监控类端点（``/v1/usage``、``/api/status``、``/api/log/token``）在路由
+        # 前缀后带版本段或 ``api`` 段；保留前缀会按前缀数量放大计数。
+        for index, segment in enumerate(segments[head_index + 1:], head_index + 1):
+            if cls._API_SEGMENT.match(segment):
+                return "/".join(segments[index + 1:]) or segment
+        return stripped
 
     def _load_bans(self):
         if not self.state_file:

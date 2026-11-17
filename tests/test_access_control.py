@@ -297,9 +297,51 @@ class IPBlocklistMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         # 真正像扫描的未知路径保持原样，仍然逐个累计
         for path in ("/.env", "/wp-admin/x.php", "/scan/1"):
             self.assertEqual(IPBlocklistMiddleware._counted_path(path), path.strip("/"))
+        # 监控类端点去掉路由前缀与 api/vN 段，前缀数量不再放大计数
+        for path in ("/aihub/api/status", "/ocg/api/status", "/any/api/status"):
+            self.assertEqual(IPBlocklistMiddleware._counted_path(path), "status", path)
+        self.assertEqual(IPBlocklistMiddleware._counted_path("/api/status"), "status")
+        for path in ("/aihub/api/log/token", "/od/api/log/token"):
+            self.assertEqual(IPBlocklistMiddleware._counted_path(path), "log/token", path)
+        for path in ("/aihub/v1/usage", "/ocg/v1/usage", "/agent/v1/usage"):
+            self.assertEqual(IPBlocklistMiddleware._counted_path(path), "usage", path)
+        self.assertEqual(IPBlocklistMiddleware._counted_path("/v1/usage"), "usage")
+        self.assertEqual(
+            IPBlocklistMiddleware._counted_path("/od/api/usage/token/"), "usage/token",
+        )
+        self.assertEqual(
+            IPBlocklistMiddleware._counted_path("/api/usage/token/"), "usage/token",
+        )
         # 正常页面与静态资源完全不计数
         for path in ("/health", "/stats", "/key-pools", "/admin/assets/admin_ui.js"):
             self.assertIsNone(IPBlocklistMiddleware._counted_path(path), path)
+
+    async def test_client_monitor_probe_across_upstreams_is_not_banned(self):
+        # 号池客户端（如 CodexPlusPlus）会按前缀逐个探测监控端点，
+        # ``/<前缀>/api/status``、``/<前缀>/v1/usage`` 等曾在 10s 内凑够
+        # 20 个计数键，把正常客户端误判为 URL 扫描并封禁 1 小时。
+        calls = 0
+
+        async def application(scope, receive, send):
+            nonlocal calls
+            calls += 1
+
+        middleware = IPBlocklistMiddleware(
+            application, auto_ban_threshold=20, auto_ban_window=10,
+            auto_ban_duration=3600,
+        )
+        prefixes = ("agent", "aihub", "any", "ocg", "od")
+        paths = ("v1/usage", "v1/sub2api/billing", "api/log/token",
+                 "api/usage/token/", "api/status")
+
+        for prefix in prefixes:
+            for path in paths:
+                await middleware(
+                    _scope("203.0.113.23", path=f"/{prefix}/{path}"), None, None,
+                )
+
+        self.assertEqual(calls, len(prefixes) * len(paths))
+        self.assertEqual(middleware.active_bans(), {})
 
     async def test_pool_probe_across_upstreams_is_not_banned(self):
         # 号池探测会在一两秒内依次访问多个前缀的 /v1/models 与 billing，
